@@ -7,7 +7,8 @@ const PAGE = 200;      // server maximum lines per evidence request
 const MAX_PAGES = 50;  // bounds one evidence file at 10,000 lines
 const TABS = ['investigation', 'evidence', 'changes', 'checks', 'sql'];
 const state = {
-  incident: null, run: null, cases: [], runs: new Map(), views: new Map(),
+  // runs: the full run record shown for each case. history: server run summaries per case, newest first.
+  incident: null, run: null, cases: [], runs: new Map(), history: new Map(), views: new Map(),
   tab: 'investigation', busy: false, switching: null, version: 0,
   files: new Map(), ev: {name: 'events.jsonl', query: '', citedOnly: false, activeRef: null},
   selection: null, sheet: false, lastFocus: null, filter: '', changeQuery: '',
@@ -64,14 +65,46 @@ const purchase = (o) => o ? `${text(o.customer)} · ${text(o.sku)} × ${text(o.q
 const ordersById = () => new Map((state.incident?.orders || []).map(o => [o.id, o]));
 const isTyping = (el) => !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT');
 const isNarrow = () => typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 900px)').matches;
-// Same rule the server uses for its checkout_preserved count (workbench._review); proposal A replaces it.
-const isCheckout = (o) => (o.source_reference || '').startsWith('checkout-');
+const SUMMARY_FIELDS = ['id', 'incident_id', 'status', 'summary', 'mode', 'created_at'];
+const shortId = (id) => String(id).replace(/^run-/, '').slice(0, 8);
+const started = (iso) => { const d = iso ? new Date(iso) : null; return d && !Number.isNaN(d.getTime()) ? d.toLocaleTimeString([], {hour: 'numeric', minute: '2-digit', second: '2-digit', timeZoneName: 'short'}) : ''; };
+// Later purchases come from the server's review (checkout_order_ids); the UI applies no rule of its own.
+const laterIds = (review) => new Set(review?.checkout_order_ids || []);
 
 /* ---------- Case navigation ---------- */
 
+// A case's sidebar status is its newest run's last recorded state (not a fresh export check).
 function caseStatus(id) {
   if (state.switching === id) return ['Loading…', 'loading'];
-  return statusOf(state.runs.get(id));
+  return statusOf(state.history.get(id)?.[0] || state.runs.get(id));
+}
+
+async function refreshHistory(caseId) {
+  const value = await api(`/api/runs?incident=${encodeURIComponent(caseId)}`);
+  const runs = Array.isArray(value.runs) ? value.runs : [];
+  state.history.set(caseId, runs);
+  return runs;
+}
+
+// Keeps the sidebar in step with a run record the server just returned, without another request.
+function upsertHistory(run) {
+  if (!run?.id || !run.incident_id) return;
+  const list = state.history.get(run.incident_id);
+  if (!list) return;
+  const summary = Object.fromEntries(SUMMARY_FIELDS.filter(f => f in run).map(f => [f, run[f]]));
+  const index = list.findIndex(r => r.id === run.id);
+  if (index === -1) list.unshift(summary); else list[index] = {...list[index], ...summary};
+}
+
+async function loadRun(runId) {
+  const caseId = state.incident.id, version = state.version;
+  const run = await api(`/api/runs/${encodeURIComponent(runId)}`);
+  if (version !== state.version || state.incident?.id !== caseId) return;
+  state.runs.set(caseId, run);
+  upsertHistory(run);
+  Object.assign(state, {run, selection: null, sheet: false, filter: '', changeQuery: ''});
+  if (!run.review && ['changes', 'checks', 'sql'].includes(state.tab)) state.tab = 'investigation';
+  render();
 }
 
 function renderCases() {
@@ -83,15 +116,15 @@ function renderCases() {
   }).join('');
 }
 
-function renderRunCard() {
-  const card = $('#run-card'), run = state.run;
-  card.hidden = !run;
-  if (!run) { card.innerHTML = ''; return; }
-  const [label, tone] = statusOf(run), meta = state.runMeta.get(run.id) || {};
-  card.innerHTML = `<span class="side-label">Current run · this page</span>
-    <div class="run-id mono">${text(run.id)}</div>
-    <div class="case-status ${tone}">${text(label)}</div>
-    <dl>${meta.investigatedAt?`<dt>Investigated</dt><dd>${time(meta.investigatedAt)}</dd>`:''}${meta.rehearsedAt?`<dt>Rehearsed</dt><dd>${time(meta.rehearsedAt)}</dd>`:''}</dl>`;
+function renderRuns() {
+  const card = $('#run-card'), runs = state.history.get(state.incident?.id) || [], shown = state.run?.id;
+  card.hidden = !state.incident;
+  card.innerHTML = `<div class="side-label">Runs <span>${pad(runs.length)}</span></div>
+    ${runs.length ? `<ol class="run-list">${runs.map(r => {
+      const [label, tone] = statusOf(r), current = r.id === shown;
+      return `<li><button class="run-item ${current?'current':''}" data-run="${escape(r.id)}" aria-current="${current?'true':'false'}" title="${escape(r.id)} · started ${escape(r.created_at || '')}"><span class="case-status ${tone}">${text(label)}</span><span class="run-meta"><span class="mono">${text(shortId(r.id))}</span><time datetime="${escape(r.created_at || '')}">${text(started(r.created_at))}</time></span></button></li>`;
+    }).join('')}</ol>` : '<p class="run-empty">No runs yet in this server session.</p>'}
+    <p class="run-note">Last recorded status · this server session · newest first</p>`;
 }
 
 function parseHash() {
@@ -118,9 +151,20 @@ async function selectCase(identifier, tab = null) {
   notice(); renderCases();
   $('#content').setAttribute('aria-busy', 'true');
   try {
-    const incident = await api(`/api/incidents/${encodeURIComponent(identifier)}`);
+    const [incident] = await Promise.all([
+      api(`/api/incidents/${encodeURIComponent(identifier)}`),
+      refreshHistory(identifier).catch(error => { notice(`Run history unavailable: ${error.message}`); return []; }),
+    ]);
     if (version !== state.version) return;
-    const run = state.runs.get(identifier) || null, view = state.views.get(identifier);
+    let run = state.runs.get(identifier) || null;
+    // After a reload the page holds no runs: restore the newest one this server session recorded.
+    const newest = state.history.get(identifier)?.[0];
+    if (!run && newest) {
+      run = await api(`/api/runs/${encodeURIComponent(newest.id)}`);
+      if (version !== state.version) return;
+      state.runs.set(identifier, run);
+    }
+    const view = state.views.get(identifier);
     Object.assign(state, {
       incident, run, switching: null, sheet: false,
       tab: tab || view?.tab || (run?.review ? 'changes' : 'investigation'),
@@ -139,7 +183,7 @@ async function selectCase(identifier, tab = null) {
 function render() {
   if (!state.incident) return;
   renderCases();
-  renderRunCard();
+  renderRuns();
   renderHeader();
   renderTabs();
   renderPanel();
@@ -155,6 +199,8 @@ function renderHeader() {
   $('#incident-meta').innerHTML = `<span class="status ${tone}">${text(label)}</span>
     <span class="chip">${text(modeLabel(run?.mode || incident.mode))}</span>
     ${run?`<span class="chip mono" title="Run identifier">${text(run.id)}</span>`:''}
+    ${run?.created_at?`<span class="chip" title="${escape(run.created_at)}">Started ${text(started(run.created_at))}</span>`:''}
+    ${olderRunNote(run)}
     <span class="chip">SQLite</span><span class="chip">Read-only source</span><span class="chip">Copy-only rehearsal</span>
     <span class="chip quiet">Meta credits pending · no API calls</span>`;
   const investigate = (primary) => `<button class="${primary?'primary':'secondary'} ${busy?'busy':''}" data-action="investigate" ${busy?'disabled':''}>${busy?'Working…':run?'New offline investigation':'Start offline investigation'}</button>`;
@@ -163,6 +209,12 @@ function renderHeader() {
   else if (run.status === 'proposed') actions = `${investigate(false)}<button class="primary ${busy?'busy':''}" data-action="rehearse" ${busy?'disabled':''}>${busy?'Rehearsing on a copy…':'Rehearse on a disposable copy'}</button>`;
   else actions = investigate(false);
   $('#header-actions').innerHTML = `${actions}<span class="caption">Event-aware script · no model calls</span>`;
+}
+
+function olderRunNote(run) {
+  const newest = state.history.get(state.incident?.id)?.[0];
+  if (!run || !newest || newest.id === run.id) return '';
+  return `<span class="chip warn-chip">Older run</span><button class="link small" data-run="${escape(newest.id)}">Open newest run</button>`;
 }
 
 function renderTabs() {
@@ -449,7 +501,8 @@ function reviewSummary(run, review) {
 function diffView(review) {
   const skus = [...new Set(review.changes.map(c => c.before.sku))].sort();
   const stockChanged = review.stock.filter(p => p.after !== p.before);
-  const checkout = review.preserved_orders.filter(isCheckout), others = review.preserved_orders.filter(o => !isCheckout(o));
+  const later = laterIds(review);
+  const checkout = review.preserved_orders.filter(o => later.has(o.id)), others = review.preserved_orders.filter(o => !later.has(o.id));
   const byProduct = new Map();
   for (const change of review.changes) {
     const entry = byProduct.get(change.before.sku) || {orders: 0, units: 0};
@@ -470,7 +523,7 @@ function diffView(review) {
       const delta = p.after - p.before, entry = byProduct.get(p.sku);
       return [`<span class="sym ${delta?'mod':'same'}">${delta?'~':'='}</span>`,`${text(p.name)} <span class="mono faint">${text(p.sku)}</span>`,`<span class="before num">${text(p.before)}</span> → <span class="after num">${text(p.after)}</span>`,`<span class="${delta>0?'positive':delta<0?'cancelled':''} num">${delta>0?'+':''}${text(delta)}</span>`,entry?`${entry.orders} orders · +${entry.units} units`:'—'];
     }),review.stock.map(p=>`class="sel" tabindex="0" data-key="product:${escape(p.sku)}" aria-selected="false"`))}
-    <div class="group-head"><h4>preserved work</h4><span class="caption">Checkout references identify the supplied fixture’s later purchases. ${text(review.checkout_preserved)} of ${text(review.checkout_total)} remain unchanged.</span></div>
+    <div class="group-head"><h4>preserved work</h4><span class="caption">Later purchases as identified by the server for this fixture (<span class="mono">checkout_order_ids</span>). At rehearsal, ${text(review.checkout_preserved)} of ${text(review.checkout_total)} remained unchanged.</span></div>
     ${orderTable(checkout)}
     <details class="fold"><summary>Other untouched records · ${others.length}</summary>${orderTable(others)}</details>
   </section>`;
@@ -512,7 +565,7 @@ function checksTab() {
   const passed = review.checks.filter(c => c.passed).length, meta = state.runMeta.get(run.id) || {}, exp = exportStatus(run);
   return `<div class="section-heading"><h2>Independent operational checks</h2>${badge(`${passed} / ${review.checks.length} passed`,!review.passed)}</div>
     <div class="status-cards">
-      <div class="status-card ${review.passed?'ok':'danger'}"><span class="eyebrow">At rehearsal</span><strong>${passed} / ${review.checks.length} checks passed</strong><span class="caption">Observed on the rehearsal snapshot${meta.rehearsedAt?` · received ${time(meta.rehearsedAt)}`:''}</span></div>
+      <div class="status-card ${review.passed?'ok':'danger'}"><span class="eyebrow">At rehearsal</span><strong>${passed} / ${review.checks.length} checks passed</strong><span class="caption">Observed on the rehearsal snapshot${meta.rehearsedAt?` · result received ${time(meta.rehearsedAt)} on this page`:''}</span></div>
       <div class="status-card ${exp.tone}"><span class="eyebrow">Current export status</span><strong>${text(exp.label)}</strong><span class="caption">${text(exp.detail)}</span></div>
     </div>
     <p class="small muted">These checks describe the rehearsal snapshot. Export status is shown above and rechecked on every download.</p>
@@ -601,7 +654,7 @@ function orderContext(id, focusRef) {
   let html = `<h2 class="mono ctx-title">${text(id)}</h2><p class="small muted">${purchase(record)}</p>`;
   if (change) html += `<div class="ctx-status">${badge('Changed on the copy', true)}<span class="caption">Engine before/after at rehearsal</span></div>${fieldTable(change.before, change.after)}`;
   else if (planned) html += `<div class="ctx-status">${badge('Proposed cancellation')}<span class="caption">Not rehearsed yet · current source values</span></div>${fieldTable(record)}`;
-  else if (review) html += `<div class="ctx-status">${badge('Unchanged at rehearsal', 'ok')}</div>${fieldTable(record)}`;
+  else if (review) html += `<div class="ctx-status">${badge('Unchanged at rehearsal', 'ok')}${laterIds(review).has(id)?badge('Later purchase'):''}</div>${fieldTable(record)}`;
   else html += `<div class="ctx-status">${badge('Source record')}</div>${fieldTable(record)}`;
   const link = change ? {refs: change.evidence_refs, keep: change.duplicate_of} : planned ? {refs: planned.evidence_refs, keep: planned.duplicate_of} : null;
   if (link) {
@@ -706,7 +759,8 @@ async function act(action) {
     const path = action === 'investigate' ? `/api/incidents/${id}/investigate` : `/api/runs/${state.run.id}/rehearse`;
     const run = await api(path, true);
     state.runs.set(id, run);
-    state.runMeta.set(run.id, action === 'investigate' ? {investigatedAt: new Date()} : {...(state.runMeta.get(run.id) || {}), rehearsedAt: new Date()});
+    upsertHistory(run);
+    if (action === 'rehearse') state.runMeta.set(run.id, {rehearsedAt: new Date()});
     if (state.incident.id === id) {
       Object.assign(state, {run, filter: '', changeQuery: ''});
       if (action === 'investigate') Object.assign(state, {selection: null, tab: 'investigation'});
@@ -728,6 +782,7 @@ async function fetchArtifact(name) {
     const updated = await api(`/api/runs/${runId}`);
     state.exportChecks.set(runId, {at: new Date(), ok: false, artifact: name, message: value.error || 'Download blocked.'});
     if (state.runs.get(incidentId)?.id === runId) state.runs.set(incidentId, updated);
+    upsertHistory(updated);
     if (state.incident.id === incidentId && state.run?.id === runId) { state.run = updated; render(); }
     else renderCases(); // another case is on screen: refresh only the sidebar status
     throw new Error(`Download for ${incidentTitle}: ${value.error || 'Download blocked.'}`);
@@ -764,6 +819,7 @@ document.addEventListener('click', event => {
     const hash = `#case=${d.case}`;
     if (location.hash.startsWith(`${hash}&`) || location.hash === hash) task = selectCase(d.case); else location.hash = hash.slice(1);
   }
+  if (d.run && d.run !== state.run?.id && !state.busy) task = loadRun(d.run);
   if (d.tab) setTab(d.tab);
   if (d.action) task = act(d.action);
   if (d.download) task = download(d.download);
@@ -787,9 +843,10 @@ document.addEventListener('keydown', event => {
     setTab(TABS[next], true);
     return;
   }
-  if (t.closest?.('#cases') && ['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(key)) {
+  const list = t.closest?.('#cases, #run-card');
+  if (list && ['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(key)) {
     event.preventDefault();
-    const items = [...document.querySelectorAll('#cases .case')], index = items.indexOf(t.closest('.case'));
+    const items = [...list.querySelectorAll('.case, .run-item')], index = items.indexOf(t.closest('.case, .run-item'));
     const next = key === 'Home' ? 0 : key === 'End' ? items.length - 1 : Math.min(items.length - 1, Math.max(0, index + (key === 'ArrowDown' ? 1 : -1)));
     items[next]?.focus();
     return;
@@ -841,6 +898,8 @@ window.addEventListener('hashchange', () => {
 
 api('/api/incidents').then(async data => {
   state.cases = data.incidents;
+  // Restore each case's last recorded status from this server session before showing the sidebar.
+  await Promise.all(state.cases.map(c => refreshHistory(c.id).catch(() => null)));
   const target = parseHash();
   await selectCase(target?.id || data.incidents[0].id, target?.tab || null);
 }).catch(error => notice(error.message));
