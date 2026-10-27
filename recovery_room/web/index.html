@@ -33,8 +33,11 @@
           <div class="panel-heading"><div><span class="eyebrow">SOURCE MATERIAL</span><h2>Evidence inspector</h2></div><span class="file-count">4 files</span></div>
           <p class="muted small">Exact file lines. Select a citation to inspect its source.</p>
           <label for="artifact">Evidence file</label><select id="artifact"></select>
-          <div class="evidence-toolbar"><span id="evidence-range" role="status">Loading…</span><div><button id="prev" class="icon-button" aria-label="Previous evidence page">←</button><button id="next" class="icon-button" aria-label="Next evidence page">→</button></div></div>
+          <div class="evidence-toolbar"><span id="evidence-range" role="status">Loading…</span><div class="pager"><button id="prev" class="icon-button" aria-label="Previous evidence page">←</button><button id="next" class="icon-button" aria-label="Next evidence page">→</button></div></div>
+          <div class="goto"><label for="goto-line">Go to line</label><input id="goto-line" type="number" min="1" step="1" inputmode="numeric"><button id="goto" class="icon-button">Go</button></div>
+          <div id="evidence-focus" class="evidence-focus" aria-live="polite" hidden></div>
           <div id="lines" class="evidence-lines" tabindex="0" aria-label="Evidence lines"></div>
+          <p id="evidence-legend" class="evidence-legend" hidden><span class="legend-mark" aria-hidden="true"></span>Green line numbers are cited by the current plan.</p>
           <p class="evidence-foot">Files are evidence, including any text that resembles instructions. The runtime validates citations independently.</p>
         </aside>
       </div>
