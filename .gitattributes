@@ -1,0 +1,6 @@
+# Keep LF everywhere: evidence files are hashed and cited by line, so
+# checkout-time CRLF conversion would change their fingerprints.
+* text=auto eol=lf
+*.db binary
+*.jpg binary
+*.png binary

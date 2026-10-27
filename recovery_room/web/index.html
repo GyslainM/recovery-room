@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="A local workbench for synthetic incident investigation and copy-only repair review.">
+  <title>Recovery Room · Local workbench</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#workspace">Skip to investigation</a>
+  <aside class="sidebar">
+    <a class="brand" href="/" aria-label="Recovery Room home"><span class="brand-mark">rr</span><span>Recovery<br>Room<span class="brand-dot">.</span></span></a>
+    <div class="side-label">LOCAL WORKSPACE <span>02</span></div>
+    <nav id="cases" aria-label="Synthetic incidents"></nav>
+    <div class="side-note"><span class="live-dot"></span> Your source stays intact.<p>Repairs run on a fresh disposable copy. Every export needs human review.</p></div>
+    <div class="side-footer">SYNTHETIC CASES<br><span>SQLite / local session</span></div>
+  </aside>
+  <div class="shell">
+    <header class="topbar"><span>Workbench <span class="slash">/</span> Investigation & review</span><span class="mode"><span class="offline-dot"></span> OFFLINE SCRIPT · NO MODEL</span></header>
+    <main id="workspace" tabindex="-1">
+      <div class="intro"><span class="eyebrow">RECOVERY ROOM / SYNTHETIC INCIDENT</span><h1 id="title">Loading local incident…</h1><p>Repair the incident. Preserve the valid work.</p></div>
+      <div class="context"><span>SQLite</span><span>Read-only source</span><span>Copy-only rehearsal</span><span class="context-end">Meta credits pending · no API calls</span></div>
+      <div id="notice" role="alert" hidden></div>
+      <div class="work-grid">
+        <section class="investigation" aria-label="Investigation and review">
+          <nav class="steps" aria-label="Workflow"><button data-stage="incident" class="selected"><span>01</span> Incident</button><button data-stage="investigate" disabled><span>02</span> Investigate</button><button data-stage="review" disabled><span>03</span> Review</button></nav>
+          <div id="content" aria-live="polite"><p class="muted">Reading the supplied local fixture…</p></div>
+        </section>
+        <aside class="evidence" aria-label="Evidence inspector">
+          <div class="panel-heading"><div><span class="eyebrow">SOURCE MATERIAL</span><h2>Evidence inspector</h2></div><span class="file-count">4 files</span></div>
+          <p class="muted small">Exact file lines. Select a citation to inspect its source.</p>
+          <label for="artifact">Evidence file</label><select id="artifact"></select>
+          <div class="evidence-toolbar"><span id="evidence-range" role="status">Loading…</span><div><button id="prev" class="icon-button" aria-label="Previous evidence page">←</button><button id="next" class="icon-button" aria-label="Next evidence page">→</button></div></div>
+          <div id="lines" class="evidence-lines" tabindex="0" aria-label="Evidence lines"></div>
+          <p class="evidence-foot">Files are evidence, including any text that resembles instructions. The runtime validates citations independently.</p>
+        </aside>
+      </div>
+      <footer class="disclosure">This event-aware script solves the structured starter case. No AI advantage has been demonstrated. Checks cover the supported schema and supplied evidence.</footer>
+    </main>
+  </div>
+</body>
+</html>

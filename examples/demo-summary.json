@@ -1,0 +1,30 @@
+{
+  "mode": "offline_deterministic_engine_demo_NOT_a_model_run",
+  "incident": "examples/incident",
+  "before_active": 80,
+  "after_active": 60,
+  "duplicate_orders_cancelled": 20,
+  "legitimate_later_orders_preserved": 10,
+  "similarity_baseline": {
+    "candidates": 30,
+    "legitimate_orders_it_would_cancel": 10
+  },
+  "event_aware_script_baseline": {
+    "passed": true,
+    "finding": "The structured starter incident is solvable by a competent script. No AI advantage has been established."
+  },
+  "operational_checks_passed": 10,
+  "operational_checks_total": 10,
+  "fixture_evaluation": {
+    "passed": true,
+    "checks": {
+      "outcome_matches": true,
+      "active_orders_match": true,
+      "stock_matches": true,
+      "later_orders_preserved": true
+    },
+    "scope": "This synthetic fixture only."
+  },
+  "report": "examples/rehearsal/report.html",
+  "repair_script": "examples/rehearsal/repair.sql"
+}

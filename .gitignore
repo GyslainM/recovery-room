@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+!.env.example
+*.db-journal
+*.db-wal
+*.db-shm
+Thumbs.db
+*.egg-info/
+build/
+dist/
+runs/
+.pytest_cache/

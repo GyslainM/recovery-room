@@ -1,0 +1,231 @@
+{
+  "passed": true,
+  "checks": [
+    {
+      "name": "database_integrity",
+      "passed": true,
+      "detail": "SQLite integrity and foreign-key checks."
+    },
+    {
+      "name": "unaffected_orders_preserved",
+      "passed": true,
+      "detail": "Every untargeted order matches its original record exactly."
+    },
+    {
+      "name": "order_history_preserved",
+      "passed": true,
+      "detail": "Corrections retain original order identities, quantities and customer fields."
+    },
+    {
+      "name": "original_movements_preserved",
+      "passed": true,
+      "detail": "Original stock movements remain intact; corrections are compensating entries."
+    },
+    {
+      "name": "stock_matches_movement_ledger",
+      "passed": true,
+      "detail": "Opening stock plus all recorded movements equals current stock."
+    },
+    {
+      "name": "stock_matches_active_orders",
+      "passed": true,
+      "detail": "Stock reconciles with all active purchases, including later purchases."
+    },
+    {
+      "name": "source_evidence_complete",
+      "passed": true,
+      "detail": "Every source event has an observable committed write."
+    },
+    {
+      "name": "source_events_applied_once",
+      "passed": true,
+      "detail": "Exactly one recorded order remains active per imported source event."
+    },
+    {
+      "name": "source_snapshot_unchanged",
+      "passed": true,
+      "detail": "The original still matches the snapshot used for rehearsal; otherwise this plan is stale."
+    },
+    {
+      "name": "evidence_snapshot_unchanged",
+      "passed": true,
+      "detail": "The evidence files still match those used for the rehearsal."
+    }
+  ],
+  "plan": {
+    "rationale": "Deterministic baseline: join committed writes by source event and retain the first write. This is a competent scripted solution for the starter's structured complete evidence; no model is involved.",
+    "cancellations": [
+      {
+        "order_id": "ord_03163bbbe9ea",
+        "duplicate_of": "ord_59a5b1fee08f",
+        "evidence_refs": [
+          "events.jsonl:L28",
+          "events.jsonl:L7"
+        ]
+      },
+      {
+        "order_id": "ord_2020f3fe39c0",
+        "duplicate_of": "ord_bb2d0f88080b",
+        "evidence_refs": [
+          "events.jsonl:L11",
+          "events.jsonl:L32"
+        ]
+      },
+      {
+        "order_id": "ord_254b010c4759",
+        "duplicate_of": "ord_17f5d70820fe",
+        "evidence_refs": [
+          "events.jsonl:L30",
+          "events.jsonl:L9"
+        ]
+      },
+      {
+        "order_id": "ord_26bb2d1c9af0",
+        "duplicate_of": "ord_d17fe01f5057",
+        "evidence_refs": [
+          "events.jsonl:L27",
+          "events.jsonl:L6"
+        ]
+      },
+      {
+        "order_id": "ord_2eae96d0cc5f",
+        "duplicate_of": "ord_cc019474031b",
+        "evidence_refs": [
+          "events.jsonl:L29",
+          "events.jsonl:L8"
+        ]
+      },
+      {
+        "order_id": "ord_30cb0fef7928",
+        "duplicate_of": "ord_bd05211c70cf",
+        "evidence_refs": [
+          "events.jsonl:L18",
+          "events.jsonl:L39"
+        ]
+      },
+      {
+        "order_id": "ord_3b12f52ddf5d",
+        "duplicate_of": "ord_8edec3baea9e",
+        "evidence_refs": [
+          "events.jsonl:L26",
+          "events.jsonl:L5"
+        ]
+      },
+      {
+        "order_id": "ord_47208ca81811",
+        "duplicate_of": "ord_12bdfaecbd38",
+        "evidence_refs": [
+          "events.jsonl:L1",
+          "events.jsonl:L22"
+        ]
+      },
+      {
+        "order_id": "ord_65e76472f1a3",
+        "duplicate_of": "ord_9c652b0537e6",
+        "evidence_refs": [
+          "events.jsonl:L16",
+          "events.jsonl:L37"
+        ]
+      },
+      {
+        "order_id": "ord_6e36d1bc52d9",
+        "duplicate_of": "ord_2a3a6b0a18e8",
+        "evidence_refs": [
+          "events.jsonl:L2",
+          "events.jsonl:L23"
+        ]
+      },
+      {
+        "order_id": "ord_70cc3571810a",
+        "duplicate_of": "ord_eab46415479c",
+        "evidence_refs": [
+          "events.jsonl:L19",
+          "events.jsonl:L40"
+        ]
+      },
+      {
+        "order_id": "ord_7b451a81682c",
+        "duplicate_of": "ord_37dc0f17a300",
+        "evidence_refs": [
+          "events.jsonl:L17",
+          "events.jsonl:L38"
+        ]
+      },
+      {
+        "order_id": "ord_99c9570dc195",
+        "duplicate_of": "ord_2a9614a0f9e7",
+        "evidence_refs": [
+          "events.jsonl:L20",
+          "events.jsonl:L41"
+        ]
+      },
+      {
+        "order_id": "ord_9c1c5e8766ed",
+        "duplicate_of": "ord_b271795e8229",
+        "evidence_refs": [
+          "events.jsonl:L10",
+          "events.jsonl:L31"
+        ]
+      },
+      {
+        "order_id": "ord_ae3adfe01893",
+        "duplicate_of": "ord_f0ce05c6af07",
+        "evidence_refs": [
+          "events.jsonl:L15",
+          "events.jsonl:L36"
+        ]
+      },
+      {
+        "order_id": "ord_aec65bd86d40",
+        "duplicate_of": "ord_f6460a097c97",
+        "evidence_refs": [
+          "events.jsonl:L25",
+          "events.jsonl:L4"
+        ]
+      },
+      {
+        "order_id": "ord_b4d647469a4d",
+        "duplicate_of": "ord_eeea26e87555",
+        "evidence_refs": [
+          "events.jsonl:L24",
+          "events.jsonl:L3"
+        ]
+      },
+      {
+        "order_id": "ord_bd62ad1b72db",
+        "duplicate_of": "ord_7215d269a9a5",
+        "evidence_refs": [
+          "events.jsonl:L13",
+          "events.jsonl:L34"
+        ]
+      },
+      {
+        "order_id": "ord_def8e647cb8f",
+        "duplicate_of": "ord_e31562c33a4f",
+        "evidence_refs": [
+          "events.jsonl:L14",
+          "events.jsonl:L35"
+        ]
+      },
+      {
+        "order_id": "ord_f34183f73f16",
+        "duplicate_of": "ord_93f4a5aa3c81",
+        "evidence_refs": [
+          "events.jsonl:L12",
+          "events.jsonl:L33"
+        ]
+      }
+    ]
+  },
+  "candidate_path": "examples/rehearsal/candidate.db",
+  "folder": "examples/rehearsal",
+  "source_fingerprint": "862f6cac01688c100cb68eec7d5cffc0db5711c1f142392dfc339830b4248e8a",
+  "evidence_fingerprint": "de2e2ed7b04d6d943327a2cf79cb23e008da200ff9a91915f7080c964a2bc18d",
+  "created_at": "2026-10-27T03:56:27.154608+00:00",
+  "status": "rehearsed_on_copy_ready_for_human_review",
+  "totals": {
+    "before_active": 80,
+    "after_active": 60,
+    "cancellations": 20
+  }
+}
