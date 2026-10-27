@@ -11,7 +11,7 @@ import sys
 from .agent import MetaClient, run_agent
 from .baselines import event_aware_plan, similarity_only_candidates
 from .checks import evaluate_fixture
-from .fixtures import create_incident
+from .fixtures import SCENARIOS, create_incident
 from .repairs import finalize_report, rehearse
 
 
@@ -60,7 +60,7 @@ def main(argv: list[str] | None = None) -> int:
     demo.add_argument("--seed", type=int, default=7)
     fixture = sub.add_parser("fixture", help="Create a synthetic incident and a separate private evaluator.")
     fixture.add_argument("--out", type=Path, required=True)
-    fixture.add_argument("--scenario", choices=("complete", "missing-evidence"), default="complete")
+    fixture.add_argument("--scenario", choices=SCENARIOS, default="complete")
     fixture.add_argument("--seed", type=int, default=7)
     agent = sub.add_parser("agent", help="Run the live Meta agent. This sends the selected incident evidence to Meta.")
     agent.add_argument("--incident", type=Path, required=True)
@@ -78,9 +78,16 @@ def main(argv: list[str] | None = None) -> int:
     local = sub.add_parser("serve", help="Open a local offline investigation/review workbench; no API calls.")
     local.add_argument("--out", type=Path, help="Fresh session directory; existing runs are never overwritten.")
     local.add_argument("--port", type=int, default=8765)
+    benchmark = sub.add_parser("benchmark", help="Evaluate the offline event-aware script on development fixtures; no API calls.")
+    benchmark.add_argument("--out", type=Path, help="New output directory; previous evaluations are preserved.")
+    benchmark.add_argument("--seeds", type=int, nargs="+", default=[7, 23, 41], help="1 to 10 distinct seeds (default: 7 23 41). Seeds vary IDs, not failure families.")
     args = parser.parse_args(argv)
     try:
-        if args.command == "serve":
+        if args.command == "benchmark":
+            from .evaluation import run_benchmark
+            benchmark_result = run_benchmark(args.out or default_output("benchmark"), args.seeds)
+            value = {key: value for key, value in benchmark_result.items() if key != "trials"}
+        elif args.command == "serve":
             from .workbench import serve
             serve(args.out or default_output("workbench"), args.port)
             return 0

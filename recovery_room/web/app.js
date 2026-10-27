@@ -22,6 +22,8 @@ function focusWorkspace() { $('#workspace').focus({preventScroll:true}); $('#wor
 function render() {
   if (!state.incident) return;
   const { incident, run, stage, busy } = state;
+  const multipleRetries = incident.scenario === 'multiple-retries';
+  $('#case-count').textContent = String(state.cases.length).padStart(2,'0');
   $('#title').textContent = incident.title;
   $('#cases').innerHTML = state.cases.map((c,i)=>`<button class="case ${c.id===incident.id?'active':''}" data-case="${escape(c.id)}" ${busy?'disabled':''} ${c.id===incident.id?'aria-current="page"':''}><small>CASE 0${i+1} / SYNTHETIC</small><strong>${text(c.title)}</strong></button>`).join('');
   document.querySelectorAll('[data-stage]').forEach(button=>{
@@ -31,8 +33,8 @@ function render() {
   });
   let html = '';
   if (stage === 'incident') {
-    html = `<div class="section-heading"><h2>A partial import. A full retry.</h2>${badge('OPEN INCIDENT',true)}</div>
-      <p class="incident-note">The importer lost its connection after some writes. It retried the source file while customers continued buying. Similar-looking purchases may be legitimate.</p>
+    html = `<div class="section-heading"><h2>${multipleRetries?'Two partial imports. Two retries.':'A partial import. A full retry.'}</h2>${badge('OPEN INCIDENT',true)}</div>
+      <p class="incident-note">${multipleRetries?'Two attempts lost their connections after partial writes. A final retry completed, then customers made genuine purchases.':'The importer lost its connection after some writes. It retried the source file while customers continued buying.'} Similar-looking purchases may be legitimate.</p>
       <div class="metrics">${metric(incident.active_orders,'active order records')}${metric(incident.artifacts.length,'evidence files')}${metric(incident.products.length,'products affected')}</div>
       <div class="callout"><strong>The question to resolve</strong><br>Which records repeat the same source action, and which later purchases must stay? A stock correction also needs a compensating ledger entry.</div>
       <div class="action-row"><button class="primary ${busy?'busy':''}" data-action="investigate" ${busy?'disabled':''}>${busy?'Reading local evidence…':'Start offline investigation →'}</button><span class="caption">Event-aware script · no model calls</span></div>

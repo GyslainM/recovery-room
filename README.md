@@ -36,7 +36,7 @@ Open [the local workbench](http://127.0.0.1:8765). Stop it with **Ctrl+C**.
 Use **--port 8766** if the default port is busy. No frontend installation, model
 key, external fonts or API access is required. The server binds only to loopback.
 
-1. Choose either supplied synthetic case and inspect its records and paginated evidence.
+1. Choose a supplied synthetic case and inspect its records and paginated evidence.
 2. Start an **offline script** investigation. The timeline records actual function
    calls and results, including evidence pagination; it is not model reasoning.
 3. Inspect the bounded proposal and click citations to open exact evidence lines.
@@ -48,6 +48,13 @@ key, external fonts or API access is required. The server binds only to loopback
 The missing-evidence case stops with the missing event IDs and a specific request
 for commit records. It produces no candidate or repair export. This demonstrates
 the deterministic workflow's stopping behavior, not model refusal quality.
+
+**CASE 03 — Two retries after partial imports** exercises the same schema and
+repair action at the existing limit. The first two attempts each write 20 rows;
+the final retry writes all 50. With 10 later checkout purchases, that produces
+100 active records. A supported plan cancels 40 repeated writes, retains each
+event's first write, and leaves 60 purchases. This is another variation of the
+same import/retry family, not a new failure family or a held-out benchmark.
 
 Each server launch creates a fresh **runs/workbench-.../** session with its own
 fixtures and persisted **investigations/run-.../investigation.json** records.
@@ -151,6 +158,43 @@ orders, stock, and preservation of all later legitimate purchases.
 Tests that exercise a scripted model transport are explicitly labelled test
 transports; they are not real Meta calls.
 
+### Repeatable offline baseline evaluation
+
+~~~cmd
+py -3 -m recovery_room benchmark
+~~~
+
+The default runs all three scenario variants with seeds **7, 23, 41**: nine
+development trials from **one incident family**. For a shorter run:
+
+~~~cmd
+py -3 -m recovery_room benchmark --seeds 23
+~~~
+
+The command prints the new **runs/benchmark-.../report.html** and **report.json**
+paths. The HTML table links to actual script traces and repair reviews. Each
+trial also has a separate JSON record. Previous runs are never overwritten;
+**--out** requires a new directory. A nonzero exit indicates at least one
+incorrect, rejected, incomplete or technically failed trial, retained in the report.
+
+Scoring happens after the controller acts. Repairs require exact fixture state,
+correct target IDs, preserved valid records, freshly recomputed operational
+checks, unchanged source data and actual freshness-gated exports. Stops require
+the exact observed evidence gap and a matching structured reason, with no plan,
+candidate or export. A stop label alone does not pass this evaluation. This
+stronger stop assessment applies to this offline controller; the existing
+**evaluate --outcome stop** command still primarily checks the fixture outcome
+label and does not establish model refusal quality.
+
+Results distinguish correct repairs, justified stops, incorrect exports,
+unjustified stops, rejected repairs, technical errors and incomplete attempts.
+The report keeps unfavorable outcomes and includes elapsed time, read-call and
+rehearsal counts. No model is called, compared, or assigned a success rate here.
+Repeated seeds do not establish general reliability. These public development
+fixtures and answers are not blind holdouts. Once API access is available, use
+the generated incident directories for real Meta runs and inspect their actual
+traces before claiming an AI contribution.
+
 ## What is implemented
 
 - A reproducible SQLite orders-and-inventory incident with opaque seeded IDs.
@@ -201,6 +245,7 @@ Use the actual model trace when claiming model behavior.
 - **recovery_room/agent.py** — Meta HTTP client and bounded local tool dispatcher.
 - **recovery_room/cli.py** — commands.
 - **recovery_room/workbench.py** and **recovery_room/web/** — local offline HTTP adapter and UI.
+- **recovery_room/evaluation.py** — CLI-only baseline evaluation and reports; no browser/agent access.
 - **tests/** — data integrity, evidence, stale state and agent-boundary tests.
 - **docs/DESIGN.md** — the trust model and architecture.
 - **docs/BUILD_LOG.md** — work origin and outstanding validation.

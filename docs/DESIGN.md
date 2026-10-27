@@ -99,7 +99,7 @@ development.
 ## Local workbench (October 27, 2026)
 
 The standard-library HTTP adapter binds to **127.0.0.1** and serves bundled
-HTML/CSS/JavaScript. It creates two curated synthetic cases in a new session
+HTML/CSS/JavaScript. It creates three curated synthetic cases in a new session
 directory. Routes accept case/run identifiers and allowlisted artifact names;
 there are no browser endpoints for arbitrary paths, database uploads, SQL,
 candidate databases, the fixture evaluator, model credentials or live calls.
@@ -125,3 +125,31 @@ Run registries live for one server process; persisted investigation JSON and
 engine artifacts survive shutdown. Browser case-switching retains current runs
 in page memory. Reload/restart recovery and live model integration are future
 work. No frontend dependency or separate implementation of repair rules is used.
+
+## Multiple retries and offline evaluation
+
+The workbench now supplies three cases. The additional multiple-retries variant
+adds a second partial attempt before the final full retry: 20 + 20 + 50 imported
+writes, then 10 later purchases. Forty repeated writes can be cancelled using
+the existing grammar. No schema, repair authority, 40-action limit or operational
+checker was extended. Existing complete/missing-evidence generation remains
+identical at the same seed. This is a variation of the same failure family.
+
+The **benchmark** CLI creates new fixtures for each selected seed and invokes
+the same offline workbench controller, including actual rehearsal and download
+freshness checks. Only after each decision does its separate evaluator read
+fixture truth. The workbench, baseline and agent have no route to that evaluator.
+The evaluator compares exact active IDs, stock, target IDs and preserved valid
+records, and recomputes candidate operational checks rather than trusting cached
+pass flags. A stopped trial must identify the exact observable commit-evidence
+gap with the structured **missing_commit_mappings** reason and produce no plan,
+candidate or export. This is stronger than the original CLI stop-label check;
+it does not by itself evaluate a live model's free-text explanation.
+
+Reports retain per-trial artifacts and failures, with separate judgments for
+correct repairs, justified stops, incorrect exports, unjustified stops, rejected
+repairs, technical errors and incomplete attempts. A rejection is not counted as
+a correct repair. Elapsed time includes scoring; script read/rehearsal counts
+are not model tool-use measurements. No model results are generated or inferred.
+The default nine trials are three development scenario variants at three seeds
+within one incident family, not nine distinct failure types or blind holdouts.

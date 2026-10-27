@@ -25,6 +25,7 @@ MODE = "offline_deterministic_engine_demo_NOT_a_model_run"
 CASES = {
     "import-retry": ("Import retried after timeout", "complete"),
     "missing-evidence": ("Commit evidence missing", "missing-evidence"),
+    "multiple-retries": ("Two retries after partial imports", "multiple-retries"),
 }
 DOWNLOADS = {"repair.sql": "application/sql", "plan.json": "application/json",
              "report.json": "application/json", "report.html": "text/html"}
@@ -37,12 +38,12 @@ class ReviewConflict(ValueError):
 
 
 class Workbench:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, seed: int = 23):
         # Every launch gets a fresh namespace, preserving earlier user runs.
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=False)
         self.incidents = {
-            key: create_incident(self.root / key, scenario, seed=23)
+            key: create_incident(self.root / key, scenario, seed=seed)
             for key, (_, scenario) in CASES.items()
         }
         self.runs: dict[str, dict] = {}
@@ -65,7 +66,7 @@ class Workbench:
     def overview(self, identifier: str) -> dict:
         incident = self.incident(identifier)
         state = snapshot(incident / "orders.db")
-        return {"id": identifier, "title": CASES[identifier][0], "mode": MODE,
+        return {"id": identifier, "title": CASES[identifier][0], "scenario": CASES[identifier][1], "mode": MODE,
                 "note": read_artifact(incident, "incident_note.txt"),
                 "artifacts": list_artifacts(incident), "schema": schema_for_agent(incident / "orders.db"),
                 "orders": state["orders"], "products": state["products"],
@@ -113,6 +114,7 @@ class Workbench:
                       "source events. It proposes retaining each first recorded write. Rehearsal is still required.")
         record = {"id": run_id, "incident_id": identifier, "mode": MODE,
                   "status": "proposed" if plan else "stopped", "summary": reason,
+                  "stop_reason": ("missing_commit_mappings" if missing else "no_supported_repeats") if not plan else None,
                   "missing_event_ids": missing, "trace": trace, "plan": plan,
                   "source_fingerprint": source_hash, "evidence_fingerprint": evidence_hash,
                   "review": None, "downloads": []}
