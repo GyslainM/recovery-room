@@ -23,6 +23,14 @@ the before/after inventory, checks, proposed corrections, and exact evidence lin
 It also writes a guarded **repair.sql**, **plan.json**, and **report.json**.
 All generated runs stay under **runs/** and are excluded from Git.
 
+Contributors can also run the dependency-free frontend regression checks:
+
+~~~cmd
+node --test tests/test_workbench_ui.cjs
+~~~
+
+Node is needed only for these frontend tests, not to run the Python workbench.
+
 ### Local investigation and review while credits are pending
 
 From CMD on this Windows checkout:
@@ -256,6 +264,8 @@ Use the actual model trace when claiming model behavior.
 - **tests/** — data integrity, evidence, stale state and agent-boundary tests.
 - **docs/DESIGN.md** — the trust model and architecture.
 - **docs/BUILD_LOG.md** — work origin and outstanding validation.
+- **docs/UI_HANDOFF.md** — Claude's UI handoff and the subsequent integration review.
+- **docs/PARALLEL_WORK.md** — frontend/backend ownership and the API contract.
 
 ## Technical references
 
