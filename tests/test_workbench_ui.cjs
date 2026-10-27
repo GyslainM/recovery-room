@@ -21,7 +21,7 @@ function harness(handler) {
     setTimeout, clearTimeout, URL, renderCalls: 0,
   };
   vm.createContext(context);
-  vm.runInContext(source + '\nrender = () => { globalThis.renderCalls++; };\nrenderPanel = () => {};\nglobalThis.subject = {state, download, reviewView, exportStatus, recheckExport, act};', context);
+  vm.runInContext(source + '\nrender = () => { globalThis.renderCalls++; };\nrenderPanel = () => {};\nglobalThis.subject = {state, download, reviewView, exportStatus, recheckExport, act, changesView, checksTab, sqlView, modeInfo};', context);
   return {context, ...context.subject};
 }
 
@@ -154,7 +154,7 @@ test('explicit recheck waits for the guarded artifact route before showing a pas
   assert.equal(requests.length, 1);
   delayed.resolve({ok: true, text: async () => '{}'});
   await pending;
-  assert.equal(app.state.rechecking, null);
+  assert.equal(app.state.rechecking.size, 0);
   assert.equal(app.exportStatus(current).label, 'Freshness check passed');
   assert.match(app.exportStatus(current).detail, /Every export is checked again/);
   assert.equal(app.state.run, current);
@@ -174,7 +174,7 @@ test('a refused explicit recheck blocks the current run using the server record'
   assert.equal(app.state.run, blocked);
   assert.equal(app.exportStatus(blocked).label, 'Refused');
   assert.deepEqual(app.state.run.downloads, []);
-  assert.equal(app.state.rechecking, null);
+  assert.equal(app.state.rechecking.size, 0);
 });
 
 test('a delayed explicit recheck never replaces a different case on screen', async () => {
@@ -191,7 +191,7 @@ test('a delayed explicit recheck never replaces a different case on screen', asy
   assert.equal(app.state.run, second);
   assert.equal(app.state.runs.get('case-b'), second);
   assert.equal(app.state.runs.get('case-a').status, 'blocked');
-  assert.equal(app.state.rechecking, null);
+  assert.equal(app.state.rechecking.size, 0);
 });
 
 test('a new rehearsal invalidates the previous freshness observation and cached SQL', async () => {
@@ -212,7 +212,48 @@ test('a network failure during recheck cannot retain a previous green freshness 
   app.state.incident = {id: 'case-a'}; app.state.run = current;
   app.state.exportChecks.set(current.id, {ok: true, at: new Date(), artifact: 'report.json'});
   await app.recheckExport();
-  assert.equal(app.state.rechecking, null);
+  assert.equal(app.state.rechecking.size, 0);
   assert.equal(app.state.exportChecks.has(current.id), false);
   assert.equal(app.exportStatus(current).label, 'Passed at rehearsal · Recheck required');
+});
+
+test('rechecks for different runs proceed independently instead of sharing one lock', async () => {
+  const pending = new Map(), requests = [];
+  const app = harness(url => { requests.push(url); const d = deferred(); pending.set(url, d); return d.promise; });
+  const first = reviewRun('ready_for_review');
+  const second = {...reviewRun('ready_for_review'), id: 'run-b', incident_id: 'case-b'};
+  app.state.incident = {id: 'case-a', title: 'First case'}; app.state.run = first; app.state.runs.set('case-a', first);
+  const a = app.recheckExport();
+  app.state.incident = {id: 'case-b', title: 'Second case'}; app.state.run = second; app.state.runs.set('case-b', second);
+  const b = app.recheckExport();
+  assert.deepEqual(requests, ['/api/runs/run-a/artifacts/report.json', '/api/runs/run-b/artifacts/report.json']);
+  assert.equal(app.exportStatus(first).label, 'Rechecking current files…');
+  assert.equal(app.exportStatus(second).label, 'Rechecking current files…');
+  for (const d of pending.values()) d.resolve({ok: true, text: async () => '{}'});
+  await Promise.all([a, b]);
+  assert.equal(app.state.rechecking.size, 0);
+  assert.equal(app.exportStatus(second).label, 'Freshness check passed');
+});
+
+test('a run blocked before rehearsal points to a new investigation, never to rehearsing', () => {
+  const app = harness();
+  app.state.run = {id: 'run-a', incident_id: 'case-a', status: 'blocked', review: null, downloads: [],
+    summary: 'The source changed since investigation. Start a new investigation and rehearsal.'};
+  for (const view of [app.changesView, app.checksTab, app.sqlView]) {
+    const rendered = view();
+    assert.match(rendered, /Rehearsal refused/);
+    assert.match(rendered, /The source changed since investigation/);
+    assert.match(rendered, /new offline investigation/);
+    assert.doesNotMatch(rendered, /Rehearse the proposal/);
+  }
+});
+
+test('an unrecognised mode is shown as reported and never labelled offline or no-model', () => {
+  const app = harness();
+  const offline = app.modeInfo('offline_deterministic_engine_demo_NOT_a_model_run');
+  assert.equal(offline.short, 'Offline demo · No model');
+  const other = app.modeInfo('live_meta_agent');
+  assert.equal(other.unverified, true);
+  assert.match(other.short, /live meta agent/);
+  for (const value of [other.short, other.long, other.method]) assert.doesNotMatch(value, /offline demo|without model|no model\b(?!-)/i);
 });

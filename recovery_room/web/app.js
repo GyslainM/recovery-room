@@ -12,7 +12,8 @@ const state = {
   tab: 'investigation', busy: false, switching: null, version: 0,
   files: new Map(), ev: {name: 'events.jsonl', query: '', citedOnly: false, activeRef: null},
   selection: null, sheet: false, lastFocus: null, filter: '', changeQuery: '',
-  runMeta: new Map(), exportChecks: new Map(), sql: new Map(), rechecking: null,
+  // rechecking: run IDs with an explicit export recheck in flight (one per run, never a global lock).
+  runMeta: new Map(), exportChecks: new Map(), sql: new Map(), rechecking: new Set(),
 };
 const escape = (value) => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const text = (value) => escape(value);
@@ -30,7 +31,14 @@ const RUN_STATUS = {
   failed_checks: ['Checks failed', 'danger'],
   blocked: ['Export blocked', 'warn'],
 };
-const MODE_LABELS = {offline_deterministic_engine_demo_NOT_a_model_run: 'Offline deterministic script · no model'};
+// What the UI may claim about each server-reported mode. An unknown mode is shown as reported,
+// with no offline or no-model claim, so a future recorded or live mode cannot be mislabelled.
+const MODE_INFO = {
+  offline_deterministic_engine_demo_NOT_a_model_run: {
+    short: 'Offline demo · No model', long: 'Offline deterministic script · no model',
+    method: 'Actual local function calls, without model or API calls. Meta credits pending.',
+  },
+};
 // Display grouping only; unknown check names fall into "Other checks".
 const CHECK_GROUPS = [
   ['Database', ['database_integrity']],
@@ -57,14 +65,24 @@ async function api(path, post = false) {
 function notice(message = '') { $('#notice').textContent = message; $('#notice').hidden = !message; }
 
 const statusOf = (run) => run ? (RUN_STATUS[run.status] || [run.status.replaceAll('_', ' '), '']) : ['Not started', ''];
-const modeLabel = (mode) => MODE_LABELS[mode] || String(mode || '').replaceAll('_', ' ');
+const modeInfo = (mode) => MODE_INFO[mode] || {
+  short: `Mode: ${String(mode || 'unknown').replaceAll('_', ' ')}`, long: String(mode || 'unknown').replaceAll('_', ' '),
+  method: 'Reported by the server. This page makes no offline or no-model claim for this mode.', unverified: true,
+};
+const modeLabel = (mode) => modeInfo(mode).long;
 const groupOf = (name) => (CHECK_GROUPS.find(([, names]) => names.includes(name)) || ['Other checks'])[0];
 const lineOf = (ref) => Number(String(ref).split(':L')[1]);
 const fileOf = (ref) => String(ref).split(':L')[0];
 const purchase = (o) => o ? `${text(o.customer)} · ${text(o.sku)} × ${text(o.quantity)}` : '—';
 const purchaseCell = (o) => o ? `<span class="purchase-cell"><strong>${text(o.customer)}</strong><span>${text(o.sku)} × ${text(o.quantity)}</span></span>` : '—';
 const compactId = (id) => String(id).length > 14 ? `${String(id).slice(0,8)}…${String(id).slice(-4)}` : String(id);
-const orderButton = (id, tone = '') => `<button class="id-link mono ${tone}" data-key="order:${escape(id)}" title="${escape(id)}" aria-label="Inspect order ${escape(id)}">${text(compactId(id))}</button>`;
+// A clickable order ID inside a selectable row. It is not a tab stop: the row is the keyboard target and the
+// details panel links onward. A search match shows the full ID with the match marked, so hits stay visible.
+const idRef = (id, tone = '', query = '') => {
+  const full = String(id), q = query.trim();
+  const shown = q && full.toLowerCase().includes(q.toLowerCase()) ? highlight(full, q) : '';
+  return `<span class="id-link mono ${tone}" data-key="order:${escape(full)}" title="${escape(full)}">${shown || `<span aria-hidden="true">${text(compactId(full))}</span><span class="sr-only">${text(full)}</span>`}</span>`;
+};
 const ordersById = () => new Map((state.incident?.orders || []).map(o => [o.id, o]));
 const isTyping = (el) => !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT');
 const isNarrow = () => typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 900px)').matches;
@@ -199,24 +217,27 @@ function renderHeader() {
   const [label, tone] = statusOf(run);
   $('#title').textContent = incident.title;
   $('#crumb-case').textContent = incident.title;
-  const mode = run?.mode || incident.mode;
-  $('#mode-indicator').textContent = MODE_LABELS[mode] ? 'Offline demo · No model' : modeLabel(mode);
+  const mode = run?.mode || incident.mode, info = modeInfo(mode);
+  $('#mode-indicator').textContent = info.short;
+  $('#mode-indicator').classList.toggle('unverified', !!info.unverified);
   $('#incident-meta').innerHTML = `<span class="status ${tone}">${text(label)}</span>
     <span class="chip">Source read-only · Rehearsal on a copy</span>${olderRunNote(run)}`;
   $('#run-details').hidden = !run;
   $('#run-details-body').innerHTML = run ? `<dl class="run-facts">
-      <dt>Run ID</dt><dd><span class="mono">${text(run.id)}</span> <button class="link" data-copy-value="${escape(run.id)}" aria-label="Copy full run ID">Copy ID</button></dd>
+      <dt>Run ID</dt><dd><span class="mono">${text(run.id)}</span> <button class="link" data-copy-value="${escape(run.id)}" data-copy-what="Run ID">Copy run ID</button></dd>
       <dt>Started</dt><dd>${text(started(run.created_at)) || 'Not recorded'}</dd>
-      <dt>Method</dt><dd>${text(modeLabel(mode))}. Actual local function calls, without model or API calls. Meta credits pending.</dd>
+      <dt>Method</dt><dd>${text(info.long)}. ${text(info.method)}</dd>
       <dt>Review boundary</dt><dd>The source stays unchanged. Rehearsal uses a disposable copy. Human review is required before using exported SQL.</dd>
-    </dl><button class="secondary" data-action="investigate" ${busy?'disabled':''}>New offline investigation</button>` : '';
+    </dl>` : '';
+  // A new investigation is always one click away: the server's refusal messages tell the user to start one.
   const investigate = (primary) => `<button class="${primary?'primary':'secondary'} ${busy?'busy':''}" data-action="investigate" ${busy?'disabled':''}>${busy?'Working…':run?'New offline investigation':'Start offline investigation'}</button>`;
   let actions = '';
   if (!run) actions = investigate(true);
-  else if (run.status === 'proposed') actions = `<button class="primary ${busy?'busy':''}" data-action="rehearse" ${busy?'disabled':''}>${busy?'Rehearsing on a copy…':'Rehearse on a disposable copy'}</button>`;
-  else if (run.status === 'ready_for_review') actions = '<button class="primary" data-review-repair>Review repair</button>';
-  else if (run.status === 'failed_checks') actions = '<button class="primary" data-tab="checks">Review failed checks</button>';
-  else if (run.status === 'blocked') actions = '<button class="secondary" data-review-repair>Review blocked repair</button>';
+  else if (run.status === 'proposed') actions = `${investigate(false)}<button class="primary ${busy?'busy':''}" data-action="rehearse" ${busy?'disabled':''}>${busy?'Rehearsing on a copy…':'Rehearse on a disposable copy'}</button>`;
+  else if (run.status === 'ready_for_review') actions = `${investigate(false)}<button class="primary" data-review-repair>Review repair</button>`;
+  else if (run.status === 'failed_checks') actions = `${investigate(false)}<button class="primary" data-tab="checks">Review failed checks</button>`;
+  // Blocked: recovery is a new investigation. Only a run that was rehearsed has a repair to review.
+  else if (run.status === 'blocked') actions = `${run.review ? '<button class="secondary" data-review-repair>Review blocked repair</button>' : ''}${investigate(true)}`;
   else actions = investigate(false);
   $('#header-actions').innerHTML = actions;
 }
@@ -256,15 +277,15 @@ function setTab(tab, focusTab = false) {
 function renderPanel() {
   const views = {investigation: investigationView, evidence: evidenceView, changes: changesView, checks: checksTab, sql: sqlView};
   const reviewing = state.run?.review && ['changes', 'checks', 'sql'].includes(state.tab);
-  $('#content').innerHTML = `${reviewing ? reviewSteps() : ''}${views[state.tab]()}`;
+  $('#content').innerHTML = `${reviewing ? reviewJump() : ''}${views[state.tab]()}`;
   if (state.tab === 'evidence') renderEvidence();
   if (state.tab === 'sql') maybeLoadSql();
   markSelection();
 }
 
-function reviewSteps() {
-  return `<nav class="review-steps" aria-label="Repair review">${[['changes','1 · Inspect changes'],['checks','2 · Review checks'],['sql','3 · Inspect SQL']].map(([tab,label])=>`<button data-tab="${tab}" ${state.tab===tab?'aria-current="step"':''}>${label}</button>`).join('')}
-    <button data-review-downloads>4 · Download artifacts</button></nav>`;
+// The tab bar already moves between Changes, Checks and SQL; this only adds the jump to the artifacts.
+function reviewJump() {
+  return `<div class="review-jump"><span class="caption">Review the changes, checks and SQL, then the artifacts.</span><button class="link small" data-review-downloads>Jump to review artifacts ↓</button></div>`;
 }
 
 function reviewRepair(downloads = false) {
@@ -275,6 +296,17 @@ function reviewRepair(downloads = false) {
 }
 
 const emptyState = (title, body) => `<div class="empty"><h2>${text(title)}</h2><p>${text(body)}</p></div>`;
+
+// Why a run has no rehearsal review, from its server status. A run blocked before rehearsal cannot be
+// rehearsed again (the server only rehearses proposed runs), so it points to a new investigation instead.
+function noReview(run, what) {
+  if (!run) return emptyState(`No ${what} yet`, 'Start the offline investigation, then rehearse its proposal on a disposable copy.');
+  if (run.status === 'stopped') return emptyState('No repair was proposed', 'The investigation stopped because evidence is missing. Nothing was changed.');
+  if (run.status === 'blocked') return `<div class="section-heading"><h2>Rehearsal refused</h2>${badge('Export blocked', true)}</div>
+    <div class="callout stop">${text(run.summary)}</div>
+    <p class="small muted">Nothing was rehearsed or changed. Start a new offline investigation from the header to work from the current source and evidence.</p>`;
+  return emptyState('Not rehearsed yet', `Rehearse the proposal on a disposable copy to see ${what}.`);
+}
 
 /* ---------- Investigation ---------- */
 
@@ -321,18 +353,20 @@ function investigationView() {
 
 function orderTable(rows) {
   return table(['Purchase','Order','Status','Source reference'],
-    rows.map(o=>[purchaseCell(o),orderButton(o.id),text(o.status),`<span class="mono">${text(o.source_reference||'—')}</span>`]),
+    rows.map(o=>[purchaseCell(o),idRef(o.id),text(o.status),`<span class="mono">${text(o.source_reference||'—')}</span>`]),
     rows.map(o=>`class="sel" tabindex="0" data-key="order:${escape(o.id)}" aria-selected="false"`));
 }
 
+// Citation shortcuts inside a selectable row. Keyboard users select the row (one tab stop per row);
+// the details panel then lists the same citations with links into Evidence.
 function citations(action) {
-  return `<span class="citations">${action.evidence_refs.map(ref=>`<button class="citation" data-key="order:${escape(action.order_id)}" data-focus-ref="${escape(ref)}">${text(ref)}</button>`).join('')}</span>`;
+  return `<span class="citations">${action.evidence_refs.map(ref=>`<button class="citation" tabindex="-1" data-key="order:${escape(action.order_id)}" data-focus-ref="${escape(ref)}">${text(ref)}</button>`).join('')}</span>`;
 }
 
 function planTable(plan) {
   const orders = ordersById();
   return table(['Purchase','Cancel duplicate','Keep original','Evidence'],
-    plan.cancellations.map(a=>[purchaseCell(orders.get(a.order_id)),orderButton(a.order_id,'cancelled'),orderButton(a.duplicate_of),citations(a)]),
+    plan.cancellations.map(a=>[purchaseCell(orders.get(a.order_id)),idRef(a.order_id,'cancelled'),idRef(a.duplicate_of),citations(a)]),
     plan.cancellations.map(a=>`class="sel" tabindex="0" data-key="order:${escape(a.order_id)}" aria-selected="false"`));
 }
 
@@ -492,9 +526,7 @@ function gotoLine() {
 
 function changesView() {
   const run = state.run;
-  if (!run) return emptyState('No changes yet', 'Start the offline investigation, then rehearse its proposal on a disposable copy.');
-  if (!run.review) return emptyState(run.status === 'stopped' ? 'No repair was proposed' : 'Not rehearsed yet',
-    run.status === 'stopped' ? 'The investigation stopped because evidence is missing. Nothing was changed.' : 'Rehearse the proposal on a disposable copy to see field-level changes.');
+  if (!run?.review) return noReview(run, 'field-level changes');
   return reviewView();
 }
 
@@ -557,7 +589,7 @@ function changesTable(changes) {
   if (!rows.length) return `<div class="log-empty">No changed records match.</div>`;
   return table(['Purchase','Cancelled order','Status on copy','Keeps original','Evidence'],rows.map(c=>{
     const changed = Object.keys(c.before).filter(k => c.before[k] !== c.after[k]);
-    return [purchaseCell(c.before),`<span class="sym mod" title="${escape(changed.join(', '))} changed">~</span> ${orderButton(c.before.id,'cancelled')}`,`<span class="before">${text(c.before.status)}</span> → <span class="after">${text(c.after.status)}</span>`,orderButton(c.duplicate_of),citations({order_id:c.before.id,evidence_refs:c.evidence_refs})];
+    return [purchaseCell(c.before),`<span class="sym mod" title="${escape(changed.join(', '))} changed">~</span> ${idRef(c.before.id,'cancelled',q)}`,`<span class="before">${text(c.before.status)}</span> → <span class="after">${text(c.after.status)}</span>`,idRef(c.duplicate_of,'',q),citations({order_id:c.before.id,evidence_refs:c.evidence_refs})];
   }),rows.map(c=>`class="sel" tabindex="0" data-key="order:${escape(c.before.id)}" aria-selected="false"`));
 }
 
@@ -574,7 +606,7 @@ function artifactsView(run) {
 function exportStatus(run) {
   const check = state.exportChecks.get(run.id);
   if (run.status === 'ready_for_review') {
-    if (state.rechecking === run.id) return {label: 'Rechecking current files…', tone: '', detail: 'The server is checking source, evidence and candidate freshness.'};
+    if (state.rechecking.has(run.id)) return {label: 'Rechecking current files…', tone: '', detail: 'The server is checking source, evidence and candidate freshness.'};
     if (check?.ok) return {label: 'Freshness check passed', tone: 'ok', detail: `Verified at ${time(check.at)} for ${check.artifact}. Every export is checked again.`};
     if (check && !check.ok) return {label: 'Refused', tone: 'warn', detail: check.message};
     return {label: 'Passed at rehearsal · Recheck required', tone: 'warn', detail: 'Current source, evidence and candidate freshness has not been rechecked. Recheck before export.'};
@@ -586,13 +618,12 @@ function exportStatus(run) {
 
 function checksTab() {
   const run = state.run, review = run?.review;
-  if (!review) return emptyState(run?.status === 'stopped' ? 'No checks ran' : 'Not rehearsed yet',
-    run?.status === 'stopped' ? 'The investigation stopped before any repair, so there was nothing to check.' : 'Independent checks run when a proposal is rehearsed on a disposable copy.');
+  if (!review) return noReview(run, 'independent checks');
   const passed = review.checks.filter(c => c.passed).length, meta = state.runMeta.get(run.id) || {}, exp = exportStatus(run);
   return `<div class="section-heading"><h2>Independent operational checks</h2>${badge(`${passed} / ${review.checks.length} passed`,!review.passed)}</div>
     <div class="status-cards">
       <div class="status-card ${review.passed?'ok':'danger'}"><span class="eyebrow">At rehearsal</span><strong>${passed} / ${review.checks.length} checks passed</strong><span class="caption">Observed on the rehearsal snapshot${meta.rehearsedAt?` · result received ${time(meta.rehearsedAt)} on this page`:''}</span></div>
-      <div class="status-card ${exp.tone}"><span class="eyebrow">Export freshness</span><strong>${text(exp.label)}</strong><span class="caption">${text(exp.detail)}</span>${run.status==='ready_for_review'?`<button class="secondary" data-recheck-export ${state.rechecking===run.id?'disabled':''}>${state.rechecking===run.id?'Rechecking…':'Recheck for export'}</button>`:''}</div>
+      <div class="status-card ${exp.tone}"><span class="eyebrow">Export freshness</span><strong>${text(exp.label)}</strong><span class="caption">${text(exp.detail)}</span>${run.status==='ready_for_review'?`<button class="secondary" data-recheck-export ${state.rechecking.has(run.id)?'disabled':''}>${state.rechecking.has(run.id)?'Rechecking…':'Recheck for export'}</button>`:''}</div>
     </div>
     <p class="small muted">These checks describe the rehearsal snapshot. Export status is shown above and rechecked on every download.</p>
     ${checksView(review.checks)}`;
@@ -618,7 +649,7 @@ function sqlTint(line) {
 
 function sqlView() {
   const run = state.run;
-  if (!run?.review) return emptyState('No SQL yet', run?.status === 'stopped' ? 'The investigation stopped, so no repair script was generated.' : 'Rehearse a proposal on a disposable copy to generate the guarded script.');
+  if (!run?.review) return noReview(run, 'the guarded repair script');
   if (run.status !== 'ready_for_review') return `<div class="section-heading"><h2>Export unavailable</h2>${badge(statusOf(run)[0], true)}</div>
     <div class="callout stop">${text(run.summary)}</div>
     <p class="small muted">The server only serves SQL for a current, passing rehearsal. Every request rechecks source and evidence first.</p>`;
@@ -677,7 +708,7 @@ function orderContext(id, focusRef) {
   const planned = !change && state.run?.plan?.cancellations.find(a => a.order_id === id);
   const record = change?.before || ordersById().get(id) || review?.preserved_orders.find(o => o.id === id);
   if (!record) return `<p class="muted">This record is not in the selected incident.</p>`;
-  let html = `<h2 class="mono ctx-title">${text(id)}</h2><p class="small muted">${purchase(record)}</p><button class="link small" data-copy-value="${escape(id)}" aria-label="Copy full order ID">Copy full ID</button>`;
+  let html = `<h2 class="mono ctx-title">${text(id)}</h2><p class="small muted">${purchase(record)}</p><button class="link small" data-copy-value="${escape(id)}" data-copy-what="Order ID">Copy order ID</button>`;
   if (change) html += `<div class="ctx-status">${badge('Changed on the copy', true)}<span class="caption">Engine before/after at rehearsal</span></div>${fieldTable(change.before, change.after)}`;
   else if (planned) html += `<div class="ctx-status">${badge('Proposed cancellation')}<span class="caption">Not rehearsed yet · current source values</span></div>${fieldTable(record)}`;
   else if (review) html += `<div class="ctx-status">${badge('Unchanged at rehearsal', 'ok')}${laterIds(review).has(id)?badge('Later purchase'):''}</div>${fieldTable(record)}`;
@@ -735,12 +766,12 @@ function eventContext(id) {
 
 function renderContext() {
   const box = $('#context'), sel = state.selection;
-  const open = !!sel && !!state.incident && (!isNarrow() || state.sheet);
-  box.hidden = !open;
-  box.classList.toggle('open', open);
-  $('.workspace').classList.toggle('has-context', open);
-  if (!open) {
-    box.innerHTML = '';
+  // Wide screens keep a fixed details column, so selecting or closing never reflows the tables.
+  // Narrow screens show it as a sliding sheet that opens only on an explicit selection.
+  box.classList.toggle('open', !!sel && !!state.incident && state.sheet);
+  if (!sel || !state.incident) {
+    box.innerHTML = `<div class="ctx-head"><span class="eyebrow">Details</span></div><div class="ctx-empty"><h2>Nothing selected</h2>
+      <p class="small muted">Select a record, evidence line, check or citation to see exact values here.</p></div>`;
     return;
   }
   const kinds = {order: ['Record', orderContext], product: ['Product', productContext], check: ['Check', checkContext], line: ['Evidence line', lineContext], event: ['Missing evidence', eventContext]};
@@ -828,24 +859,30 @@ async function download(name) {
   if (state.run?.id === runId && (state.tab === 'checks' || state.tab === 'changes')) renderPanel();
 }
 
+// Polite status message for assistive technology (visible text alone is not reliably announced).
+function announce(message) {
+  const region = $('#sr-status');
+  if (!region) return;
+  region.textContent = '';
+  setTimeout(() => { region.textContent = message; }, 30);
+}
+
+async function copyText(button, value, what, restLabel) {
+  try { await navigator.clipboard.writeText(value); button.textContent = 'Copied'; announce(`${what} copied`); }
+  catch (_) { button.textContent = 'Copy unavailable'; announce(`${what} could not be copied`); }
+  setTimeout(() => { if (button.isConnected) button.textContent = restLabel; }, 1500);
+}
+
 async function copySql(button) {
   const entry = state.sql.get(state.run?.id);
   if (entry?.status !== 'ok') return;
-  try { await navigator.clipboard.writeText(entry.text); button.textContent = 'Copied'; }
-  catch (_) { button.textContent = 'Copy unavailable'; }
-  setTimeout(() => { if (button.isConnected) button.textContent = 'Copy'; }, 1500);
-}
-
-async function copyValue(button, value) {
-  try { await navigator.clipboard.writeText(value); button.textContent = 'Copied'; }
-  catch (_) { button.textContent = 'Copy unavailable'; }
-  setTimeout(() => { if (button.isConnected) button.textContent = button.dataset.copyLabel || 'Copy ID'; }, 1500);
+  await copyText(button, entry.text, 'repair.sql', 'Copy');
 }
 
 async function recheckExport() {
   const runId = state.run?.id;
-  if (state.run?.status !== 'ready_for_review' || state.rechecking) return;
-  state.rechecking = runId;
+  if (state.run?.status !== 'ready_for_review' || state.rechecking.has(runId)) return;
+  state.rechecking.add(runId);
   state.exportChecks.delete(runId);
   renderPanel();
   try {
@@ -853,7 +890,7 @@ async function recheckExport() {
     await response.text();
   } catch (error) { notice(error.message); }
   finally {
-    if (state.rechecking === runId) state.rechecking = null;
+    state.rechecking.delete(runId);
     if (state.run?.id === runId) render();
   }
 }
@@ -882,7 +919,7 @@ document.addEventListener('click', event => {
   if (d.searchEvent) openInEvidence(null, d.searchEvent, 'events.jsonl');
   if (d.closeContext !== undefined) closeContext();
   if (d.copySql !== undefined) task = copySql(el);
-  if (d.copyValue !== undefined) { el.dataset.copyLabel ||= el.textContent; task = copyValue(el, d.copyValue); }
+  if (d.copyValue !== undefined) { el.dataset.copyLabel ||= el.textContent; task = copyText(el, d.copyValue, d.copyWhat || 'ID', el.dataset.copyLabel); }
   if (d.recheckExport !== undefined) task = recheckExport();
   if (d.reloadSql !== undefined) task = loadSql();
   if (d.key) select(d.key, {focusRef: d.focusRef || null});
