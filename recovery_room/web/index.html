@@ -18,14 +18,14 @@
       <div class="side-label">Incidents <span id="case-count">…</span></div>
       <nav id="cases" aria-label="Synthetic incidents"></nav>
       <div id="run-card" class="run-card" hidden></div>
-      <div class="side-note"><span class="live-dot" aria-hidden="true"></span>Your source stays intact.<p>Repairs run on a fresh disposable copy. Every export needs human review.</p></div>
+      <div class="side-note"><span class="live-dot" aria-hidden="true"></span>Evidence first.<p>Review every proposed correction before exporting it.</p></div>
       <div class="side-footer">Synthetic cases · SQLite · local session</div>
     </aside>
 
     <div class="main">
       <header class="topbar">
         <span class="crumbs">Workbench <span class="slash">/</span> <span id="crumb-case">Loading…</span></span>
-        <span class="mode"><span class="offline-dot" aria-hidden="true"></span>OFFLINE SCRIPT · NO MODEL</span>
+        <span class="mode" id="mode-indicator">Offline demo · No model</span>
       </header>
 
       <section class="incident-head" aria-labelledby="title">
@@ -33,6 +33,7 @@
           <span class="eyebrow">Recovery Room · synthetic incident</span>
           <h1 id="title">Loading local incident…</h1>
           <div id="incident-meta" class="meta"></div>
+          <details id="run-details" class="run-details" hidden><summary>Run details</summary><div id="run-details-body"></div></details>
         </div>
         <div id="header-actions" class="head-actions"></div>
       </section>
@@ -51,7 +52,7 @@
         <main id="content" class="panel" role="tabpanel" tabindex="-1" aria-labelledby="tab-investigation" aria-live="polite">
           <p class="muted">Reading the supplied local fixture…</p>
         </main>
-        <aside id="context" class="context" aria-label="Details" tabindex="-1"></aside>
+        <aside id="context" class="context" aria-label="Details" tabindex="-1" hidden></aside>
       </div>
 
       <footer class="disclosure">This event-aware script solves the structured starter case. No AI advantage has been demonstrated. Checks cover the supported schema and supplied evidence.</footer>

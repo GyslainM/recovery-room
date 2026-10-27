@@ -21,7 +21,7 @@ function harness(handler) {
     setTimeout, clearTimeout, URL, renderCalls: 0,
   };
   vm.createContext(context);
-  vm.runInContext(source + '\nrender = () => { globalThis.renderCalls++; };\nglobalThis.subject = {state, download, reviewView};', context);
+  vm.runInContext(source + '\nrender = () => { globalThis.renderCalls++; };\nrenderPanel = () => {};\nglobalThis.subject = {state, download, reviewView, exportStatus, recheckExport, act};', context);
   return {context, ...context.subject};
 }
 
@@ -126,4 +126,93 @@ test('an unknown failed check remains visible rather than being dropped by group
   assert.match(rendered, /Other checks/);
   assert.match(rendered, /additional business rule/);
   assert.match(rendered, /Observed failure/);
+});
+
+test('a passing rehearsal does not claim current export availability', () => {
+  const app = harness();
+  const current = reviewRun('ready_for_review');
+  app.state.run = current;
+  assert.equal(app.exportStatus(current).label, 'Passed at rehearsal · Recheck required');
+  assert.notEqual(app.exportStatus(current).tone, 'ok');
+  // Even a remembered successful check cannot override a server refusal.
+  app.state.exportChecks.set(current.id, {ok: true, at: new Date(), artifact: 'report.json'});
+  current.status = 'blocked';
+  assert.equal(app.exportStatus(current).label, 'Refused');
+});
+
+test('explicit recheck waits for the guarded artifact route before showing a passed check', async () => {
+  const delayed = deferred(), requests = [];
+  const app = harness(async url => { requests.push(url); return delayed.promise; });
+  const current = reviewRun('ready_for_review');
+  app.state.incident = {id: 'case-a', title: 'First case'};
+  app.state.run = current; app.state.runs.set('case-a', current);
+  const pending = app.recheckExport();
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0], '/api/runs/run-a/artifacts/report.json');
+  assert.equal(app.exportStatus(current).label, 'Rechecking current files…');
+  await app.recheckExport(); // duplicate clicks cannot create another request
+  assert.equal(requests.length, 1);
+  delayed.resolve({ok: true, text: async () => '{}'});
+  await pending;
+  assert.equal(app.state.rechecking, null);
+  assert.equal(app.exportStatus(current).label, 'Freshness check passed');
+  assert.match(app.exportStatus(current).detail, /Every export is checked again/);
+  assert.equal(app.state.run, current);
+});
+
+test('a refused explicit recheck blocks the current run using the server record', async () => {
+  const requests = [], blocked = {...reviewRun('blocked'), summary: 'Evidence changed since rehearsal.'};
+  const app = harness(async url => {
+    requests.push(url);
+    return url.endsWith('/artifacts/report.json') ? json(false, {error: blocked.summary}) : json(true, blocked);
+  });
+  const current = reviewRun('ready_for_review');
+  app.state.incident = {id: 'case-a', title: 'First case'};
+  app.state.run = current; app.state.runs.set('case-a', current);
+  await app.recheckExport();
+  assert.equal(requests[1], '/api/runs/run-a');
+  assert.equal(app.state.run, blocked);
+  assert.equal(app.exportStatus(blocked).label, 'Refused');
+  assert.deepEqual(app.state.run.downloads, []);
+  assert.equal(app.state.rechecking, null);
+});
+
+test('a delayed explicit recheck never replaces a different case on screen', async () => {
+  const delayed = deferred();
+  const app = harness(async url => url.endsWith('/artifacts/report.json') ? delayed.promise : json(true, reviewRun('blocked')));
+  const first = reviewRun('ready_for_review'), second = run('run-b', 'case-b');
+  app.state.incident = {id: 'case-a', title: 'First case'};
+  app.state.run = first; app.state.runs.set('case-a', first);
+  const pending = app.recheckExport();
+  app.state.incident = {id: 'case-b', title: 'Second case'};
+  app.state.run = second; app.state.runs.set('case-b', second);
+  delayed.resolve(json(false, {error: 'Source changed since rehearsal.'}));
+  await pending;
+  assert.equal(app.state.run, second);
+  assert.equal(app.state.runs.get('case-b'), second);
+  assert.equal(app.state.runs.get('case-a').status, 'blocked');
+  assert.equal(app.state.rechecking, null);
+});
+
+test('a new rehearsal invalidates the previous freshness observation and cached SQL', async () => {
+  const reviewed = reviewRun('ready_for_review');
+  const app = harness(async () => json(true, reviewed));
+  app.state.incident = {id: 'case-a'}; app.state.run = reviewed;
+  app.state.exportChecks.set(reviewed.id, {ok: true, at: new Date(), artifact: 'report.json'});
+  app.state.sql.set(reviewed.id, {status: 'ok', text: 'old SQL'});
+  await app.act('rehearse');
+  assert.equal(app.state.exportChecks.has(reviewed.id), false);
+  assert.equal(app.state.sql.has(reviewed.id), false);
+  assert.equal(app.exportStatus(reviewed).label, 'Passed at rehearsal · Recheck required');
+});
+
+test('a network failure during recheck cannot retain a previous green freshness label', async () => {
+  const app = harness(async () => { throw new Error('Network unavailable'); });
+  const current = reviewRun('ready_for_review');
+  app.state.incident = {id: 'case-a'}; app.state.run = current;
+  app.state.exportChecks.set(current.id, {ok: true, at: new Date(), artifact: 'report.json'});
+  await app.recheckExport();
+  assert.equal(app.state.rechecking, null);
+  assert.equal(app.state.exportChecks.has(current.id), false);
+  assert.equal(app.exportStatus(current).label, 'Passed at rehearsal · Recheck required');
 });

@@ -12,7 +12,7 @@ const state = {
   tab: 'investigation', busy: false, switching: null, version: 0,
   files: new Map(), ev: {name: 'events.jsonl', query: '', citedOnly: false, activeRef: null},
   selection: null, sheet: false, lastFocus: null, filter: '', changeQuery: '',
-  runMeta: new Map(), exportChecks: new Map(), sql: new Map(),
+  runMeta: new Map(), exportChecks: new Map(), sql: new Map(), rechecking: null,
 };
 const escape = (value) => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const text = (value) => escape(value);
@@ -62,6 +62,9 @@ const groupOf = (name) => (CHECK_GROUPS.find(([, names]) => names.includes(name)
 const lineOf = (ref) => Number(String(ref).split(':L')[1]);
 const fileOf = (ref) => String(ref).split(':L')[0];
 const purchase = (o) => o ? `${text(o.customer)} · ${text(o.sku)} × ${text(o.quantity)}` : '—';
+const purchaseCell = (o) => o ? `<span class="purchase-cell"><strong>${text(o.customer)}</strong><span>${text(o.sku)} × ${text(o.quantity)}</span></span>` : '—';
+const compactId = (id) => String(id).length > 14 ? `${String(id).slice(0,8)}…${String(id).slice(-4)}` : String(id);
+const orderButton = (id, tone = '') => `<button class="id-link mono ${tone}" data-key="order:${escape(id)}" title="${escape(id)}" aria-label="Inspect order ${escape(id)}">${text(compactId(id))}</button>`;
 const ordersById = () => new Map((state.incident?.orders || []).map(o => [o.id, o]));
 const isTyping = (el) => !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT');
 const isNarrow = () => typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 900px)').matches;
@@ -196,19 +199,26 @@ function renderHeader() {
   const [label, tone] = statusOf(run);
   $('#title').textContent = incident.title;
   $('#crumb-case').textContent = incident.title;
+  const mode = run?.mode || incident.mode;
+  $('#mode-indicator').textContent = MODE_LABELS[mode] ? 'Offline demo · No model' : modeLabel(mode);
   $('#incident-meta').innerHTML = `<span class="status ${tone}">${text(label)}</span>
-    <span class="chip">${text(modeLabel(run?.mode || incident.mode))}</span>
-    ${run?`<span class="chip mono" title="Run identifier">${text(run.id)}</span>`:''}
-    ${run?.created_at?`<span class="chip" title="${escape(run.created_at)}">Started ${text(started(run.created_at))}</span>`:''}
-    ${olderRunNote(run)}
-    <span class="chip">SQLite</span><span class="chip">Read-only source</span><span class="chip">Copy-only rehearsal</span>
-    <span class="chip quiet">Meta credits pending · no API calls</span>`;
+    <span class="chip">Source read-only · Rehearsal on a copy</span>${olderRunNote(run)}`;
+  $('#run-details').hidden = !run;
+  $('#run-details-body').innerHTML = run ? `<dl class="run-facts">
+      <dt>Run ID</dt><dd><span class="mono">${text(run.id)}</span> <button class="link" data-copy-value="${escape(run.id)}" aria-label="Copy full run ID">Copy ID</button></dd>
+      <dt>Started</dt><dd>${text(started(run.created_at)) || 'Not recorded'}</dd>
+      <dt>Method</dt><dd>${text(modeLabel(mode))}. Actual local function calls, without model or API calls. Meta credits pending.</dd>
+      <dt>Review boundary</dt><dd>The source stays unchanged. Rehearsal uses a disposable copy. Human review is required before using exported SQL.</dd>
+    </dl><button class="secondary" data-action="investigate" ${busy?'disabled':''}>New offline investigation</button>` : '';
   const investigate = (primary) => `<button class="${primary?'primary':'secondary'} ${busy?'busy':''}" data-action="investigate" ${busy?'disabled':''}>${busy?'Working…':run?'New offline investigation':'Start offline investigation'}</button>`;
   let actions = '';
   if (!run) actions = investigate(true);
-  else if (run.status === 'proposed') actions = `${investigate(false)}<button class="primary ${busy?'busy':''}" data-action="rehearse" ${busy?'disabled':''}>${busy?'Rehearsing on a copy…':'Rehearse on a disposable copy'}</button>`;
+  else if (run.status === 'proposed') actions = `<button class="primary ${busy?'busy':''}" data-action="rehearse" ${busy?'disabled':''}>${busy?'Rehearsing on a copy…':'Rehearse on a disposable copy'}</button>`;
+  else if (run.status === 'ready_for_review') actions = '<button class="primary" data-review-repair>Review repair</button>';
+  else if (run.status === 'failed_checks') actions = '<button class="primary" data-tab="checks">Review failed checks</button>';
+  else if (run.status === 'blocked') actions = '<button class="secondary" data-review-repair>Review blocked repair</button>';
   else actions = investigate(false);
-  $('#header-actions').innerHTML = `${actions}<span class="caption">Event-aware script · no model calls</span>`;
+  $('#header-actions').innerHTML = actions;
 }
 
 function olderRunNote(run) {
@@ -245,10 +255,23 @@ function setTab(tab, focusTab = false) {
 
 function renderPanel() {
   const views = {investigation: investigationView, evidence: evidenceView, changes: changesView, checks: checksTab, sql: sqlView};
-  $('#content').innerHTML = views[state.tab]();
+  const reviewing = state.run?.review && ['changes', 'checks', 'sql'].includes(state.tab);
+  $('#content').innerHTML = `${reviewing ? reviewSteps() : ''}${views[state.tab]()}`;
   if (state.tab === 'evidence') renderEvidence();
   if (state.tab === 'sql') maybeLoadSql();
   markSelection();
+}
+
+function reviewSteps() {
+  return `<nav class="review-steps" aria-label="Repair review">${[['changes','1 · Inspect changes'],['checks','2 · Review checks'],['sql','3 · Inspect SQL']].map(([tab,label])=>`<button data-tab="${tab}" ${state.tab===tab?'aria-current="step"':''}>${label}</button>`).join('')}
+    <button data-review-downloads>4 · Download artifacts</button></nav>`;
+}
+
+function reviewRepair(downloads = false) {
+  setTab('changes');
+  const target = downloads ? $('#repair-package') : $('#content');
+  target?.scrollIntoView({block: 'start'});
+  target?.focus({preventScroll: true});
 }
 
 const emptyState = (title, body) => `<div class="empty"><h2>${text(title)}</h2><p>${text(body)}</p></div>`;
@@ -297,8 +320,8 @@ function investigationView() {
 }
 
 function orderTable(rows) {
-  return table(['Order ID','Customer','Product','Qty','Status','Source reference'],
-    rows.map(o=>[`<span class="mono">${text(o.id)}</span>`,text(o.customer),text(o.sku),`<span class="num">${text(o.quantity)}</span>`,text(o.status),`<span class="mono">${text(o.source_reference||'—')}</span>`]),
+  return table(['Purchase','Order','Status','Source reference'],
+    rows.map(o=>[purchaseCell(o),orderButton(o.id),text(o.status),`<span class="mono">${text(o.source_reference||'—')}</span>`]),
     rows.map(o=>`class="sel" tabindex="0" data-key="order:${escape(o.id)}" aria-selected="false"`));
 }
 
@@ -308,8 +331,8 @@ function citations(action) {
 
 function planTable(plan) {
   const orders = ordersById();
-  return table(['Cancel duplicate','Purchase','Keep original','Evidence'],
-    plan.cancellations.map(a=>[`<span class="mono cancelled">${text(a.order_id)}</span>`,purchase(orders.get(a.order_id)),`<span class="mono">${text(a.duplicate_of)}</span>`,citations(a)]),
+  return table(['Purchase','Cancel duplicate','Keep original','Evidence'],
+    plan.cancellations.map(a=>[purchaseCell(orders.get(a.order_id)),orderButton(a.order_id,'cancelled'),orderButton(a.duplicate_of),citations(a)]),
     plan.cancellations.map(a=>`class="sel" tabindex="0" data-key="order:${escape(a.order_id)}" aria-selected="false"`));
 }
 
@@ -485,12 +508,10 @@ function reviewSummary(run, review) {
   const passed = review.checks.filter(c => c.passed).length;
   const source = review.checks.find(c => c.name === 'source_snapshot_unchanged');
   const failed = review.checks.filter(c => !c.passed);
-  return `<div class="section-heading"><h2>${ready?'Rehearsed. Ready for your review.':'Export unavailable'}</h2>${badge(ready?'Copy only':statusOf(run)[0],!ready)}</div>
+  return `<div class="section-heading"><h2>${ready?'Rehearsed. Ready for your review.':'Export unavailable'}</h2>${badge(ready?'Rehearsal snapshot':statusOf(run)[0],!ready)}</div>
     <div class="callout ${ready?'success':'stop'}">${text(run.summary)}</div>
     <div class="metrics four">${metric(`${review.before_active} → ${review.after_active}`,'active records')}${metric(review.cancellations,'duplicate orders cancelled')}${metric(`${review.checkout_preserved} / ${review.checkout_total}`,'later checkout purchases intact')}${metric(`${passed} / ${review.checks.length}`,'independent checks passed')}</div>
-    <ul class="assurance" aria-label="Review boundaries">
-      <li>Offline script · no model</li>
-      <li>Changes exist only on a disposable copy</li>
+    <ul class="assurance" aria-label="Rehearsal observations">
       ${run.status==='blocked'?'<li class="fail">Export is blocked; see the reason above</li>':source?`<li class="${source.passed?'':'fail'}">${source.passed?'At rehearsal: source matched the snapshot':'At rehearsal: source differed from the snapshot'}</li>`:''}
       <li>At rehearsal: ${text(review.untargeted_preserved)} untargeted records matched the source</li>
     </ul>
@@ -523,7 +544,7 @@ function diffView(review) {
       const delta = p.after - p.before, entry = byProduct.get(p.sku);
       return [`<span class="sym ${delta?'mod':'same'}">${delta?'~':'='}</span>`,`${text(p.name)} <span class="mono faint">${text(p.sku)}</span>`,`<span class="before num">${text(p.before)}</span> → <span class="after num">${text(p.after)}</span>`,`<span class="${delta>0?'positive':delta<0?'cancelled':''} num">${delta>0?'+':''}${text(delta)}</span>`,entry?`${entry.orders} orders · +${entry.units} units`:'—'];
     }),review.stock.map(p=>`class="sel" tabindex="0" data-key="product:${escape(p.sku)}" aria-selected="false"`))}
-    <div class="group-head"><h4>preserved work</h4><span class="caption">Later purchases as identified by the server for this fixture (<span class="mono">checkout_order_ids</span>). At rehearsal, ${text(review.checkout_preserved)} of ${text(review.checkout_total)} remained unchanged.</span></div>
+    <div class="group-head"><h4>preserved work</h4><span class="caption">Later purchases in this synthetic case. At rehearsal, ${text(review.checkout_preserved)} of ${text(review.checkout_total)} remained unchanged.</span></div>
     ${orderTable(checkout)}
     <details class="fold"><summary>Other untouched records · ${others.length}</summary>${orderTable(others)}</details>
   </section>`;
@@ -534,15 +555,15 @@ function changesTable(changes) {
   const rows = changes.filter(c => (!state.filter || c.before.sku === state.filter) &&
     (!q || [c.before.id, c.before.customer, c.before.sku, c.duplicate_of].some(v => String(v).toLowerCase().includes(q))));
   if (!rows.length) return `<div class="log-empty">No changed records match.</div>`;
-  return table(['','Order','Purchase','status','Keeps original','Evidence'],rows.map(c=>{
+  return table(['Purchase','Cancelled order','Status on copy','Keeps original','Evidence'],rows.map(c=>{
     const changed = Object.keys(c.before).filter(k => c.before[k] !== c.after[k]);
-    return [`<span class="sym mod" title="${escape(changed.join(', '))} changed">~</span>`,`<span class="mono cancelled">${text(c.before.id)}</span>`,purchase(c.before),`<span class="before">${text(c.before.status)}</span> → <span class="after">${text(c.after.status)}</span>`,`<button class="link mono" data-key="order:${escape(c.duplicate_of)}">${text(c.duplicate_of)}</button>`,citations({order_id:c.before.id,evidence_refs:c.evidence_refs})];
+    return [purchaseCell(c.before),`<span class="sym mod" title="${escape(changed.join(', '))} changed">~</span> ${orderButton(c.before.id,'cancelled')}`,`<span class="before">${text(c.before.status)}</span> → <span class="after">${text(c.after.status)}</span>`,orderButton(c.duplicate_of),citations({order_id:c.before.id,evidence_refs:c.evidence_refs})];
   }),rows.map(c=>`class="sel" tabindex="0" data-key="order:${escape(c.before.id)}" aria-selected="false"`));
 }
 
 function artifactsView(run) {
   const check = state.exportChecks.get(run.id);
-  return `<section class="artifacts"><h3>Review artifacts</h3>
+  return `<section class="artifacts" id="repair-package" tabindex="-1"><h3>Review artifacts</h3>
     <p class="small muted">Each download rechecks source, evidence and candidate freshness. Guarded SQL also rejects changed table state when applied. Human review is required.${check?` Last check: ${check.ok?'passed':'refused'} at ${time(check.at)}.`:''}</p>
     <div class="download-row">${run.downloads.map(name=>`<button class="download" data-download="${escape(name)}"><strong>↓ ${text(name)}</strong><span>${text(DOWNLOAD_NOTES[name]||'')}</span></button>`).join('')||'<span class="caption">No artifacts available for export.</span>'}</div>
     <p class="caption">Source database untouched.</p></section>`;
@@ -552,7 +573,12 @@ function artifactsView(run) {
 
 function exportStatus(run) {
   const check = state.exportChecks.get(run.id);
-  if (run.status === 'ready_for_review') return {label: 'Available', tone: 'ok', detail: check?.ok ? `Last freshness check passed at ${time(check.at)} (${check.artifact}).` : 'Not rechecked since rehearsal. Every download and SQL view rechecks source and evidence.'};
+  if (run.status === 'ready_for_review') {
+    if (state.rechecking === run.id) return {label: 'Rechecking current files…', tone: '', detail: 'The server is checking source, evidence and candidate freshness.'};
+    if (check?.ok) return {label: 'Freshness check passed', tone: 'ok', detail: `Verified at ${time(check.at)} for ${check.artifact}. Every export is checked again.`};
+    if (check && !check.ok) return {label: 'Refused', tone: 'warn', detail: check.message};
+    return {label: 'Passed at rehearsal · Recheck required', tone: 'warn', detail: 'Current source, evidence and candidate freshness has not been rechecked. Recheck before export.'};
+  }
   if (run.status === 'blocked') return {label: 'Refused', tone: 'warn', detail: `${run.summary}${check && !check.ok ? ` Checked at ${time(check.at)}.` : ''}`};
   if (run.status === 'failed_checks') return {label: 'Unavailable', tone: 'danger', detail: 'Operational checks failed at rehearsal, so nothing can be exported.'};
   return {label: statusOf(run)[0], tone: '', detail: run.summary};
@@ -566,7 +592,7 @@ function checksTab() {
   return `<div class="section-heading"><h2>Independent operational checks</h2>${badge(`${passed} / ${review.checks.length} passed`,!review.passed)}</div>
     <div class="status-cards">
       <div class="status-card ${review.passed?'ok':'danger'}"><span class="eyebrow">At rehearsal</span><strong>${passed} / ${review.checks.length} checks passed</strong><span class="caption">Observed on the rehearsal snapshot${meta.rehearsedAt?` · result received ${time(meta.rehearsedAt)} on this page`:''}</span></div>
-      <div class="status-card ${exp.tone}"><span class="eyebrow">Current export status</span><strong>${text(exp.label)}</strong><span class="caption">${text(exp.detail)}</span></div>
+      <div class="status-card ${exp.tone}"><span class="eyebrow">Export freshness</span><strong>${text(exp.label)}</strong><span class="caption">${text(exp.detail)}</span>${run.status==='ready_for_review'?`<button class="secondary" data-recheck-export ${state.rechecking===run.id?'disabled':''}>${state.rechecking===run.id?'Rechecking…':'Recheck for export'}</button>`:''}</div>
     </div>
     <p class="small muted">These checks describe the rehearsal snapshot. Export status is shown above and rechecked on every download.</p>
     ${checksView(review.checks)}`;
@@ -651,14 +677,14 @@ function orderContext(id, focusRef) {
   const planned = !change && state.run?.plan?.cancellations.find(a => a.order_id === id);
   const record = change?.before || ordersById().get(id) || review?.preserved_orders.find(o => o.id === id);
   if (!record) return `<p class="muted">This record is not in the selected incident.</p>`;
-  let html = `<h2 class="mono ctx-title">${text(id)}</h2><p class="small muted">${purchase(record)}</p>`;
+  let html = `<h2 class="mono ctx-title">${text(id)}</h2><p class="small muted">${purchase(record)}</p><button class="link small" data-copy-value="${escape(id)}" aria-label="Copy full order ID">Copy full ID</button>`;
   if (change) html += `<div class="ctx-status">${badge('Changed on the copy', true)}<span class="caption">Engine before/after at rehearsal</span></div>${fieldTable(change.before, change.after)}`;
   else if (planned) html += `<div class="ctx-status">${badge('Proposed cancellation')}<span class="caption">Not rehearsed yet · current source values</span></div>${fieldTable(record)}`;
   else if (review) html += `<div class="ctx-status">${badge('Unchanged at rehearsal', 'ok')}${laterIds(review).has(id)?badge('Later purchase'):''}</div>${fieldTable(record)}`;
   else html += `<div class="ctx-status">${badge('Source record')}</div>${fieldTable(record)}`;
   const link = change ? {refs: change.evidence_refs, keep: change.duplicate_of} : planned ? {refs: planned.evidence_refs, keep: planned.duplicate_of} : null;
   if (link) {
-    html += `<div class="ctx-keep">Keeps original <button class="link mono" data-key="order:${escape(link.keep)}">${text(link.keep)}</button></div>`;
+    html += `<div class="ctx-keep"><h3>Retained purchase</h3><button class="link mono" data-key="order:${escape(link.keep)}">${text(link.keep)}</button><p>${purchase(ordersById().get(link.keep))}</p></div>`;
     html += `<h3>Supporting evidence</h3>${link.refs.map(ref => citeBlock(ref, id, link.keep, focusRef)).join('')}`;
   }
   const citedBy = (state.run?.plan?.cancellations || []).filter(a => a.duplicate_of === id);
@@ -709,12 +735,12 @@ function eventContext(id) {
 
 function renderContext() {
   const box = $('#context'), sel = state.selection;
-  // On narrow screens the panel is a sheet that opens only on an explicit selection.
-  box.classList.toggle('open', !!sel && state.sheet);
-  if (!sel || !state.incident) {
-    box.innerHTML = `<div class="ctx-head"><span class="eyebrow">Details</span></div><div class="ctx-empty"><h2>Nothing selected</h2>
-      <p class="small muted">Select a record, evidence line, check or citation to see exact values here.</p>
-      <ul class="assurance stacked"><li>Read-only source</li><li>Copy-only rehearsal</li><li>Offline script · no model</li></ul></div>`;
+  const open = !!sel && !!state.incident && (!isNarrow() || state.sheet);
+  box.hidden = !open;
+  box.classList.toggle('open', open);
+  $('.workspace').classList.toggle('has-context', open);
+  if (!open) {
+    box.innerHTML = '';
     return;
   }
   const kinds = {order: ['Record', orderContext], product: ['Product', productContext], check: ['Check', checkContext], line: ['Evidence line', lineContext], event: ['Missing evidence', eventContext]};
@@ -760,7 +786,10 @@ async function act(action) {
     const run = await api(path, true);
     state.runs.set(id, run);
     upsertHistory(run);
-    if (action === 'rehearse') state.runMeta.set(run.id, {rehearsedAt: new Date()});
+    if (action === 'rehearse') {
+      state.runMeta.set(run.id, {rehearsedAt: new Date()});
+      state.exportChecks.delete(run.id); state.sql.delete(run.id);
+    }
     if (state.incident.id === id) {
       Object.assign(state, {run, filter: '', changeQuery: ''});
       if (action === 'investigate') Object.assign(state, {selection: null, tab: 'investigation'});
@@ -785,7 +814,7 @@ async function fetchArtifact(name) {
     upsertHistory(updated);
     if (state.incident.id === incidentId && state.run?.id === runId) { state.run = updated; render(); }
     else renderCases(); // another case is on screen: refresh only the sidebar status
-    throw new Error(`Download for ${incidentTitle}: ${value.error || 'Download blocked.'}`);
+    throw new Error(`Export check for ${incidentTitle}: ${value.error || 'Download blocked.'}`);
   }
   state.exportChecks.set(runId, {at: new Date(), ok: true, artifact: name});
   return response;
@@ -807,6 +836,28 @@ async function copySql(button) {
   setTimeout(() => { if (button.isConnected) button.textContent = 'Copy'; }, 1500);
 }
 
+async function copyValue(button, value) {
+  try { await navigator.clipboard.writeText(value); button.textContent = 'Copied'; }
+  catch (_) { button.textContent = 'Copy unavailable'; }
+  setTimeout(() => { if (button.isConnected) button.textContent = button.dataset.copyLabel || 'Copy ID'; }, 1500);
+}
+
+async function recheckExport() {
+  const runId = state.run?.id;
+  if (state.run?.status !== 'ready_for_review' || state.rechecking) return;
+  state.rechecking = runId;
+  state.exportChecks.delete(runId);
+  renderPanel();
+  try {
+    const response = await fetchArtifact('report.json');
+    await response.text();
+  } catch (error) { notice(error.message); }
+  finally {
+    if (state.rechecking === runId) state.rechecking = null;
+    if (state.run?.id === runId) render();
+  }
+}
+
 /* ---------- Events ---------- */
 
 document.addEventListener('click', event => {
@@ -821,6 +872,8 @@ document.addEventListener('click', event => {
   }
   if (d.run && d.run !== state.run?.id && !state.busy) task = loadRun(d.run);
   if (d.tab) setTab(d.tab);
+  if (d.reviewRepair !== undefined) reviewRepair();
+  if (d.reviewDownloads !== undefined) reviewRepair(true);
   if (d.action) task = act(d.action);
   if (d.download) task = download(d.download);
   if (d.file) { Object.assign(state.ev, {name: d.file, activeRef: null}); renderPanel(); }
@@ -829,6 +882,8 @@ document.addEventListener('click', event => {
   if (d.searchEvent) openInEvidence(null, d.searchEvent, 'events.jsonl');
   if (d.closeContext !== undefined) closeContext();
   if (d.copySql !== undefined) task = copySql(el);
+  if (d.copyValue !== undefined) { el.dataset.copyLabel ||= el.textContent; task = copyValue(el, d.copyValue); }
+  if (d.recheckExport !== undefined) task = recheckExport();
   if (d.reloadSql !== undefined) task = loadSql();
   if (d.key) select(d.key, {focusRef: d.focusRef || null});
   if (task) task.catch(error => notice(error.message));

@@ -48,8 +48,8 @@ key, external fonts or API access is required. The server binds only to loopback
 2. Start an **offline script** investigation. The timeline records actual function
    calls and results, including evidence pagination; it is not model reasoning.
 3. Inspect the bounded proposal and click citations to open exact evidence lines.
-4. Rehearse on a disposable copy and review stock, changed records, preserved
-   purchases and all operational checks.
+4. Rehearse on a disposable copy, then choose **Review repair**. Follow changes,
+   checks and SQL; select a record or citation to open its closable Details panel.
 5. Download guarded SQL, the plan, and HTML/JSON reports for human review. Each
    download checks source, evidence and candidate freshness again.
 
@@ -67,8 +67,9 @@ same import/retry family, not a new failure family or a held-out benchmark.
 Each server launch creates a fresh **runs/workbench-.../** session with its own
 fixtures and persisted **investigations/run-.../investigation.json** records.
 Existing runs are preserved. **--out** selects a new session directory and refuses
-an existing one. The UI keeps current results when switching cases within the
-page; a reload resets that browser view. Saved artifacts remain on disk.
+an existing one. The sidebar restores recorded runs from the current server
+session after a reload. Start times come from the server; selecting an older
+run never implies its export is fresh. Saved artifacts remain on disk.
 This local server is for curated fixtures, not deployment or arbitrary uploads.
 
 The approved backend contracts now support current-session history through
@@ -76,9 +77,16 @@ The approved backend contracts now support current-session history through
 `incident_id`, `status`, `summary`, `mode` and server-owned UTC `created_at`.
 Run records retain that creation time across rehearsal and blocked exports.
 Non-null reviews include `checkout_order_ids` for the server-classified later
-purchases. The frontend run-history integration is still pending; these routes
-do not load previous server sessions or revalidate exports. Restart an already
+purchases. The UI consumes both contracts. These routes do not load previous
+server sessions or revalidate exports. Restart an already
 running server after updating Python code to load the new routes.
+
+The header keeps one **Offline demo · No model** indicator and a source/copy
+status. Run details hold the full ID and supporting explanations. Export
+freshness starts at **Passed at rehearsal · Recheck required**; **Recheck for
+export** calls the existing guarded artifact route. A passed observation includes
+its time, and each later export is checked again. A browser reload requires a
+new freshness observation even when the recorded rehearsal passed.
 
 ### What the offline demo proves
 
