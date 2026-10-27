@@ -3,26 +3,33 @@
 // Presentation only. The Python engine owns plans, rehearsal, checks, freshness and exports;
 // this file displays what the local API returns and never decides whether a repair is valid.
 const $ = (selector) => document.querySelector(selector);
-const PAGE = 40;
+const PAGE = 200;      // server maximum lines per evidence request
+const MAX_PAGES = 50;  // bounds one evidence file at 10,000 lines
+const TABS = ['investigation', 'evidence', 'changes', 'checks', 'sql'];
 const state = {
-  incident: null, run: null, stage: 'incident', cases: [], runs: new Map(), views: new Map(),
-  artifact: 'events.jsonl', page: 1, next: null, total: 0, lines: null, positions: {},
-  focus: null, back: null, filter: '', busy: false, switching: null, version: 0, evidenceVersion: 0,
+  incident: null, run: null, cases: [], runs: new Map(), views: new Map(),
+  tab: 'investigation', busy: false, switching: null, version: 0,
+  files: new Map(), ev: {name: 'events.jsonl', query: '', citedOnly: false, activeRef: null},
+  selection: null, sheet: false, lastFocus: null, filter: '', changeQuery: '',
+  runMeta: new Map(), exportChecks: new Map(), sql: new Map(),
 };
 const escape = (value) => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const text = (value) => escape(value);
-const badge = (value, warn = false) => `<span class="pill${warn ? ' warn' : ''}">${text(value)}</span>`;
+const badge = (value, tone = '') => `<span class="pill ${tone === true ? 'warn' : tone || ''}">${text(value)}</span>`;
 const metric = (value, label) => `<div class="metric"><strong>${text(value)}</strong><span>${text(label)}</span></div>`;
 const table = (headers, rows, rowAttrs = []) => `<div class="scroll-table"><table><thead><tr>${headers.map(h=>`<th scope="col">${h}</th>`).join('')}</tr></thead><tbody>${rows.map((row,i)=>`<tr ${rowAttrs[i]||''}>${row.map(c=>`<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+const pad = (n) => String(n).padStart(2, '0');
+const time = (d) => d ? d.toLocaleTimeString() : '';
 
 // Labels for run states reported by the server; unknown states are shown as-is.
 const RUN_STATUS = {
   proposed: ['Proposal ready', ''],
   stopped: ['Stopped · evidence needed', 'warn'],
   ready_for_review: ['Ready for review', 'ok'],
-  failed_checks: ['Checks failed', 'warn'],
+  failed_checks: ['Checks failed', 'danger'],
   blocked: ['Export blocked', 'warn'],
 };
+const MODE_LABELS = {offline_deterministic_engine_demo_NOT_a_model_run: 'Offline deterministic script · no model'};
 // Display grouping only; unknown check names fall into "Other checks".
 const CHECK_GROUPS = [
   ['Database', ['database_integrity']],
@@ -37,7 +44,7 @@ const DOWNLOAD_NOTES = {
   'report.json': 'Checks, plan and before/after summary counts.',
   'report.html': 'Readable review report.',
 };
-const REVIEW_SECTIONS = [['rv-stock','Inventory'],['rv-checks','Checks'],['rv-changes','Changed records'],['rv-preserved','Preserved work'],['rv-artifacts','Artifacts']];
+const SQL_WORDS = /\b(PRAGMA|BEGIN|IMMEDIATE|COMMIT|ROLLBACK|CREATE|TEMP|TABLE|AS|SELECT|FROM|WHERE|INSERT|INTO|VALUES|UPDATE|SET|DELETE|AND|OR|NOT|NULL|IS|IN|EXISTS|CASE|WHEN|THEN|ELSE|END|CHECK|INTEGER|ON|DROP|COUNT|UNION|ALL|EXCEPT|LIMIT)\b/g;
 
 async function api(path, post = false) {
   const response = await fetch(path, post ? {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'} : {});
@@ -47,217 +54,235 @@ async function api(path, post = false) {
 }
 
 function notice(message = '') { $('#notice').textContent = message; $('#notice').hidden = !message; }
-function focusWorkspace() { $('#workspace').focus({preventScroll:true}); $('#workspace').scrollIntoView({block:'start'}); }
 
-const stageAvailable = (stage, run = state.run) => stage === 'incident' || (stage === 'investigate' && !!run) || (stage === 'review' && !!run?.review);
-const defaultStage = (run) => run?.review ? 'review' : run ? 'investigate' : 'incident';
+const statusOf = (run) => run ? (RUN_STATUS[run.status] || [run.status.replaceAll('_', ' '), '']) : ['Not started', ''];
+const modeLabel = (mode) => MODE_LABELS[mode] || String(mode || '').replaceAll('_', ' ');
+const groupOf = (name) => (CHECK_GROUPS.find(([, names]) => names.includes(name)) || ['Other checks'])[0];
 const lineOf = (ref) => Number(String(ref).split(':L')[1]);
 const fileOf = (ref) => String(ref).split(':L')[0];
-const pageStart = (line) => Math.floor((line - 1) / PAGE) * PAGE + 1;
 const purchase = (o) => o ? `${text(o.customer)} · ${text(o.sku)} × ${text(o.quantity)}` : '—';
-// Same rule the server uses for its checkout_preserved count (workbench._review).
+const ordersById = () => new Map((state.incident?.orders || []).map(o => [o.id, o]));
+const isTyping = (el) => !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT');
+const isNarrow = () => typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 900px)').matches;
+// Same rule the server uses for its checkout_preserved count (workbench._review); proposal A replaces it.
 const isCheckout = (o) => (o.source_reference || '').startsWith('checkout-');
 
 /* ---------- Case navigation ---------- */
 
 function caseStatus(id) {
   if (state.switching === id) return ['Loading…', 'loading'];
-  const run = state.runs.get(id);
-  if (!run) return ['Not started', ''];
-  return RUN_STATUS[run.status] || [run.status.replaceAll('_', ' '), ''];
+  return statusOf(state.runs.get(id));
 }
 
 function renderCases() {
-  $('#case-count').textContent = String(state.cases.length).padStart(2,'0');
-  $('#cases').innerHTML = state.cases.map((c,i)=>{
+  $('#case-count').textContent = String(state.cases.length).padStart(2, '0');
+  $('#cases').innerHTML = state.cases.map((c, i) => {
     const active = c.id === (state.switching || state.incident?.id);
     const [label, tone] = caseStatus(c.id);
-    return `<button class="case ${active?'active':''}" data-case="${escape(c.id)}" ${state.busy?'disabled':''} ${active?'aria-current="page"':''}><small>Case ${String(i+1).padStart(2,'0')} · synthetic</small><strong>${text(c.title)}</strong><span class="case-status ${tone}">${text(label)}</span></button>`;
+    return `<button class="case ${active?'active':''}" data-case="${escape(c.id)}" ${state.busy?'disabled':''} ${active?'aria-current="page"':''}><span class="case-top"><span class="case-no">${pad(i + 1)}</span><strong>${text(c.title)}</strong></span><span class="case-status ${tone}">${text(label)}</span></button>`;
   }).join('');
 }
 
-function caseFromHash() {
-  const match = /^#case=([\w-]+)$/.exec(location.hash);
-  return match && state.cases.some(c => c.id === match[1]) ? match[1] : null;
+function renderRunCard() {
+  const card = $('#run-card'), run = state.run;
+  card.hidden = !run;
+  if (!run) { card.innerHTML = ''; return; }
+  const [label, tone] = statusOf(run), meta = state.runMeta.get(run.id) || {};
+  card.innerHTML = `<span class="side-label">Current run · this page</span>
+    <div class="run-id mono">${text(run.id)}</div>
+    <div class="case-status ${tone}">${text(label)}</div>
+    <dl>${meta.investigatedAt?`<dt>Investigated</dt><dd>${time(meta.investigatedAt)}</dd>`:''}${meta.rehearsedAt?`<dt>Rehearsed</dt><dd>${time(meta.rehearsedAt)}</dd>`:''}</dl>`;
+}
+
+function parseHash() {
+  const match = /^#case=([\w-]+)(?:&tab=(\w+))?$/.exec(location.hash);
+  if (!match || !state.cases.some(c => c.id === match[1])) return null;
+  return {id: match[1], tab: TABS.includes(match[2]) ? match[2] : null};
+}
+
+function updateHash() {
+  if (!state.incident) return;
+  const hash = `#case=${state.incident.id}&tab=${state.tab}`;
+  if (location.hash !== hash) history.replaceState(null, '', hash);
 }
 
 function saveView() {
   if (!state.incident) return;
-  state.views.set(state.incident.id, {stage: state.stage, artifact: state.artifact, positions: {...state.positions}, focus: state.focus, filter: state.filter});
+  state.views.set(state.incident.id, {tab: state.tab, ev: {...state.ev}, selection: state.selection, filter: state.filter, changeQuery: state.changeQuery});
 }
 
-async function selectCase(identifier) {
+async function selectCase(identifier, tab = null) {
   const version = ++state.version;
   saveView();
   state.switching = identifier;
   notice(); renderCases();
-  $('#workspace').setAttribute('aria-busy', 'true');
+  $('#content').setAttribute('aria-busy', 'true');
   try {
     const incident = await api(`/api/incidents/${encodeURIComponent(identifier)}`);
     if (version !== state.version) return;
     const run = state.runs.get(identifier) || null, view = state.views.get(identifier);
     Object.assign(state, {
-      incident, run, switching: null, back: null, lines: null, page: 1, next: null, total: 0,
-      stage: view && stageAvailable(view.stage, run) ? view.stage : defaultStage(run),
-      artifact: view?.artifact || 'events.jsonl', positions: {...(view?.positions || {})},
-      focus: view?.focus || null, filter: view?.filter || '',
+      incident, run, switching: null, sheet: false,
+      tab: tab || view?.tab || (run?.review ? 'changes' : 'investigation'),
+      ev: view?.ev ? {...view.ev} : {name: 'events.jsonl', query: '', citedOnly: false, activeRef: null},
+      selection: view?.selection || null, filter: view?.filter || '', changeQuery: view?.changeQuery || '',
     });
-    $('#artifact').innerHTML = incident.artifacts.map(a=>`<option value="${escape(a.name)}">${text(a.name)} · ${text(a.bytes)} B</option>`).join('');
-    $('#artifact').value = state.artifact;
-    $('#goto-line').value = '';
-    if (location.hash !== `#case=${identifier}`) history.replaceState(null, '', `#case=${identifier}`);
     render();
-    focusWorkspace();
-    const ref = state.focus?.refs[state.focus.index];
-    await evidence(state.artifact, state.positions[state.artifact] || 1, {scrollTo: ref && fileOf(ref) === state.artifact ? ref : null});
+    $('#content').focus({preventScroll: true});
   } finally {
-    if (version === state.version) { state.switching = null; $('#workspace').removeAttribute('aria-busy'); renderCases(); }
+    if (version === state.version) { state.switching = null; $('#content').removeAttribute('aria-busy'); renderCases(); }
   }
 }
 
-/* ---------- Main content ---------- */
+/* ---------- Shell ---------- */
 
 function render() {
   if (!state.incident) return;
   renderCases();
-  $('#title').textContent = state.incident.title;
-  document.querySelectorAll('[data-stage]').forEach(button=>{
-    button.disabled = state.busy || !stageAvailable(button.dataset.stage);
-    button.classList.toggle('selected', button.dataset.stage===state.stage);
-    button.setAttribute('aria-current', button.dataset.stage===state.stage ? 'step' : 'false');
-  });
-  const {stage, run} = state;
-  $('#content').innerHTML = stage === 'incident' ? incidentView() : stage === 'investigate' ? investigateView() : run?.review ? reviewView() : '';
-  renderLines();
+  renderRunCard();
+  renderHeader();
+  renderTabs();
+  renderPanel();
+  renderContext();
+  updateHash();
 }
 
-function incidentView() {
-  const {incident, busy} = state;
+function renderHeader() {
+  const {incident, run, busy} = state;
+  const [label, tone] = statusOf(run);
+  $('#title').textContent = incident.title;
+  $('#crumb-case').textContent = incident.title;
+  $('#incident-meta').innerHTML = `<span class="status ${tone}">${text(label)}</span>
+    <span class="chip">${text(modeLabel(run?.mode || incident.mode))}</span>
+    ${run?`<span class="chip mono" title="Run identifier">${text(run.id)}</span>`:''}
+    <span class="chip">SQLite</span><span class="chip">Read-only source</span><span class="chip">Copy-only rehearsal</span>
+    <span class="chip quiet">Meta credits pending · no API calls</span>`;
+  const investigate = (primary) => `<button class="${primary?'primary':'secondary'} ${busy?'busy':''}" data-action="investigate" ${busy?'disabled':''}>${busy?'Working…':run?'New offline investigation':'Start offline investigation'}</button>`;
+  let actions = '';
+  if (!run) actions = investigate(true);
+  else if (run.status === 'proposed') actions = `${investigate(false)}<button class="primary ${busy?'busy':''}" data-action="rehearse" ${busy?'disabled':''}>${busy?'Rehearsing on a copy…':'Rehearse on a disposable copy'}</button>`;
+  else actions = investigate(false);
+  $('#header-actions').innerHTML = `${actions}<span class="caption">Event-aware script · no model calls</span>`;
+}
+
+function renderTabs() {
+  const review = state.run?.review;
+  const counts = {
+    evidence: state.incident.artifacts.length,
+    changes: review ? review.changes.length : '',
+    checks: review ? `${review.checks.filter(c => c.passed).length}/${review.checks.length}` : '',
+    sql: review && state.run.status !== 'ready_for_review' ? 'unavailable' : '',
+  };
+  const labels = {investigation: 'Investigation', evidence: 'Evidence', changes: 'Changes', checks: 'Checks', sql: 'SQL'};
+  for (const tab of TABS) {
+    const button = $(`#tab-${tab}`), selected = tab === state.tab;
+    button.setAttribute('aria-selected', String(selected));
+    button.setAttribute('tabindex', selected ? '0' : '-1');
+    const failed = tab === 'checks' && review && !review.passed;
+    button.innerHTML = `${labels[tab]}${counts[tab] !== '' && counts[tab] !== undefined ? `<span class="count ${failed?'bad':''}">${text(counts[tab])}</span>` : ''}`;
+  }
+  $('#content').setAttribute('aria-labelledby', `tab-${state.tab}`);
+}
+
+function setTab(tab, focusTab = false) {
+  if (!TABS.includes(tab)) return;
+  state.tab = tab;
+  renderTabs(); renderPanel(); updateHash();
+  if (focusTab) $(`#tab-${tab}`).focus();
+}
+
+function renderPanel() {
+  const views = {investigation: investigationView, evidence: evidenceView, changes: changesView, checks: checksTab, sql: sqlView};
+  $('#content').innerHTML = views[state.tab]();
+  if (state.tab === 'evidence') renderEvidence();
+  if (state.tab === 'sql') maybeLoadSql();
+  markSelection();
+}
+
+const emptyState = (title, body) => `<div class="empty"><h2>${text(title)}</h2><p>${text(body)}</p></div>`;
+
+/* ---------- Investigation ---------- */
+
+function incidentOverview() {
+  const {incident} = state;
   const multipleRetries = incident.scenario === 'multiple-retries';
   return `<div class="section-heading"><h2>${multipleRetries?'Two partial imports. Two retries.':'A partial import. A full retry.'}</h2>${badge('Open incident',true)}</div>
-    <p class="incident-note">${multipleRetries?'Two attempts lost their connections after partial writes. A final retry completed, then customers made genuine purchases.':'The importer lost its connection after some writes. It retried the source file while customers continued buying.'} Similar-looking purchases may be legitimate.</p>
+    <p class="lede">${multipleRetries?'Two attempts lost their connections after partial writes. A final retry completed, then customers made genuine purchases.':'The importer lost its connection after some writes. It retried the source file while customers continued buying.'} Similar-looking purchases may be legitimate.</p>
     <div class="metrics">${metric(incident.active_orders,'active order records')}${metric(incident.artifacts.length,'evidence files')}${metric(incident.products.length,'products affected')}</div>
-    <div class="callout"><strong>The question to resolve</strong><br>Which records repeat the same source action, and which later purchases must stay? A stock correction also needs a compensating ledger entry.</div>
-    <div class="action-row"><button class="primary ${busy?'busy':''}" data-action="investigate" ${busy?'disabled':''}>${busy?'Reading local evidence…':'Start offline investigation →'}</button><span class="caption">Event-aware script · no model calls</span></div>
-    <h3>Current inventory · source database</h3>${table(['Product','Available stock'],incident.products.map(p=>[text(p.name),text(p.on_hand)]))}
-    <details><summary class="small muted">Incident note and supported schema</summary><p class="small">${text(incident.note.lines.map(l=>l.text).join('\n'))}</p><pre>${text(incident.schema.map(s=>s.sql).join('\n\n'))}</pre></details>
-    <div class="order-toggle"><h3>Order records</h3><span class="caption">${incident.orders.length} observed records</span></div>
+    <div class="callout"><strong>The question to resolve</strong><br>Which records repeat the same source action, and which later purchases must stay? A stock correction also needs a compensating ledger entry.</div>`;
+}
+
+function sourceRecords() {
+  const {incident} = state;
+  return `<h3>Current inventory · source database</h3>${table(['Product','Available stock'],incident.products.map(p=>[text(p.name),`<span class="num">${text(p.on_hand)}</span>`]))}
+    <details class="fold"><summary>Incident note and supported schema</summary><p class="small">${text(incident.note.lines.map(l=>l.text).join('\n'))}</p><pre>${text(incident.schema.map(s=>s.sql).join('\n\n'))}</pre></details>
+    <div class="row-head"><h3>Order records</h3><span class="caption">${incident.orders.length} observed records · select one for details</span></div>
     ${orderTable(incident.orders)}`;
 }
 
-function investigateView() {
-  const {run, busy} = state;
-  const stopped = run.status === 'stopped';
-  return `<div class="section-heading"><h2>${stopped?'Evidence needed to continue':'A bounded proposal'}</h2>${badge(stopped?'Stopped':'Script observations',stopped)}</div>
-    <div class="callout ${stopped?'stop':''}"><strong>${stopped?'No repair exported.':'Investigation result'}</strong><br>${text(run.summary)}</div>
+function callsView(trace) {
+  return `<div class="row-head"><h3>${trace.length} local function calls · deterministic script</h3><span class="caption">Actual calls, in order</span></div>
     <p class="small muted">The steps below are actual local function calls made by the deterministic script. They are not model reasoning or a replay of a model run.</p>
-    <details class="trace-wrap"><summary>${run.trace.length} local function calls · deterministic script</summary><ol class="trace">${run.trace.map((step,i)=>`<li><details><summary>${String(i+1).padStart(2,'0')} ${text(step.tool)}<span>${text(step.arguments.name|| (step.tool==='query_database'?'read-only SQLite':'observed result'))}</span></summary><pre>${text(JSON.stringify({arguments:step.arguments,result:step.result},null,2))}</pre></details></li>`).join('')}</ol></details>
-    ${run.plan?`<div class="section-heading"><h3>Proposed cancellations</h3>${badge(`${run.plan.cancellations.length} targets`)}</div><p class="small muted">Keep the first recorded write for each source event. Each target cites both committed writes; select one to inspect them side by side.</p>${planTable(run.plan)}
-    <div class="action-row"><button class="primary ${busy?'busy':''}" data-action="rehearse" ${busy?'disabled':''}>${busy?'Rehearsing on a copy…':'Rehearse on a disposable copy →'}</button><span class="caption">Engine validates evidence and resulting state</span></div>`:
-    `<h3>Next useful step</h3><p class="small">Recover the committed-write logs for the missing source events, then investigate again. The source has not been changed.</p><details><summary class="small">${run.missing_event_ids.length} source events without commit evidence</summary><pre>${text(run.missing_event_ids.join('\n'))}</pre></details>`}
-    <button class="secondary" data-action="investigate" ${busy?'disabled':''}>Start a fresh offline investigation</button>`;
+    <ol class="calls">${trace.map((step,i)=>{
+      const a = step.arguments || {};
+      const arg = a.name ? `${a.name}${a.start_line ? ` · from L${a.start_line}` : ''}` : step.tool === 'query_database' ? (a.sql || '') : 'no arguments';
+      return `<li><details class="call"><summary><span class="idx">${pad(i+1)}</span><span class="tool mono">${text(step.tool)}</span><span class="arg mono">${text(arg)}</span><span class="ok">observed</span></summary><pre>${text(JSON.stringify({arguments:step.arguments,result:step.result},null,2))}</pre></details></li>`;
+    }).join('')}</ol>`;
 }
 
-function reviewView() {
-  const {run, busy} = state, review = run.review, ready = run.status === 'ready_for_review';
-  const passed = review.checks.filter(c => c.passed).length;
-  const source = review.checks.find(c => c.name === 'source_snapshot_unchanged');
-  const skus = [...new Set(review.changes.map(c => c.before.sku))].sort();
-  const checkout = review.preserved_orders.filter(isCheckout);
-  const others = review.preserved_orders.filter(o => !isCheckout(o));
-  const fromCancellations = new Map();
-  for (const change of review.changes) {
-    const entry = fromCancellations.get(change.before.sku) || {orders: 0, units: 0};
-    entry.orders += 1; entry.units += change.before.quantity;
-    fromCancellations.set(change.before.sku, entry);
-  }
-  return `<div class="section-heading"><h2>${ready?'Rehearsed. Ready for your review.':'Export unavailable'}</h2>${badge(ready?'Copy only':(RUN_STATUS[run.status]?.[0]||run.status.replaceAll('_',' ')),!ready)}</div>
-    <div class="callout ${ready?'success':'stop'}">${text(run.summary)}</div>
-    <div class="metrics four">${metric(`${review.before_active} → ${review.after_active}`,'active records')}${metric(review.cancellations,'duplicate orders cancelled')}${metric(`${review.checkout_preserved} / ${review.checkout_total}`,'later checkout purchases intact')}${metric(`${passed} / ${review.checks.length}`,'independent checks passed')}</div>
-    <ul class="assurance" aria-label="Review boundaries">
-      <li>Offline script · no model</li>
-      <li>Changes exist only on a disposable copy</li>
-      ${run.status==='blocked'?'<li class="fail">Export is blocked; see the reason above</li>':source?`<li class="${source.passed?'':'fail'}">${source.passed?'At rehearsal: source matched the snapshot':'At rehearsal: source differed from the snapshot'}</li>`:''}
-      <li>At rehearsal: ${text(review.untargeted_preserved)} untargeted records matched the source</li>
-    </ul>
-    <nav class="review-nav" aria-label="Review sections">${REVIEW_SECTIONS.map(([id,label])=>`<button data-jump="${id}">${label}</button>`).join('')}</nav>
-
-    <section id="rv-stock" class="review-section"><h3>Inventory before and after</h3>
-      ${table(['Product','Before','After','Change','From cancellations'],review.stock.map(p=>{
-        const delta = p.after - p.before, entry = fromCancellations.get(p.sku);
-        return [text(p.name),text(p.before),text(p.after),`<span class="${delta>0?'positive':delta<0?'cancelled':''}">${delta>0?'+':''}${text(delta)}</span>`,entry?`${entry.orders} orders · +${entry.units} units`:'—'];
-      }))}
-    </section>
-
-    <section id="rv-checks" class="review-section"><div class="section-heading"><h3>Independent operational checks</h3>${badge(`${passed} / ${review.checks.length} passed`,!review.passed)}</div>
-      <p class="small muted">These checks describe the rehearsal snapshot. Export status is shown above and rechecked on every download.</p>
-      ${checksView(review.checks)}
-    </section>
-
-    <section id="rv-changes" class="review-section"><div class="section-heading"><h3>Changed records & supporting evidence</h3>
-      <div class="filter"><label for="change-filter">Product</label><select id="change-filter"><option value="">All products (${review.changes.length})</option>${skus.map(sku=>`<option value="${escape(sku)}" ${sku===state.filter?'selected':''}>${text(sku)} (${review.changes.filter(c=>c.before.sku===sku).length})</option>`).join('')}</select></div></div>
-      <p class="small muted">Original orders and sale movements remain in the candidate; cancellations add compensating stock entries. Select a citation to inspect both committed writes.</p>
-      <div id="change-table">${changesTable(review.changes)}</div>
-    </section>
-
-    <section id="rv-preserved" class="review-section"><h3>Preserved work</h3>
-      <p class="small muted">All ${review.preserved_orders.length} untargeted orders match their original records.</p>
-      <h4>Later checkout purchases · ${checkout.length}</h4>
-      <p class="small muted">Checkout references identify the supplied fixture’s later purchases. ${text(review.checkout_preserved)} of ${text(review.checkout_total)} remain unchanged.</p>
-      ${orderTable(checkout)}
-      <details class="preserved-more"><summary class="small">Other untouched records · ${others.length}</summary>${orderTable(others)}</details>
-    </section>
-
-    <section id="rv-artifacts" class="review-section"><h3>Review artifacts</h3>
-      <p class="small muted">Each download rechecks source, evidence and candidate freshness. Guarded SQL also rejects changed table state when applied. Human review is required.</p>
-      <div class="download-row">${run.downloads.map(name=>`<button class="download" data-download="${escape(name)}"><strong>↓ ${text(name)}</strong><span>${text(DOWNLOAD_NOTES[name]||'')}</span></button>`).join('')||'<span class="caption">No artifacts available for export.</span>'}</div>
-      <div class="action-row"><button class="secondary" data-action="investigate" ${busy?'disabled':''}>Start a fresh investigation</button><span class="caption">Source database untouched</span></div>
-    </section>`;
-}
-
-function checksView(checks) {
-  const known = new Set(CHECK_GROUPS.flatMap(([, names]) => names));
-  const groups = [...CHECK_GROUPS.map(([label, names]) => [label, checks.filter(c => names.includes(c.name))]),
-    ['Other checks', checks.filter(c => !known.has(c.name))]].filter(([, list]) => list.length);
-  return `<div class="check-groups">${groups.map(([label, list]) => {
-    const ok = list.filter(c => c.passed).length;
-    return `<div class="check-group ${ok<list.length?'has-fail':''}"><div class="check-group-head"><h4>${text(label)}</h4><span class="caption">${ok} / ${list.length} passed</span></div>
-      <ul class="checks">${list.map(c=>`<li class="${c.passed?'':'fail'}"><span class="check-icon ${c.passed?'':'cancelled'}" aria-hidden="true">${c.passed?'✓':'×'}</span><div><strong>${text(c.name.replaceAll('_',' '))}</strong><span class="sr-only"> ${c.passed?'passed':'failed'}</span><div class="check-detail">${text(c.detail)}</div></div></li>`).join('')}</ul></div>`;
-  }).join('')}</div>`;
+function investigationView() {
+  const {run} = state;
+  if (!run) return `${incidentOverview()}<p class="small muted">Start the offline investigation from the header. It reads the evidence with bounded, read-only tools.</p>${sourceRecords()}`;
+  const stopped = run.status === 'stopped';
+  const result = `<div class="section-heading"><h2>${stopped?'Evidence needed to continue':run.plan?'A bounded proposal':'Investigation result'}</h2>${badge(stopped?'Stopped':'Script observations',stopped)}</div>
+    <div class="callout ${stopped?'stop':''}"><strong>${stopped?'No repair exported.':'Investigation result'}</strong><br>${text(run.summary)}</div>`;
+  const plan = run.plan ? `<div class="row-head"><h3>Proposed cancellations</h3>${badge(`${run.plan.cancellations.length} targets`)}</div>
+    <p class="small muted">Keep the first recorded write for each source event. Each target cites both committed writes; select a row to inspect them.${run.status==='proposed'?' Next: rehearse on a disposable copy from the header.':''}</p>${planTable(run.plan)}` : '';
+  const stop = stopped ? `<h3>Next useful step</h3><p class="small">Recover the committed-write logs for the missing source events, then investigate again. The source has not been changed.</p>
+    <div class="row-head"><h4>${run.missing_event_ids.length} source events without commit evidence</h4><span class="caption">Select one to find it in the evidence</span></div>
+    <div class="id-grid">${run.missing_event_ids.map(id=>`<button class="id-chip mono" data-key="event:${escape(id)}" aria-selected="false">${text(id)}</button>`).join('')}</div>` : '';
+  return `${result}${plan}${stop}${callsView(run.trace)}<details class="fold"><summary>Incident overview and source records</summary>${incidentOverview()}${sourceRecords()}</details>`;
 }
 
 function orderTable(rows) {
-  return table(['Order ID','Customer','Product','Qty','Status','Source reference'],rows.map(o=>[`<span class="mono">${text(o.id)}</span>`,text(o.customer),text(o.sku),text(o.quantity),text(o.status),text(o.source_reference||'—')]));
+  return table(['Order ID','Customer','Product','Qty','Status','Source reference'],
+    rows.map(o=>[`<span class="mono">${text(o.id)}</span>`,text(o.customer),text(o.sku),`<span class="num">${text(o.quantity)}</span>`,text(o.status),`<span class="mono">${text(o.source_reference||'—')}</span>`]),
+    rows.map(o=>`class="sel" tabindex="0" data-key="order:${escape(o.id)}" aria-selected="false"`));
 }
 
 function citations(action) {
-  const refs = action.evidence_refs.join(' ');
-  return `<div class="citations">${action.evidence_refs.map(ref=>`<button class="citation" data-ref="${escape(ref)}" data-refs="${escape(refs)}" data-cancel="${escape(action.order_id)}" data-keep="${escape(action.duplicate_of)}">${text(ref)}</button>`).join('')}</div>`;
+  return `<span class="citations">${action.evidence_refs.map(ref=>`<button class="citation" data-key="order:${escape(action.order_id)}" data-focus-ref="${escape(ref)}">${text(ref)}</button>`).join('')}</span>`;
 }
 
 function planTable(plan) {
-  const orders = new Map(state.incident.orders.map(o => [o.id, o]));
-  return table(['Cancel duplicate','Purchase','Keep original','Evidence'],plan.cancellations.map(a=>[`<span class="mono cancelled">${text(a.order_id)}</span>`,purchase(orders.get(a.order_id)),`<span class="mono">${text(a.duplicate_of)}</span>`,citations(a)]),
-    plan.cancellations.map(a=>`id="row-${escape(a.order_id)}"`));
+  const orders = ordersById();
+  return table(['Cancel duplicate','Purchase','Keep original','Evidence'],
+    plan.cancellations.map(a=>[`<span class="mono cancelled">${text(a.order_id)}</span>`,purchase(orders.get(a.order_id)),`<span class="mono">${text(a.duplicate_of)}</span>`,citations(a)]),
+    plan.cancellations.map(a=>`class="sel" tabindex="0" data-key="order:${escape(a.order_id)}" aria-selected="false"`));
 }
 
-function changesTable(changes) {
-  const rows = changes.filter(c => !state.filter || c.before.sku === state.filter);
-  return table(['Cancelled on copy','Status','Purchase','Keeps original','Evidence'],rows.map(c=>[`<span class="mono cancelled">${text(c.before.id)}</span>`,`${text(c.before.status)} → <strong>${text(c.after.status)}</strong>`,purchase(c.before),`<span class="mono">${text(c.duplicate_of)}</span>`,citations({order_id:c.before.id,duplicate_of:c.duplicate_of,evidence_refs:c.evidence_refs})]),
-    rows.map(c=>`id="row-${escape(c.before.id)}"`));
-}
+/* ---------- Evidence ---------- */
 
-/* ---------- Evidence inspector ---------- */
+function fileKey(name) { return `${state.incident.id}:${name}`; }
+function fileData(name) { return state.files.get(fileKey(name))?.data || null; }
 
-// Tints JSON keys and strings for readability; every character of the evidence is kept.
-function tint(raw) {
-  const pattern = /"(?:[^"\\]|\\.)*"(\s*:)?/g;
-  let out = '', last = 0, match;
-  while ((match = pattern.exec(raw))) {
-    out += escape(raw.slice(last, match.index)) + `<span class="${match[1]?'tok-key':'tok-str'}">${escape(match[0])}</span>`;
-    last = pattern.lastIndex;
+function ensureFile(name) {
+  const key = fileKey(name), incident = state.incident.id;
+  if (!state.files.has(key)) {
+    const entry = {data: null};
+    entry.promise = (async () => {
+      const lines = []; let start = 1, total = 0, pages = 0;
+      while (start && pages < MAX_PAGES) {
+        const page = await api(`/api/incidents/${encodeURIComponent(incident)}/artifacts/${encodeURIComponent(name)}?start_line=${start}&max_lines=${PAGE}`);
+        lines.push(...page.lines); total = page.total_lines; start = page.next_line; pages += 1;
+      }
+      entry.data = {lines, total, truncated: !!start};
+      return entry.data;
+    })();
+    entry.promise.catch(() => state.files.delete(key));
+    state.files.set(key, entry);
   }
-  return out + escape(raw.slice(last));
+  return state.files.get(key).promise;
 }
 
 function citedRefs() {
@@ -271,71 +296,404 @@ function citedRefs() {
   return cited;
 }
 
-async function evidence(name, line = 1, {scrollTo = null, reveal = false} = {}) {
-  const version = ++state.evidenceVersion, incidentVersion = state.version;
-  const page = await api(`/api/incidents/${encodeURIComponent(state.incident.id)}/artifacts/${encodeURIComponent(name)}?start_line=${line}&max_lines=${PAGE}`);
-  if (version !== state.evidenceVersion || incidentVersion !== state.version) return;
-  Object.assign(state, {artifact: name, page: line, next: page.next_line, total: page.total_lines, lines: page.lines});
-  state.positions[name] = line;
-  $('#artifact').value = name;
-  renderLines();
-  const box = $('#lines');
-  box.scrollTop = 0;
-  const target = scrollTo && document.getElementById(`line-${lineOf(scrollTo)}`);
-  if (target) box.scrollTop = target.offsetTop - box.offsetTop - 24;
-  if (reveal) { $('.evidence').scrollIntoView({block:'nearest'}); box.focus({preventScroll:true}); }
+// Tints JSON keys and strings for readability; every character of the evidence is kept.
+function tint(raw) {
+  const pattern = /"(?:[^"\\]|\\.)*"(\s*:)?/g;
+  let out = '', last = 0, match;
+  while ((match = pattern.exec(raw))) {
+    out += escape(raw.slice(last, match.index)) + `<span class="${match[1]?'tok-key':'tok-str'}">${escape(match[0])}</span>`;
+    last = pattern.lastIndex;
+  }
+  return out + escape(raw.slice(last));
 }
 
-function renderLines() {
-  const lines = state.lines, focus = state.focus;
-  const focusRefs = new Set(focus?.refs || []), current = focus?.refs[focus.index];
-  const cited = citedRefs(), json = /\.jsonl?$/.test(state.artifact);
-  $('#prev').disabled = !lines || state.page === 1;
-  $('#next').disabled = !lines || !state.next;
-  if (!lines) { $('#evidence-range').textContent = 'Loading…'; $('#lines').innerHTML = ''; renderFocus(); return; }
-  $('#evidence-range').textContent = lines.length ? `Lines ${state.page}–${state.page + lines.length - 1} of ${state.total}` : 'No lines';
-  $('#lines').innerHTML = lines.map(l=>{
-    const n = lineOf(l.ref), classes = ['evidence-line'], orders = cited.get(l.ref);
-    if (focusRefs.has(l.ref)) classes.push('highlight');
-    if (l.ref === current) classes.push('current');
-    if (orders) classes.push('cited');
-    let tag = '';
-    if (focusRefs.has(l.ref) && focus.cancel) {
-      tag = l.text.includes(focus.cancel) ? `${focus.cancel} · cancellation target` : l.text.includes(focus.keep) ? `${focus.keep} · retained write` : '';
-    }
-    const title = orders ? ` title="Cited for cancelling ${escape(orders.join(', '))}"` : '';
-    return `<div class="${classes.join(' ')}" id="line-${n}"><span class="line-no"${title}>${n}</span><span class="line-text">${json?tint(l.text):text(l.text)}</span>${tag?`<span class="line-tag">${text(tag)}</span>`:''}</div>`;
-  }).join('');
-  $('#evidence-legend').hidden = !lines.some(l => cited.has(l.ref));
-  renderFocus();
+function highlight(raw, query) {
+  const lower = raw.toLowerCase(), q = query.toLowerCase();
+  let out = '', last = 0, at = lower.indexOf(q);
+  while (q && at !== -1) { out += escape(raw.slice(last, at)) + `<mark>${escape(raw.slice(at, at + q.length))}</mark>`; last = at + q.length; at = lower.indexOf(q, last); }
+  return out + escape(raw.slice(last));
 }
 
-function renderFocus() {
-  const box = $('#evidence-focus'), focus = state.focus, back = state.back;
-  if (!focus && !back) { box.hidden = true; box.innerHTML = ''; return; }
-  const rowShown = focus?.cancel && document.getElementById(`row-${focus.cancel}`);
-  box.hidden = false;
-  box.innerHTML = `${focus?`<div class="focus-head"><span>${focus.cancel?`Citations for cancelling <span class="mono">${text(focus.cancel)}</span>, keeping <span class="mono">${text(focus.keep)}</span>`:`Line ${text(lineOf(focus.refs[0]))} of ${text(fileOf(focus.refs[0]))}`}</span><button class="link-button" data-focus-clear>Clear</button></div>
-    <div class="focus-refs">${focus.refs.map((ref,i)=>`<button class="ref-chip" data-focus-index="${i}" ${i===focus.index?'aria-current="true"':''}>${text(ref)}</button>`).join('')}${rowShown?`<button class="link-button" data-show-row="${escape(focus.cancel)}">Show in table</button>`:''}</div>`:''}
-    ${back?`<button class="link-button" data-back>↩ Back to ${text(back.name)}, line ${text(back.page)}</button>`:''}`;
+// The citation pair the current selection points at, with the order IDs that label each line.
+function selectionRefs() {
+  const sel = state.selection;
+  if (!sel) return {refs: new Set()};
+  if (sel.kind === 'line') return {refs: new Set([sel.id])};
+  if (sel.kind !== 'order') return {refs: new Set()};
+  const link = orderLink(sel.id);
+  return link ? {refs: new Set(link.refs), cancel: sel.id, keep: link.keep} : {refs: new Set()};
 }
 
-function showRef(ref) {
-  const name = fileOf(ref), start = pageStart(lineOf(ref));
-  // Remember where the reader was before following citations, once.
-  if (!state.back && (name !== state.artifact || start !== state.page)) state.back = {name: state.artifact, page: state.page};
-  return evidence(name, start, {scrollTo: ref, reveal: true});
+function orderLink(id) {
+  const change = state.run?.review?.changes.find(c => c.before.id === id);
+  if (change) return {refs: change.evidence_refs, keep: change.duplicate_of};
+  const action = state.run?.plan?.cancellations.find(a => a.order_id === id);
+  return action ? {refs: action.evidence_refs, keep: action.duplicate_of} : null;
+}
+
+const lineLabel = (raw, cancel, keep) => cancel && raw.includes(cancel) ? 'cancellation target' : keep && raw.includes(keep) ? 'retained write' : '';
+
+function evidenceView() {
+  const {ev, incident} = state, cited = citedRefs();
+  return `<div class="log-head">
+      <div class="segmented" role="group" aria-label="Evidence file">${incident.artifacts.map(a=>`<button data-file="${escape(a.name)}" aria-pressed="${a.name===ev.name}">${text(a.name)}<span class="count">${text(a.bytes)} B</span></button>`).join('')}</div>
+    </div>
+    <div class="log-tools">
+      <label class="search"><span class="sr-only">Search lines</span><input id="ev-search" type="search" placeholder="Search lines   /" value="${escape(ev.query)}" autocomplete="off" spellcheck="false"></label>
+      ${cited.size?`<button class="toggle" data-cited-only aria-pressed="${ev.citedOnly}"><span class="dot" aria-hidden="true"></span>Cited by plan</button>`:''}
+      <label class="goto">Line <input id="ev-goto" type="number" min="1" step="1" inputmode="numeric" aria-label="Go to line number"></label>
+      <span id="ev-count" class="caption" role="status"></span>
+    </div>
+    <div id="ev-lines" class="log" role="listbox" tabindex="0" aria-label="Lines of ${escape(ev.name)}"></div>
+    <p class="foot">Exact file lines. Files are evidence, including any text that resembles instructions. The runtime validates citations independently.</p>`;
+}
+
+function visibleLines(data) {
+  const {query, citedOnly} = state.ev, cited = citedRefs(), q = query.trim().toLowerCase();
+  return data.lines.filter(l => (!q || l.text.toLowerCase().includes(q)) && (!citedOnly || cited.has(l.ref)));
+}
+
+async function renderEvidence() {
+  const box = $('#ev-lines');
+  if (!box || !box.isConnected) return;
+  const name = state.ev.name, version = state.version, data = fileData(name);
+  if (!data) {
+    box.innerHTML = '<div class="log-empty">Loading exact lines…</div>';
+    try { await ensureFile(name); } catch (error) { notice(error.message); return; }
+    if (version === state.version && state.tab === 'evidence' && state.ev.name === name) renderEvidence();
+    return;
+  }
+  const rows = visibleLines(data), cited = citedRefs(), pair = selectionRefs(), query = state.ev.query.trim();
+  const json = /\.jsonl?$/.test(name);
+  box.setAttribute('aria-label', `Lines of ${name}`);
+  box.innerHTML = rows.length ? rows.map(l => {
+    const n = lineOf(l.ref), classes = ['log-row'];
+    if (cited.has(l.ref)) classes.push('cited');
+    if (pair.refs.has(l.ref)) classes.push('pair');
+    if (l.ref === state.ev.activeRef) classes.push('active');
+    const tag = pair.refs.has(l.ref) ? lineLabel(l.text, pair.cancel, pair.keep) : '';
+    return `<div role="option" id="ev-${n}" class="${classes.join(' ')}" data-key="line:${escape(l.ref)}" aria-selected="false"><span class="ln">${n}</span><span class="lt">${query?highlight(l.text, query):json?tint(l.text):text(l.text)}</span>${tag?`<span class="line-tag">${text(tag)}</span>`:''}</div>`;
+  }).join('') : `<div class="log-empty">No lines match${query?` “${text(query)}”`:''}${state.ev.citedOnly?' among cited lines':''}.</div>`;
+  $('#ev-count').textContent = `${rows.length} of ${data.total} lines${data.truncated ? ' · first 10,000 loaded' : ''}`;
+  const active = state.ev.activeRef && document.getElementById(`ev-${lineOf(state.ev.activeRef)}`);
+  if (active) {
+    box.setAttribute('aria-activedescendant', active.id);
+    const top = active.offsetTop, bottom = top + active.offsetHeight;
+    if (top < box.scrollTop || bottom > box.scrollTop + box.clientHeight) box.scrollTop = Math.max(0, top - box.clientHeight / 3);
+  } else box.removeAttribute('aria-activedescendant');
+  markSelection();
+}
+
+function moveActive(step, edge = null) {
+  const data = fileData(state.ev.name); if (!data) return;
+  const rows = visibleLines(data); if (!rows.length) return;
+  let index = rows.findIndex(l => l.ref === state.ev.activeRef);
+  if (edge === 'start') index = 0; else if (edge === 'end') index = rows.length - 1;
+  else index = index === -1 ? 0 : Math.min(rows.length - 1, Math.max(0, index + step));
+  state.ev.activeRef = rows[index].ref;
+  renderEvidence();
+}
+
+function openInEvidence(ref, query = '', name = null) {
+  Object.assign(state.ev, {name: name || (ref ? fileOf(ref) : state.ev.name), query, citedOnly: false, activeRef: ref || null});
+  setTab('evidence');
+  const settle = () => { const box = $('#ev-lines'); if (box) box.focus({preventScroll: true}); };
+  ensureFile(state.ev.name).then(() => { if (state.tab === 'evidence') { renderEvidence(); settle(); } }).catch(error => notice(error.message));
 }
 
 function gotoLine() {
-  const n = Number($('#goto-line').value);
-  if (!Number.isInteger(n) || n < 1 || (state.total && n > state.total)) {
-    $('#evidence-range').textContent = `Choose a line from 1 to ${state.total || 1}`;
-    return null;
+  const input = $('#ev-goto'), data = fileData(state.ev.name), n = Number(input?.value);
+  if (!data) return;
+  if (!Number.isInteger(n) || n < 1 || n > data.total) { $('#ev-count').textContent = `Choose a line from 1 to ${data.total}`; return; }
+  const ref = `${state.ev.name}:L${n}`;
+  if (!visibleLines(data).some(l => l.ref === ref)) Object.assign(state.ev, {query: '', citedOnly: false});
+  state.ev.activeRef = ref;
+  renderPanel();
+  select(`line:${ref}`, {keepFocus: true});
+  $('#ev-lines').focus({preventScroll: true});
+}
+
+/* ---------- Changes (review) ---------- */
+
+function changesView() {
+  const run = state.run;
+  if (!run) return emptyState('No changes yet', 'Start the offline investigation, then rehearse its proposal on a disposable copy.');
+  if (!run.review) return emptyState(run.status === 'stopped' ? 'No repair was proposed' : 'Not rehearsed yet',
+    run.status === 'stopped' ? 'The investigation stopped because evidence is missing. Nothing was changed.' : 'Rehearse the proposal on a disposable copy to see field-level changes.');
+  return reviewView();
+}
+
+function reviewView() {
+  const run = state.run, review = run.review;
+  return `${reviewSummary(run, review)}${diffView(review)}${artifactsView(run)}`;
+}
+
+function reviewSummary(run, review) {
+  const ready = run.status === 'ready_for_review';
+  const passed = review.checks.filter(c => c.passed).length;
+  const source = review.checks.find(c => c.name === 'source_snapshot_unchanged');
+  const failed = review.checks.filter(c => !c.passed);
+  return `<div class="section-heading"><h2>${ready?'Rehearsed. Ready for your review.':'Export unavailable'}</h2>${badge(ready?'Copy only':statusOf(run)[0],!ready)}</div>
+    <div class="callout ${ready?'success':'stop'}">${text(run.summary)}</div>
+    <div class="metrics four">${metric(`${review.before_active} → ${review.after_active}`,'active records')}${metric(review.cancellations,'duplicate orders cancelled')}${metric(`${review.checkout_preserved} / ${review.checkout_total}`,'later checkout purchases intact')}${metric(`${passed} / ${review.checks.length}`,'independent checks passed')}</div>
+    <ul class="assurance" aria-label="Review boundaries">
+      <li>Offline script · no model</li>
+      <li>Changes exist only on a disposable copy</li>
+      ${run.status==='blocked'?'<li class="fail">Export is blocked; see the reason above</li>':source?`<li class="${source.passed?'':'fail'}">${source.passed?'At rehearsal: source matched the snapshot':'At rehearsal: source differed from the snapshot'}</li>`:''}
+      <li>At rehearsal: ${text(review.untargeted_preserved)} untargeted records matched the source</li>
+    </ul>
+    <p class="small muted">Counts, changes and checks describe the rehearsal snapshot. Export status is shown above and rechecked on every download.</p>
+    ${failed.length?`<div class="failed"><h3>Failed checks at rehearsal</h3><ul>${failed.map(c=>`<li><span class="group">${text(groupOf(c.name))}</span><strong>${text(c.name.replaceAll('_',' '))}</strong><div class="check-detail">${text(c.detail)}</div></li>`).join('')}</ul></div>`:''}`;
+}
+
+function diffView(review) {
+  const skus = [...new Set(review.changes.map(c => c.before.sku))].sort();
+  const stockChanged = review.stock.filter(p => p.after !== p.before);
+  const checkout = review.preserved_orders.filter(isCheckout), others = review.preserved_orders.filter(o => !isCheckout(o));
+  const byProduct = new Map();
+  for (const change of review.changes) {
+    const entry = byProduct.get(change.before.sku) || {orders: 0, units: 0};
+    entry.orders += 1; entry.units += change.before.quantity;
+    byProduct.set(change.before.sku, entry);
   }
-  const ref = `${state.artifact}:L${n}`;
-  state.focus = {refs: [ref], index: 0};
-  return showRef(ref);
+  return `<section class="diff" aria-labelledby="diff-title">
+    <div class="diff-head"><div><span class="eyebrow">Rehearsal diff</span><h3 id="diff-title">Source snapshot → disposable copy</h3></div>
+      <div class="diff-counts"><span class="mod">~${review.changes.length} orders</span><span class="mod">~${stockChanged.length} products</span><span class="same">=${review.preserved_orders.length} orders unchanged</span></div></div>
+    <div class="diff-tools">
+      <label class="search"><span class="sr-only">Search changed records</span><input id="change-search" type="search" placeholder="Search order, customer or product   /" value="${escape(state.changeQuery)}" autocomplete="off" spellcheck="false"></label>
+      <label class="filter">Product <select id="change-filter"><option value="">All (${review.changes.length})</option>${skus.map(sku=>`<option value="${escape(sku)}" ${sku===state.filter?'selected':''}>${text(sku)} (${review.changes.filter(c=>c.before.sku===sku).length})</option>`).join('')}</select></label>
+    </div>
+    <div class="group-head"><h4>orders</h4><span class="caption">Only <span class="mono">status</span> changes. Original rows and sale movements are kept; cancellations add compensating stock entries.</span></div>
+    <div id="change-table">${changesTable(review.changes)}</div>
+    <div class="group-head"><h4>products</h4><span class="caption"><span class="mono">on_hand</span> before and after rehearsal</span></div>
+    ${table(['','Product','on_hand','Change','From cancellations'],review.stock.map(p=>{
+      const delta = p.after - p.before, entry = byProduct.get(p.sku);
+      return [`<span class="sym ${delta?'mod':'same'}">${delta?'~':'='}</span>`,`${text(p.name)} <span class="mono faint">${text(p.sku)}</span>`,`<span class="before num">${text(p.before)}</span> → <span class="after num">${text(p.after)}</span>`,`<span class="${delta>0?'positive':delta<0?'cancelled':''} num">${delta>0?'+':''}${text(delta)}</span>`,entry?`${entry.orders} orders · +${entry.units} units`:'—'];
+    }),review.stock.map(p=>`class="sel" tabindex="0" data-key="product:${escape(p.sku)}" aria-selected="false"`))}
+    <div class="group-head"><h4>preserved work</h4><span class="caption">Checkout references identify the supplied fixture’s later purchases. ${text(review.checkout_preserved)} of ${text(review.checkout_total)} remain unchanged.</span></div>
+    ${orderTable(checkout)}
+    <details class="fold"><summary>Other untouched records · ${others.length}</summary>${orderTable(others)}</details>
+  </section>`;
+}
+
+function changesTable(changes) {
+  const q = state.changeQuery.trim().toLowerCase();
+  const rows = changes.filter(c => (!state.filter || c.before.sku === state.filter) &&
+    (!q || [c.before.id, c.before.customer, c.before.sku, c.duplicate_of].some(v => String(v).toLowerCase().includes(q))));
+  if (!rows.length) return `<div class="log-empty">No changed records match.</div>`;
+  return table(['','Order','Purchase','status','Keeps original','Evidence'],rows.map(c=>{
+    const changed = Object.keys(c.before).filter(k => c.before[k] !== c.after[k]);
+    return [`<span class="sym mod" title="${escape(changed.join(', '))} changed">~</span>`,`<span class="mono cancelled">${text(c.before.id)}</span>`,purchase(c.before),`<span class="before">${text(c.before.status)}</span> → <span class="after">${text(c.after.status)}</span>`,`<button class="link mono" data-key="order:${escape(c.duplicate_of)}">${text(c.duplicate_of)}</button>`,citations({order_id:c.before.id,evidence_refs:c.evidence_refs})];
+  }),rows.map(c=>`class="sel" tabindex="0" data-key="order:${escape(c.before.id)}" aria-selected="false"`));
+}
+
+function artifactsView(run) {
+  const check = state.exportChecks.get(run.id);
+  return `<section class="artifacts"><h3>Review artifacts</h3>
+    <p class="small muted">Each download rechecks source, evidence and candidate freshness. Guarded SQL also rejects changed table state when applied. Human review is required.${check?` Last check: ${check.ok?'passed':'refused'} at ${time(check.at)}.`:''}</p>
+    <div class="download-row">${run.downloads.map(name=>`<button class="download" data-download="${escape(name)}"><strong>↓ ${text(name)}</strong><span>${text(DOWNLOAD_NOTES[name]||'')}</span></button>`).join('')||'<span class="caption">No artifacts available for export.</span>'}</div>
+    <p class="caption">Source database untouched.</p></section>`;
+}
+
+/* ---------- Checks ---------- */
+
+function exportStatus(run) {
+  const check = state.exportChecks.get(run.id);
+  if (run.status === 'ready_for_review') return {label: 'Available', tone: 'ok', detail: check?.ok ? `Last freshness check passed at ${time(check.at)} (${check.artifact}).` : 'Not rechecked since rehearsal. Every download and SQL view rechecks source and evidence.'};
+  if (run.status === 'blocked') return {label: 'Refused', tone: 'warn', detail: `${run.summary}${check && !check.ok ? ` Checked at ${time(check.at)}.` : ''}`};
+  if (run.status === 'failed_checks') return {label: 'Unavailable', tone: 'danger', detail: 'Operational checks failed at rehearsal, so nothing can be exported.'};
+  return {label: statusOf(run)[0], tone: '', detail: run.summary};
+}
+
+function checksTab() {
+  const run = state.run, review = run?.review;
+  if (!review) return emptyState(run?.status === 'stopped' ? 'No checks ran' : 'Not rehearsed yet',
+    run?.status === 'stopped' ? 'The investigation stopped before any repair, so there was nothing to check.' : 'Independent checks run when a proposal is rehearsed on a disposable copy.');
+  const passed = review.checks.filter(c => c.passed).length, meta = state.runMeta.get(run.id) || {}, exp = exportStatus(run);
+  return `<div class="section-heading"><h2>Independent operational checks</h2>${badge(`${passed} / ${review.checks.length} passed`,!review.passed)}</div>
+    <div class="status-cards">
+      <div class="status-card ${review.passed?'ok':'danger'}"><span class="eyebrow">At rehearsal</span><strong>${passed} / ${review.checks.length} checks passed</strong><span class="caption">Observed on the rehearsal snapshot${meta.rehearsedAt?` · received ${time(meta.rehearsedAt)}`:''}</span></div>
+      <div class="status-card ${exp.tone}"><span class="eyebrow">Current export status</span><strong>${text(exp.label)}</strong><span class="caption">${text(exp.detail)}</span></div>
+    </div>
+    <p class="small muted">These checks describe the rehearsal snapshot. Export status is shown above and rechecked on every download.</p>
+    ${checksView(review.checks)}`;
+}
+
+function checksView(checks) {
+  const known = new Set(CHECK_GROUPS.flatMap(([, names]) => names));
+  const groups = [...CHECK_GROUPS.map(([label, names]) => [label, checks.filter(c => names.includes(c.name))]),
+    ['Other checks', checks.filter(c => !known.has(c.name))]].filter(([, list]) => list.length);
+  return `<div class="check-groups">${groups.map(([label, list]) => {
+    const ok = list.filter(c => c.passed).length;
+    return `<div class="check-group ${ok<list.length?'has-fail':''}"><div class="check-group-head"><h4>${text(label)}</h4><span class="caption">${ok} / ${list.length} passed</span></div>
+      <ul class="checks">${list.map(c=>`<li class="sel ${c.passed?'':'fail'}" tabindex="0" data-key="check:${escape(c.name)}" aria-selected="false"><span class="check-icon ${c.passed?'':'cancelled'}" aria-hidden="true">${c.passed?'✓':'×'}</span><div><strong>${text(c.name.replaceAll('_',' '))}</strong><span class="sr-only"> ${c.passed?'passed':'failed'}</span><div class="check-detail">${text(c.detail)}</div></div></li>`).join('')}</ul></div>`;
+  }).join('')}</div>`;
+}
+
+/* ---------- SQL ---------- */
+
+function sqlTint(line) {
+  if (line.trimStart().startsWith('--')) return `<span class="tok-comment">${escape(line)}</span>`;
+  return escape(line).replace(SQL_WORDS, '<span class="tok-kw">$1</span>').replace(/&#39;(.*?)&#39;/g, '<span class="tok-str">&#39;$1&#39;</span>');
+}
+
+function sqlView() {
+  const run = state.run;
+  if (!run?.review) return emptyState('No SQL yet', run?.status === 'stopped' ? 'The investigation stopped, so no repair script was generated.' : 'Rehearse a proposal on a disposable copy to generate the guarded script.');
+  if (run.status !== 'ready_for_review') return `<div class="section-heading"><h2>Export unavailable</h2>${badge(statusOf(run)[0], true)}</div>
+    <div class="callout stop">${text(run.summary)}</div>
+    <p class="small muted">The server only serves SQL for a current, passing rehearsal. Every request rechecks source and evidence first.</p>`;
+  const entry = state.sql.get(run.id) || {status: 'loading'};
+  const body = entry.status === 'ok'
+    ? `<div class="code" role="region" aria-label="repair.sql, read-only" tabindex="0">${entry.text.replace(/\r?\n$/, '').split(/\r?\n/).map((l,i)=>`<div class="code-line"><span class="ln">${i+1}</span><span class="lt">${sqlTint(l)}</span></div>`).join('')}</div>`
+    : entry.status === 'error' ? `<div class="callout stop">${text(entry.message)}</div>` : '<div class="log-empty">Rechecking freshness and loading repair.sql…</div>';
+  return `<div class="sql-head"><div><span class="eyebrow">repair.sql · read-only</span><h2>Guarded repair script</h2></div>
+      <div class="sql-actions"><button class="secondary" data-copy-sql ${entry.status!=='ok'?'disabled':''}>Copy</button><button class="secondary" data-reload-sql>Recheck and reload</button><button class="secondary" data-download="repair.sql">↓ Download</button></div></div>
+    <p class="small muted">Not applied by this workbench. Loaded through the freshness-gated download route${entry.at?` at ${time(entry.at)}`:''}. The script uses <span class="mono">BEGIN IMMEDIATE</span> and rolls back if table state differs from the rehearsal. Human review is required.</p>
+    ${body}`;
+}
+
+function maybeLoadSql() {
+  const run = state.run;
+  if (run?.status === 'ready_for_review' && !state.sql.has(run.id)) loadSql();
+}
+
+async function loadSql() {
+  const runId = state.run.id;
+  state.sql.set(runId, {status: 'loading'});
+  if (state.tab === 'sql') renderPanel();
+  try {
+    const response = await fetchArtifact('repair.sql');
+    state.sql.set(runId, {status: 'ok', text: await response.text(), at: new Date()});
+  } catch (error) {
+    state.sql.set(runId, {status: 'error', message: error.message});
+    notice(error.message);
+  }
+  if (state.run?.id === runId) render();
+}
+
+/* ---------- Context panel ---------- */
+
+function fieldTable(before, after) {
+  const keys = Object.keys(before);
+  if (!after) return `<table class="fields"><tbody>${keys.map(k=>`<tr><th scope="row">${text(k)}</th><td class="mono">${text(before[k] ?? 'NULL')}</td></tr>`).join('')}</tbody></table>`;
+  return `<table class="fields diffs"><thead><tr><th scope="col">Field</th><th scope="col">Before</th><th scope="col">After</th></tr></thead><tbody>${keys.map(k=>{
+    const changed = before[k] !== after[k];
+    if (!changed) return `<tr><th scope="row">${text(k)}</th><td class="mono same" colspan="2">${text(before[k] ?? 'NULL')}<span class="sr-only"> unchanged</span></td></tr>`;
+    return `<tr class="changed"><th scope="row">${text(k)}<span class="sr-only"> changed</span></th><td class="mono before">${text(before[k] ?? 'NULL')}</td><td class="mono after">${text(after[k] ?? 'NULL')}</td></tr>`;
+  }).join('')}</tbody></table>`;
+}
+
+function citeBlock(ref, cancel, keep, focus) {
+  const data = fileData(fileOf(ref)), line = data?.lines.find(l => l.ref === ref);
+  if (!data) ensureFile(fileOf(ref)).then(() => renderContext()).catch(error => notice(error.message));
+  const label = line ? lineLabel(line.text, cancel, keep) : '';
+  return `<div class="cite ${ref===focus?'focus':''}"><div class="cite-head"><button class="citation" data-open-ref="${escape(ref)}" title="Open in Evidence">${text(ref)}</button>${label?`<span class="line-tag">${text(label)}</span>`:''}</div>
+    <pre class="cite-line">${line?tint(line.text):data?'Line not found in the loaded evidence.':'Loading exact line…'}</pre></div>`;
+}
+
+function orderContext(id, focusRef) {
+  const review = state.run?.review;
+  const change = review?.changes.find(c => c.before.id === id);
+  const planned = !change && state.run?.plan?.cancellations.find(a => a.order_id === id);
+  const record = change?.before || ordersById().get(id) || review?.preserved_orders.find(o => o.id === id);
+  if (!record) return `<p class="muted">This record is not in the selected incident.</p>`;
+  let html = `<h2 class="mono ctx-title">${text(id)}</h2><p class="small muted">${purchase(record)}</p>`;
+  if (change) html += `<div class="ctx-status">${badge('Changed on the copy', true)}<span class="caption">Engine before/after at rehearsal</span></div>${fieldTable(change.before, change.after)}`;
+  else if (planned) html += `<div class="ctx-status">${badge('Proposed cancellation')}<span class="caption">Not rehearsed yet · current source values</span></div>${fieldTable(record)}`;
+  else if (review) html += `<div class="ctx-status">${badge('Unchanged at rehearsal', 'ok')}</div>${fieldTable(record)}`;
+  else html += `<div class="ctx-status">${badge('Source record')}</div>${fieldTable(record)}`;
+  const link = change ? {refs: change.evidence_refs, keep: change.duplicate_of} : planned ? {refs: planned.evidence_refs, keep: planned.duplicate_of} : null;
+  if (link) {
+    html += `<div class="ctx-keep">Keeps original <button class="link mono" data-key="order:${escape(link.keep)}">${text(link.keep)}</button></div>`;
+    html += `<h3>Supporting evidence</h3>${link.refs.map(ref => citeBlock(ref, id, link.keep, focusRef)).join('')}`;
+  }
+  const citedBy = (state.run?.plan?.cancellations || []).filter(a => a.duplicate_of === id);
+  if (citedBy.length) html += `<h3>Retained for</h3><div class="id-grid">${citedBy.map(a=>`<button class="id-chip mono" data-key="order:${escape(a.order_id)}">${text(a.order_id)}</button>`).join('')}</div>`;
+  return html;
+}
+
+function productContext(sku) {
+  const review = state.run?.review, row = review?.stock.find(p => p.sku === sku);
+  if (!row) return `<p class="muted">No rehearsal data for this product.</p>`;
+  const changes = review.changes.filter(c => c.before.sku === sku);
+  return `<h2 class="ctx-title">${text(row.name)} <span class="mono faint">${text(sku)}</span></h2>
+    <div class="ctx-status">${badge(row.after !== row.before ? 'Changed on the copy' : 'Unchanged', row.after !== row.before)}<span class="caption">Engine before/after at rehearsal</span></div>
+    ${fieldTable({sku, name: row.name, on_hand: row.before}, {sku, name: row.name, on_hand: row.after})}
+    ${changes.length?`<h3>From ${changes.length} cancellations</h3><div class="id-grid">${changes.map(c=>`<button class="id-chip mono" data-key="order:${escape(c.before.id)}">${text(c.before.id)} · +${text(c.before.quantity)}</button>`).join('')}</div>`:''}`;
+}
+
+function checkContext(name) {
+  const check = state.run?.review?.checks.find(c => c.name === name);
+  if (!check) return `<p class="muted">This check is not in the current review.</p>`;
+  return `<h2 class="ctx-title">${text(name.replaceAll('_', ' '))}</h2>
+    <div class="ctx-status">${badge(check.passed ? 'Passed' : 'Failed', check.passed ? 'ok' : 'danger')}<span class="caption">${text(groupOf(name))} · observed at rehearsal</span></div>
+    <p class="small">${text(check.detail)}</p><p class="caption mono">${text(name)}</p>
+    <p class="small muted">Checks run on the rehearsal snapshot and cannot be edited by the plan. Export status is rechecked separately on every download.</p>`;
+}
+
+function lineContext(ref) {
+  const data = fileData(fileOf(ref)), line = data?.lines.find(l => l.ref === ref);
+  if (!data) ensureFile(fileOf(ref)).then(() => renderContext()).catch(error => notice(error.message));
+  let fields = '';
+  try { const parsed = line && JSON.parse(line.text); if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) fields = `<h3>Fields</h3>${fieldTable(parsed)}`; } catch (_) { /* not JSON */ }
+  const citedBy = citedRefs().get(ref) || [];
+  return `<h2 class="mono ctx-title">${text(ref)}</h2><div class="ctx-status">${badge('Exact evidence line')}${citedBy.length?badge(`Cited by ${citedBy.length}`, 'ok'):''}</div>
+    <pre class="cite-line">${line?tint(line.text):'Loading exact line…'}</pre>${fields}
+    ${citedBy.length?`<h3>Cited for cancelling</h3><div class="id-grid">${citedBy.map(id=>`<button class="id-chip mono" data-key="order:${escape(id)}">${text(id)}</button>`).join('')}</div>`:''}
+    ${state.tab!=='evidence'?`<button class="secondary" data-open-ref="${escape(ref)}">Open in Evidence</button>`:''}`;
+}
+
+function eventContext(id) {
+  const data = fileData('source_orders.json');
+  if (!data) ensureFile('source_orders.json').then(() => renderContext()).catch(error => notice(error.message));
+  const hits = data ? data.lines.filter(l => l.text.includes(id)) : [];
+  return `<h2 class="mono ctx-title">${text(id)}</h2><div class="ctx-status">${badge('No commit evidence', true)}</div>
+    <p class="small">This imported source event has no committed-write record linking it to an order ID, so the script stopped instead of guessing.</p>
+    ${data?(hits.length?`<h3>In source_orders.json</h3>${hits.map(l=>`<div class="cite"><div class="cite-head"><button class="citation" data-open-ref="${escape(l.ref)}">${text(l.ref)}</button></div><pre class="cite-line">${tint(l.text)}</pre></div>`).join('')}`:'<p class="small muted">Not found in source_orders.json.</p>'):'<p class="small muted">Loading source_orders.json…</p>'}
+    <button class="secondary" data-search-event="${escape(id)}">Search events.jsonl for this event</button>`;
+}
+
+function renderContext() {
+  const box = $('#context'), sel = state.selection;
+  // On narrow screens the panel is a sheet that opens only on an explicit selection.
+  box.classList.toggle('open', !!sel && state.sheet);
+  if (!sel || !state.incident) {
+    box.innerHTML = `<div class="ctx-head"><span class="eyebrow">Details</span></div><div class="ctx-empty"><h2>Nothing selected</h2>
+      <p class="small muted">Select a record, evidence line, check or citation to see exact values here.</p>
+      <ul class="assurance stacked"><li>Read-only source</li><li>Copy-only rehearsal</li><li>Offline script · no model</li></ul></div>`;
+    return;
+  }
+  const kinds = {order: ['Record', orderContext], product: ['Product', productContext], check: ['Check', checkContext], line: ['Evidence line', lineContext], event: ['Missing evidence', eventContext]};
+  const [label, view] = kinds[sel.kind] || ['Details', () => ''];
+  box.innerHTML = `<div class="ctx-head"><span class="eyebrow">${label}</span><button class="icon-button" data-close-context aria-label="Close details">×</button></div><div class="ctx-body">${view(sel.id, sel.focusRef)}</div>`;
+}
+
+function select(key, {focusRef = null, keepFocus = false} = {}) {
+  const at = key.indexOf(':'), kind = key.slice(0, at), id = key.slice(at + 1);
+  if (!keepFocus) state.lastFocus = document.activeElement;
+  state.selection = {kind, id, focusRef};
+  state.sheet = true;
+  if (kind === 'line') state.ev.activeRef = id;
+  if (state.tab === 'evidence') renderEvidence(); else markSelection();
+  renderContext();
+  if (isNarrow() && !keepFocus) $('#context').focus();
+}
+
+function closeContext() {
+  state.selection = null; state.sheet = false;
+  renderContext(); markSelection();
+  if (state.tab === 'evidence') renderEvidence();
+  if (state.lastFocus?.isConnected) state.lastFocus.focus();
+}
+
+function markSelection() {
+  const sel = state.selection, key = sel ? `${sel.kind}:${sel.id}` : null;
+  document.querySelectorAll('#content [data-key]').forEach(el => {
+    const on = el.dataset.key === key;
+    if (el.hasAttribute('aria-selected')) el.setAttribute('aria-selected', String(on));
+    el.classList.toggle('selected', on);
+  });
 }
 
 /* ---------- Actions ---------- */
@@ -345,74 +703,144 @@ async function act(action) {
   const id = state.incident.id;
   state.busy = true; notice(); render();
   try {
-    const path = action==='investigate'?`/api/incidents/${id}/investigate`:`/api/runs/${state.run.id}/rehearse`;
+    const path = action === 'investigate' ? `/api/incidents/${id}/investigate` : `/api/runs/${state.run.id}/rehearse`;
     const run = await api(path, true);
     state.runs.set(id, run);
+    state.runMeta.set(run.id, action === 'investigate' ? {investigatedAt: new Date()} : {...(state.runMeta.get(run.id) || {}), rehearsedAt: new Date()});
     if (state.incident.id === id) {
-      state.run = run; state.stage = defaultStage(run); state.filter = '';
-      if (action === 'investigate') { state.focus = null; state.back = null; }
+      Object.assign(state, {run, filter: '', changeQuery: ''});
+      if (action === 'investigate') Object.assign(state, {selection: null, tab: 'investigation'});
+      else state.tab = run.review ? 'changes' : 'investigation';
     }
-    if (run.status==='blocked') notice(run.summary);
-  } catch(error) { notice(error.message); }
-  finally { state.busy = false; render(); focusWorkspace(); }
+    if (run.status === 'blocked') notice(run.summary);
+  } catch (error) { notice(error.message); }
+  finally { state.busy = false; render(); $('#content').focus({preventScroll: true}); }
 }
 
-async function download(name) {
+// Every artifact request goes through the server's freshness gate. A delayed failure updates
+// only the case and run it was started for, and names that case in the error.
+async function fetchArtifact(name) {
   const incidentId = state.incident.id, runId = state.run.id;
   const incidentTitle = state.incident.title || incidentId;
   const response = await fetch(`/api/runs/${runId}/artifacts/${encodeURIComponent(name)}`);
   if (!response.ok) {
     const value = await response.json();
     const updated = await api(`/api/runs/${runId}`);
+    state.exportChecks.set(runId, {at: new Date(), ok: false, artifact: name, message: value.error || 'Download blocked.'});
     if (state.runs.get(incidentId)?.id === runId) state.runs.set(incidentId, updated);
     if (state.incident.id === incidentId && state.run?.id === runId) { state.run = updated; render(); }
+    else renderCases(); // another case is on screen: refresh only the sidebar status
     throw new Error(`Download for ${incidentTitle}: ${value.error || 'Download blocked.'}`);
   }
-  const url = URL.createObjectURL(await response.blob()), a = document.createElement('a');
-  a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url), 1000);
+  state.exportChecks.set(runId, {at: new Date(), ok: true, artifact: name});
+  return response;
 }
 
-document.addEventListener('click', event=>{
-  const target = event.target.closest('button'); if (!target || target.disabled) return;
-  const d = target.dataset;
+async function download(name) {
+  const runId = state.run.id;
+  const response = await fetchArtifact(name);
+  const url = URL.createObjectURL(await response.blob()), a = document.createElement('a');
+  a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url), 1000);
+  if (state.run?.id === runId && (state.tab === 'checks' || state.tab === 'changes')) renderPanel();
+}
+
+async function copySql(button) {
+  const entry = state.sql.get(state.run?.id);
+  if (entry?.status !== 'ok') return;
+  try { await navigator.clipboard.writeText(entry.text); button.textContent = 'Copied'; }
+  catch (_) { button.textContent = 'Copy unavailable'; }
+  setTimeout(() => { if (button.isConnected) button.textContent = 'Copy'; }, 1500);
+}
+
+/* ---------- Events ---------- */
+
+document.addEventListener('click', event => {
+  const el = event.target.closest('button, [data-key]');
+  if (!el || el.disabled) return;
+  const d = el.dataset;
   let task;
   if (d.case && d.case !== (state.switching || state.incident?.id)) {
     // The hash gives each case a link and browser back/forward; hashchange performs the switch.
-    if (location.hash === `#case=${d.case}`) task = selectCase(d.case); else location.hash = `case=${d.case}`;
+    const hash = `#case=${d.case}`;
+    if (location.hash.startsWith(`${hash}&`) || location.hash === hash) task = selectCase(d.case); else location.hash = hash.slice(1);
   }
-  if (d.stage) { state.stage = d.stage; render(); focusWorkspace(); }
+  if (d.tab) setTab(d.tab);
   if (d.action) task = act(d.action);
   if (d.download) task = download(d.download);
-  if (d.ref) {
-    const refs = (d.refs || d.ref).split(' ');
-    state.focus = {refs, index: Math.max(0, refs.indexOf(d.ref)), cancel: d.cancel, keep: d.keep};
-    task = showRef(d.ref);
-  }
-  if (d.focusIndex !== undefined && state.focus) { state.focus.index = Number(d.focusIndex); task = showRef(state.focus.refs[state.focus.index]); }
-  if (d.focusClear !== undefined) { state.focus = null; renderLines(); }
-  if (d.back !== undefined && state.back) { const back = state.back; state.back = null; task = evidence(back.name, back.page); }
-  if (d.showRow) {
-    const row = document.getElementById(`row-${d.showRow}`);
-    if (row) { row.scrollIntoView({block:'center'}); row.classList.add('flash'); setTimeout(()=>row.classList.remove('flash'), 1600); }
-  }
-  if (d.jump) document.getElementById(d.jump)?.scrollIntoView({block:'start'});
-  if (task) task.catch(error=>notice(error.message));
+  if (d.file) { Object.assign(state.ev, {name: d.file, activeRef: null}); renderPanel(); }
+  if (d.citedOnly !== undefined) { state.ev.citedOnly = !state.ev.citedOnly; el.setAttribute('aria-pressed', String(state.ev.citedOnly)); renderEvidence(); }
+  if (d.openRef) openInEvidence(d.openRef);
+  if (d.searchEvent) openInEvidence(null, d.searchEvent, 'events.jsonl');
+  if (d.closeContext !== undefined) closeContext();
+  if (d.copySql !== undefined) task = copySql(el);
+  if (d.reloadSql !== undefined) task = loadSql();
+  if (d.key) select(d.key, {focusRef: d.focusRef || null});
+  if (task) task.catch(error => notice(error.message));
 });
-document.addEventListener('change', event=>{
+
+document.addEventListener('keydown', event => {
+  const t = event.target, key = event.key;
+  if (t.getAttribute?.('role') === 'tab' && ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(key)) {
+    event.preventDefault();
+    const index = TABS.indexOf(state.tab);
+    const next = key === 'Home' ? 0 : key === 'End' ? TABS.length - 1 : (index + (key === 'ArrowRight' ? 1 : -1) + TABS.length) % TABS.length;
+    setTab(TABS[next], true);
+    return;
+  }
+  if (t.closest?.('#cases') && ['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(key)) {
+    event.preventDefault();
+    const items = [...document.querySelectorAll('#cases .case')], index = items.indexOf(t.closest('.case'));
+    const next = key === 'Home' ? 0 : key === 'End' ? items.length - 1 : Math.min(items.length - 1, Math.max(0, index + (key === 'ArrowDown' ? 1 : -1)));
+    items[next]?.focus();
+    return;
+  }
+  if (t.id === 'ev-lines') {
+    const moves = {ArrowDown: 1, ArrowUp: -1, PageDown: 15, PageUp: -15};
+    if (key in moves) { event.preventDefault(); moveActive(moves[key]); return; }
+    if (key === 'Home' || key === 'End') { event.preventDefault(); moveActive(0, key === 'Home' ? 'start' : 'end'); return; }
+    if ((key === 'Enter' || key === ' ') && state.ev.activeRef) { event.preventDefault(); select(`line:${state.ev.activeRef}`, {keepFocus: true}); return; }
+  }
+  if (t.id === 'ev-goto' && key === 'Enter') { event.preventDefault(); gotoLine(); return; }
+  if (t.dataset?.key && t.tagName !== 'BUTTON') {
+    if (key === 'Enter' || key === ' ') { event.preventDefault(); select(t.dataset.key); return; }
+    if (key === 'ArrowDown' || key === 'ArrowUp') {
+      const items = [...t.parentElement.querySelectorAll(':scope > [data-key]')], index = items.indexOf(t);
+      const next = items[index + (key === 'ArrowDown' ? 1 : -1)];
+      if (next) { event.preventDefault(); next.focus(); }
+      return;
+    }
+  }
+  if (key === '/' && !isTyping(t)) {
+    const search = $('#ev-search') || $('#change-search');
+    if (search) { event.preventDefault(); search.focus(); search.select(); }
+    return;
+  }
+  if (key === 'Escape' && state.selection && !isTyping(t)) { event.preventDefault(); closeContext(); }
+});
+
+document.addEventListener('input', event => {
+  if (event.target.id === 'ev-search') { state.ev.query = event.target.value; renderEvidence(); }
+  if (event.target.id === 'change-search' && state.run?.review) { state.changeQuery = event.target.value; $('#change-table').innerHTML = changesTable(state.run.review.changes); markSelection(); }
+});
+
+document.addEventListener('change', event => {
   if (event.target.id !== 'change-filter' || !state.run?.review) return;
   state.filter = event.target.value;
   $('#change-table').innerHTML = changesTable(state.run.review.changes);
-  renderFocus();
+  markSelection();
 });
-window.addEventListener('hashchange', ()=>{
-  const id = caseFromHash();
-  if (!id || id === (state.switching || state.incident?.id)) return;
-  if (state.busy) { if (state.incident) history.replaceState(null, '', `#case=${state.incident.id}`); return; }
-  selectCase(id).catch(error=>notice(error.message));
+
+window.addEventListener('hashchange', () => {
+  const target = parseHash();
+  if (!target) return;
+  const shown = state.switching || state.incident?.id;
+  if (target.id === shown) { if (target.tab && target.tab !== state.tab) setTab(target.tab); return; }
+  if (state.busy) { updateHash(); return; }
+  selectCase(target.id, target.tab).catch(error => notice(error.message));
 });
-$('#artifact').addEventListener('change', ()=>{ const name = $('#artifact').value; evidence(name, state.positions[name] || 1).catch(e=>notice(e.message)); });
-$('#prev').addEventListener('click', ()=>evidence(state.artifact, Math.max(1, state.page - PAGE)).catch(e=>notice(e.message)));
-$('#next').addEventListener('click', ()=>{ if (state.next) evidence(state.artifact, state.next).catch(e=>notice(e.message)); });
-$('#goto').addEventListener('click', ()=>gotoLine()?.catch(e=>notice(e.message)));
-$('#goto-line').addEventListener('keydown', event=>{ if (event.key === 'Enter') { event.preventDefault(); gotoLine()?.catch(e=>notice(e.message)); } });
-api('/api/incidents').then(async data=>{ state.cases = data.incidents; await selectCase(caseFromHash() || data.incidents[0].id); }).catch(error=>notice(error.message));
+
+api('/api/incidents').then(async data => {
+  state.cases = data.incidents;
+  const target = parseHash();
+  await selectCase(target?.id || data.incidents[0].id, target?.tab || null);
+}).catch(error => notice(error.message));
