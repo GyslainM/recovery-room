@@ -6,6 +6,7 @@ const $ = (selector) => document.querySelector(selector);
 const PAGE = 200;      // server maximum lines per evidence request
 const MAX_PAGES = 50;  // bounds one evidence file at 10,000 lines
 const TABS = ['investigation', 'evidence', 'changes', 'checks', 'sql'];
+const TAB_META = {investigation: ['scan-search', 'Investigation'], evidence: ['file-text', 'Evidence'], changes: ['git-compare', 'Changes'], checks: ['shield-check', 'Checks'], sql: ['database', 'SQL']};
 const state = {
   // runs: the full run record shown for each case. history: server run summaries per case, newest first.
   incident: null, run: null, cases: [], runs: new Map(), history: new Map(), views: new Map(),
@@ -18,7 +19,15 @@ const state = {
 const escape = (value) => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const text = (value) => escape(value);
 const badge = (value, tone = '') => `<span class="pill ${tone === true ? 'warn' : tone || ''}">${text(value)}</span>`;
-const metric = (value, label) => `<div class="metric"><strong>${text(value)}</strong><span>${text(label)}</span></div>`;
+// count: optional {from, to, prefix, suffix} for a one-time count-up after a fresh rehearsal.
+// The rendered text is always the final value, so the page is correct even without animation.
+const metric = (value, label, count = null) => {
+  const attrs = count ? ` data-count-from="${count.from}" data-count-to="${count.to}" data-count-prefix="${escape(count.prefix || '')}" data-count-suffix="${escape(count.suffix || '')}"` : '';
+  return `<div class="metric"><strong${attrs}>${text(value)}</strong><span>${text(label)}</span></div>`;
+};
+// Lucide icons from the inline sprite in index.html (lucide-static 1.55.0, ISC; notice kept there).
+const icon = (name, cls = '') => `<svg class="icon ${cls}" aria-hidden="true" focusable="false"><use href="#i-${name}"></use></svg>`;
+const skeleton = (lines = 6) => `<div class="skeleton-stack" aria-hidden="true">${'<span class="skeleton"></span>'.repeat(lines)}</div><span class="sr-only">Loading</span>`;
 const table = (headers, rows, rowAttrs = []) => `<div class="scroll-table"><table><thead><tr>${headers.map(h=>`<th scope="col">${h}</th>`).join('')}</tr></thead><tbody>${rows.map((row,i)=>`<tr ${rowAttrs[i]||''}>${row.map(c=>`<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
 const pad = (n) => String(n).padStart(2, '0');
 const time = (d) => d ? d.toLocaleTimeString() : '';
@@ -55,14 +64,88 @@ const DOWNLOAD_NOTES = {
 };
 const SQL_WORDS = /\b(PRAGMA|BEGIN|IMMEDIATE|COMMIT|ROLLBACK|CREATE|TEMP|TABLE|AS|SELECT|FROM|WHERE|INSERT|INTO|VALUES|UPDATE|SET|DELETE|AND|OR|NOT|NULL|IS|IN|EXISTS|CASE|WHEN|THEN|ELSE|END|CHECK|INTEGER|ON|DROP|COUNT|UNION|ALL|EXCEPT|LIMIT)\b/g;
 
-async function api(path, post = false) {
-  const response = await fetch(path, post ? {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'} : {});
-  const value = await response.json();
-  if (!response.ok) throw new Error(value.error || 'The local request failed.');
-  return value;
+// A thin top progress bar while any local request is in flight (CSS delays it so quick requests never flash).
+let loadingCount = 0;
+function setLoading(on) {
+  loadingCount = Math.max(0, loadingCount + (on ? 1 : -1));
+  const bar = $('#progress');
+  if (bar) bar.hidden = loadingCount === 0;
 }
 
-function notice(message = '') { $('#notice').textContent = message; $('#notice').hidden = !message; }
+async function api(path, post = false) {
+  setLoading(true);
+  try {
+    const response = await fetch(path, post ? {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'} : {});
+    const value = await response.json();
+    if (!response.ok) throw new Error(value.error || 'The local request failed.');
+    return value;
+  } finally { setLoading(false); }
+}
+
+// Errors stay on screen until the next action; confirmations go to transient toasts.
+function notice(message = '') {
+  $('#notice').innerHTML = message ? `${icon('circle-alert')}<span>${text(message)}</span>` : '';
+  $('#notice').hidden = !message;
+}
+
+let toastSeq = 0;
+function toast(message, tone = 'ok') {
+  const host = $('#toasts');
+  if (!host || typeof host.insertAdjacentHTML !== 'function') return;
+  const icons = {ok: 'circle-check', info: 'info', warn: 'triangle-alert', error: 'circle-x'}, id = `toast-${++toastSeq}`;
+  host.insertAdjacentHTML('beforeend', `<div class="toast ${tone}" id="${id}">${icon(icons[tone] || 'info')}<span>${text(message)}</span><button class="icon-button" data-dismiss-toast="${id}" aria-label="Dismiss notification">${icon('x')}</button></div>`);
+  while (host.children.length > 3) host.firstElementChild.remove();
+  const el = document.getElementById(id);
+  let timer = setTimeout(() => dismissToast(el), 4000);
+  el.addEventListener('mouseenter', () => clearTimeout(timer));
+  el.addEventListener('mouseleave', () => { timer = setTimeout(() => dismissToast(el), 1800); });
+}
+function dismissToast(el) {
+  if (!el?.isConnected || el.classList.contains('leaving')) return;
+  el.classList.add('leaving');
+  setTimeout(() => el.remove(), prefersReducedMotion() ? 0 : 180);
+}
+
+/* ---------- Motion ---------- */
+
+const prefersReducedMotion = () => typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+// Runs a DOM update inside a same-document view transition where supported (Chromium); otherwise immediately.
+// kind selects the CSS choreography: 'forward' / 'back' for tabs, 'case' for case and run switches.
+// Motion must never block state: if the browser is not producing frames (background tab, hidden window),
+// the update is applied after a short timeout and the transition's own call becomes a no-op.
+function transition(update, kind = 'swap') {
+  if (typeof document.startViewTransition !== 'function' || prefersReducedMotion() || document.visibilityState === 'hidden') { update(); return; }
+  let applied = false;
+  const once = () => { if (!applied) { applied = true; update(); } };
+  const root = document.documentElement;
+  root.dataset.vt = kind;
+  try {
+    document.startViewTransition(once).finished.catch(() => {}).finally(() => { if (root.dataset.vt === kind) delete root.dataset.vt; });
+  } catch (_) { once(); delete root.dataset.vt; }
+  setTimeout(once, 250);
+}
+
+// One-time count-up for metrics rendered with data-count-* after a fresh rehearsal.
+function animateCounts() {
+  if (prefersReducedMotion()) return;
+  document.querySelectorAll('#content [data-count-to]').forEach(el => {
+    const from = Number(el.dataset.countFrom), to = Number(el.dataset.countTo), final = el.textContent;
+    const {countPrefix: prefix = '', countSuffix: suffix = ''} = el.dataset, start = performance.now(), duration = 650;
+    const step = (now) => {
+      const p = Math.min(1, (now - start) / duration), eased = 1 - Math.pow(1 - p, 3);
+      el.textContent = p < 1 ? `${prefix}${Math.round(from + (to - from) * eased)}${suffix}` : final;
+      if (p < 1 && el.isConnected) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  });
+}
+
+function positionTabIndicator() {
+  const ind = $('.tab-ind'), tab = $(`#tab-${state.tab}`);
+  if (!ind?.style || !tab || typeof tab.offsetLeft !== 'number') return;
+  ind.style.setProperty('--x', `${tab.offsetLeft}px`);
+  ind.style.setProperty('--w', `${tab.offsetWidth}px`);
+}
 
 const statusOf = (run) => run ? (RUN_STATUS[run.status] || [run.status.replaceAll('_', ' '), '']) : ['Not started', ''];
 const modeInfo = (mode) => MODE_INFO[mode] || {
@@ -123,9 +206,12 @@ async function loadRun(runId) {
   if (version !== state.version || state.incident?.id !== caseId) return;
   state.runs.set(caseId, run);
   upsertHistory(run);
-  Object.assign(state, {run, selection: null, sheet: false, filter: '', changeQuery: ''});
-  if (!run.review && ['changes', 'checks', 'sql'].includes(state.tab)) state.tab = 'investigation';
-  render();
+  transition(() => {
+    if (version !== state.version || state.incident?.id !== caseId) return;
+    Object.assign(state, {run, selection: null, sheet: false, filter: '', changeQuery: ''});
+    if (!run.review && ['changes', 'checks', 'sql'].includes(state.tab)) state.tab = 'investigation';
+    render();
+  }, 'case');
 }
 
 function renderCases() {
@@ -186,14 +272,17 @@ async function selectCase(identifier, tab = null) {
       state.runs.set(identifier, run);
     }
     const view = state.views.get(identifier);
-    Object.assign(state, {
-      incident, run, switching: null, sheet: false,
-      tab: tab || view?.tab || (run?.review ? 'changes' : 'investigation'),
-      ev: view?.ev ? {...view.ev} : {name: 'events.jsonl', query: '', citedOnly: false, activeRef: null},
-      selection: view?.selection || null, filter: view?.filter || '', changeQuery: view?.changeQuery || '',
-    });
-    render();
-    $('#content').focus({preventScroll: true});
+    transition(() => {
+      if (version !== state.version) return; // a newer case switch started before this frame
+      Object.assign(state, {
+        incident, run, switching: null, sheet: false,
+        tab: tab || view?.tab || (run?.review ? 'changes' : 'investigation'),
+        ev: view?.ev ? {...view.ev} : {name: 'events.jsonl', query: '', citedOnly: false, activeRef: null},
+        selection: view?.selection || null, filter: view?.filter || '', changeQuery: view?.changeQuery || '',
+      });
+      render();
+      $('#content').focus({preventScroll: true});
+    }, 'case');
   } finally {
     if (version === state.version) { state.switching = null; $('#content').removeAttribute('aria-busy'); renderCases(); }
   }
@@ -224,20 +313,22 @@ function renderHeader() {
     <span class="chip">Source read-only · Rehearsal on a copy</span>${olderRunNote(run)}`;
   $('#run-details').hidden = !run;
   $('#run-details-body').innerHTML = run ? `<dl class="run-facts">
-      <dt>Run ID</dt><dd><span class="mono">${text(run.id)}</span> <button class="link" data-copy-value="${escape(run.id)}" data-copy-what="Run ID">Copy run ID</button></dd>
+      <dt>Run ID</dt><dd><span class="mono">${text(run.id)}</span> <button class="link" data-copy-value="${escape(run.id)}" data-copy-what="Run ID">${icon('copy')}<span>Copy run ID</span></button></dd>
       <dt>Started</dt><dd>${text(started(run.created_at)) || 'Not recorded'}</dd>
       <dt>Method</dt><dd>${text(info.long)}. ${text(info.method)}</dd>
       <dt>Review boundary</dt><dd>The source stays unchanged. Rehearsal uses a disposable copy. Human review is required before using exported SQL.</dd>
     </dl>` : '';
   // A new investigation is always one click away: the server's refusal messages tell the user to start one.
-  const investigate = (primary) => `<button class="${primary?'primary':'secondary'} ${busy?'busy':''}" data-action="investigate" ${busy?'disabled':''}>${busy?'Working…':run?'New offline investigation':'Start offline investigation'}</button>`;
+  // Busy buttons keep their place and show a spinner with the work in progress.
+  const working = (label) => `${icon('loader-circle', 'spin')}<span>${label}</span>`;
+  const investigate = (primary) => `<button class="${primary?'primary':'secondary'}" data-action="investigate" ${busy?'disabled aria-busy="true"':''}>${busy && state.busyAction === 'investigate' ? working('Reading local evidence…') : `${icon(run?'refresh-cw':'play')}<span>${run?'New offline investigation':'Start offline investigation'}</span>`}</button>`;
   let actions = '';
   if (!run) actions = investigate(true);
-  else if (run.status === 'proposed') actions = `${investigate(false)}<button class="primary ${busy?'busy':''}" data-action="rehearse" ${busy?'disabled':''}>${busy?'Rehearsing on a copy…':'Rehearse on a disposable copy'}</button>`;
-  else if (run.status === 'ready_for_review') actions = `${investigate(false)}<button class="primary" data-review-repair>Review repair</button>`;
-  else if (run.status === 'failed_checks') actions = `${investigate(false)}<button class="primary" data-tab="checks">Review failed checks</button>`;
+  else if (run.status === 'proposed') actions = `${investigate(false)}<button class="primary" data-action="rehearse" ${busy?'disabled aria-busy="true"':''}>${busy && state.busyAction === 'rehearse' ? working('Rehearsing on a copy…') : `${icon('flask-conical')}<span>Rehearse on a disposable copy</span>`}</button>`;
+  else if (run.status === 'ready_for_review') actions = `${investigate(false)}<button class="primary" data-review-repair>${icon('git-compare')}<span>Review repair</span></button>`;
+  else if (run.status === 'failed_checks') actions = `${investigate(false)}<button class="primary" data-tab="checks">${icon('shield-check')}<span>Review failed checks</span></button>`;
   // Blocked: recovery is a new investigation. Only a run that was rehearsed has a repair to review.
-  else if (run.status === 'blocked') actions = `${run.review ? '<button class="secondary" data-review-repair>Review blocked repair</button>' : ''}${investigate(true)}`;
+  else if (run.status === 'blocked') actions = `${run.review ? `<button class="secondary" data-review-repair>${icon('git-compare')}<span>Review blocked repair</span></button>` : ''}${investigate(true)}`;
   else actions = investigate(false);
   $('#header-actions').innerHTML = actions;
 }
@@ -256,22 +347,25 @@ function renderTabs() {
     checks: review ? `${review.checks.filter(c => c.passed).length}/${review.checks.length}` : '',
     sql: review && state.run.status !== 'ready_for_review' ? 'unavailable' : '',
   };
-  const labels = {investigation: 'Investigation', evidence: 'Evidence', changes: 'Changes', checks: 'Checks', sql: 'SQL'};
   for (const tab of TABS) {
-    const button = $(`#tab-${tab}`), selected = tab === state.tab;
+    const button = $(`#tab-${tab}`), selected = tab === state.tab, [iconName, label] = TAB_META[tab];
     button.setAttribute('aria-selected', String(selected));
     button.setAttribute('tabindex', selected ? '0' : '-1');
     const failed = tab === 'checks' && review && !review.passed;
-    button.innerHTML = `${labels[tab]}${counts[tab] !== '' && counts[tab] !== undefined ? `<span class="count ${failed?'bad':''}">${text(counts[tab])}</span>` : ''}`;
+    button.innerHTML = `${icon(iconName)}<span>${label}</span>${counts[tab] !== '' && counts[tab] !== undefined ? `<span class="count ${failed?'bad':''}">${text(counts[tab])}</span>` : ''}`;
   }
   $('#content').setAttribute('aria-labelledby', `tab-${state.tab}`);
+  positionTabIndicator();
 }
 
 function setTab(tab, focusTab = false) {
   if (!TABS.includes(tab)) return;
-  state.tab = tab;
-  renderTabs(); renderPanel(); updateHash();
-  if (focusTab) $(`#tab-${tab}`).focus();
+  const direction = TABS.indexOf(tab) >= TABS.indexOf(state.tab) ? 'forward' : 'back';
+  transition(() => {
+    state.tab = tab;
+    renderTabs(); renderPanel(); updateHash();
+    if (focusTab) $(`#tab-${tab}`).focus();
+  }, tab === state.tab ? 'swap' : direction);
 }
 
 function renderPanel() {
@@ -281,11 +375,12 @@ function renderPanel() {
   if (state.tab === 'evidence') renderEvidence();
   if (state.tab === 'sql') maybeLoadSql();
   markSelection();
+  if (state.countUp && state.countUp === state.run?.id && state.tab === 'changes') { state.countUp = null; animateCounts(); }
 }
 
 // The tab bar already moves between Changes, Checks and SQL; this only adds the jump to the artifacts.
 function reviewJump() {
-  return `<div class="review-jump"><span class="caption">Review the changes, checks and SQL, then the artifacts.</span><button class="link small" data-review-downloads>Jump to review artifacts ↓</button></div>`;
+  return `<div class="review-jump"><span class="caption">Review the changes, checks and SQL, then the artifacts.</span><button class="link small" data-review-downloads>${icon('arrow-down')}Jump to review artifacts</button></div>`;
 }
 
 function reviewRepair(downloads = false) {
@@ -295,17 +390,17 @@ function reviewRepair(downloads = false) {
   target?.focus({preventScroll: true});
 }
 
-const emptyState = (title, body) => `<div class="empty"><h2>${text(title)}</h2><p>${text(body)}</p></div>`;
+const emptyState = (title, body, iconName = 'info') => `<div class="empty">${icon(iconName, 'empty-icon')}<h2>${text(title)}</h2><p>${text(body)}</p></div>`;
 
 // Why a run has no rehearsal review, from its server status. A run blocked before rehearsal cannot be
 // rehearsed again (the server only rehearses proposed runs), so it points to a new investigation instead.
 function noReview(run, what) {
-  if (!run) return emptyState(`No ${what} yet`, 'Start the offline investigation, then rehearse its proposal on a disposable copy.');
-  if (run.status === 'stopped') return emptyState('No repair was proposed', 'The investigation stopped because evidence is missing. Nothing was changed.');
+  if (!run) return emptyState(`No ${what} yet`, 'Start the offline investigation, then rehearse its proposal on a disposable copy.', 'play');
+  if (run.status === 'stopped') return emptyState('No repair was proposed', 'The investigation stopped because evidence is missing. Nothing was changed.', 'ban');
   if (run.status === 'blocked') return `<div class="section-heading"><h2>Rehearsal refused</h2>${badge('Export blocked', true)}</div>
     <div class="callout stop">${text(run.summary)}</div>
     <p class="small muted">Nothing was rehearsed or changed. Start a new offline investigation from the header to work from the current source and evidence.</p>`;
-  return emptyState('Not rehearsed yet', `Rehearse the proposal on a disposable copy to see ${what}.`);
+  return emptyState('Not rehearsed yet', `Rehearse the proposal on a disposable copy to see ${what}.`, 'flask-conical');
 }
 
 /* ---------- Investigation ---------- */
@@ -448,7 +543,7 @@ function evidenceView() {
       <div class="segmented" role="group" aria-label="Evidence file">${incident.artifacts.map(a=>`<button data-file="${escape(a.name)}" aria-pressed="${a.name===ev.name}">${text(a.name)}<span class="count">${text(a.bytes)} B</span></button>`).join('')}</div>
     </div>
     <div class="log-tools">
-      <label class="search"><span class="sr-only">Search lines</span><input id="ev-search" type="search" placeholder="Search lines   /" value="${escape(ev.query)}" autocomplete="off" spellcheck="false"></label>
+      <label class="search">${icon('search')}<span class="sr-only">Search lines</span><input id="ev-search" type="search" placeholder="Search lines" value="${escape(ev.query)}" autocomplete="off" spellcheck="false"><kbd aria-hidden="true">/</kbd></label>
       ${cited.size?`<button class="toggle" data-cited-only aria-pressed="${ev.citedOnly}"><span class="dot" aria-hidden="true"></span>Cited by plan</button>`:''}
       <label class="goto">Line <input id="ev-goto" type="number" min="1" step="1" inputmode="numeric" aria-label="Go to line number"></label>
       <span id="ev-count" class="caption" role="status"></span>
@@ -467,7 +562,7 @@ async function renderEvidence() {
   if (!box || !box.isConnected) return;
   const name = state.ev.name, version = state.version, data = fileData(name);
   if (!data) {
-    box.innerHTML = '<div class="log-empty">Loading exact lines…</div>';
+    box.innerHTML = `<div class="log-loading">${skeleton(14)}</div>`;
     try { await ensureFile(name); } catch (error) { notice(error.message); return; }
     if (version === state.version && state.tab === 'evidence' && state.ev.name === name) renderEvidence();
     return;
@@ -542,7 +637,7 @@ function reviewSummary(run, review) {
   const failed = review.checks.filter(c => !c.passed);
   return `<div class="section-heading"><h2>${ready?'Rehearsed. Ready for your review.':'Export unavailable'}</h2>${badge(ready?'Rehearsal snapshot':statusOf(run)[0],!ready)}</div>
     <div class="callout ${ready?'success':'stop'}">${text(run.summary)}</div>
-    <div class="metrics four">${metric(`${review.before_active} → ${review.after_active}`,'active records')}${metric(review.cancellations,'duplicate orders cancelled')}${metric(`${review.checkout_preserved} / ${review.checkout_total}`,'later checkout purchases intact')}${metric(`${passed} / ${review.checks.length}`,'independent checks passed')}</div>
+    <div class="metrics four">${metric(`${review.before_active} → ${review.after_active}`,'active records',{from:review.before_active,to:review.after_active,prefix:`${review.before_active} → `})}${metric(review.cancellations,'duplicate orders cancelled',{from:0,to:review.cancellations})}${metric(`${review.checkout_preserved} / ${review.checkout_total}`,'later checkout purchases intact',{from:0,to:review.checkout_preserved,suffix:` / ${review.checkout_total}`})}${metric(`${passed} / ${review.checks.length}`,'independent checks passed',{from:0,to:passed,suffix:` / ${review.checks.length}`})}</div>
     <ul class="assurance" aria-label="Rehearsal observations">
       ${run.status==='blocked'?'<li class="fail">Export is blocked; see the reason above</li>':source?`<li class="${source.passed?'':'fail'}">${source.passed?'At rehearsal: source matched the snapshot':'At rehearsal: source differed from the snapshot'}</li>`:''}
       <li>At rehearsal: ${text(review.untargeted_preserved)} untargeted records matched the source</li>
@@ -566,7 +661,7 @@ function diffView(review) {
     <div class="diff-head"><div><span class="eyebrow">Rehearsal diff</span><h3 id="diff-title">Source snapshot → disposable copy</h3></div>
       <div class="diff-counts"><span class="mod">~${review.changes.length} orders</span><span class="mod">~${stockChanged.length} products</span><span class="same">=${review.preserved_orders.length} orders unchanged</span></div></div>
     <div class="diff-tools">
-      <label class="search"><span class="sr-only">Search changed records</span><input id="change-search" type="search" placeholder="Search order, customer or product   /" value="${escape(state.changeQuery)}" autocomplete="off" spellcheck="false"></label>
+      <label class="search">${icon('search')}<span class="sr-only">Search changed records</span><input id="change-search" type="search" placeholder="Search order, customer or product" value="${escape(state.changeQuery)}" autocomplete="off" spellcheck="false"><kbd aria-hidden="true">/</kbd></label>
       <label class="filter">Product <select id="change-filter"><option value="">All (${review.changes.length})</option>${skus.map(sku=>`<option value="${escape(sku)}" ${sku===state.filter?'selected':''}>${text(sku)} (${review.changes.filter(c=>c.before.sku===sku).length})</option>`).join('')}</select></label>
     </div>
     <div class="group-head"><h4>orders</h4><span class="caption">Only <span class="mono">status</span> changes. Original rows and sale movements are kept; cancellations add compensating stock entries.</span></div>
@@ -597,7 +692,7 @@ function artifactsView(run) {
   const check = state.exportChecks.get(run.id);
   return `<section class="artifacts" id="repair-package" tabindex="-1"><h3>Review artifacts</h3>
     <p class="small muted">Each download rechecks source, evidence and candidate freshness. Guarded SQL also rejects changed table state when applied. Human review is required.${check?` Last check: ${check.ok?'passed':'refused'} at ${time(check.at)}.`:''}</p>
-    <div class="download-row">${run.downloads.map(name=>`<button class="download" data-download="${escape(name)}"><strong>↓ ${text(name)}</strong><span>${text(DOWNLOAD_NOTES[name]||'')}</span></button>`).join('')||'<span class="caption">No artifacts available for export.</span>'}</div>
+    <div class="download-row">${run.downloads.map(name=>`<button class="download" data-download="${escape(name)}">${icon('download')}<span class="download-text"><strong>${text(name)}</strong><span>${text(DOWNLOAD_NOTES[name]||'')}</span></span></button>`).join('')||'<span class="caption">No artifacts available for export.</span>'}</div>
     <p class="caption">Source database untouched.</p></section>`;
 }
 
@@ -623,7 +718,7 @@ function checksTab() {
   return `<div class="section-heading"><h2>Independent operational checks</h2>${badge(`${passed} / ${review.checks.length} passed`,!review.passed)}</div>
     <div class="status-cards">
       <div class="status-card ${review.passed?'ok':'danger'}"><span class="eyebrow">At rehearsal</span><strong>${passed} / ${review.checks.length} checks passed</strong><span class="caption">Observed on the rehearsal snapshot${meta.rehearsedAt?` · result received ${time(meta.rehearsedAt)} on this page`:''}</span></div>
-      <div class="status-card ${exp.tone}"><span class="eyebrow">Export freshness</span><strong>${text(exp.label)}</strong><span class="caption">${text(exp.detail)}</span>${run.status==='ready_for_review'?`<button class="secondary" data-recheck-export ${state.rechecking.has(run.id)?'disabled':''}>${state.rechecking.has(run.id)?'Rechecking…':'Recheck for export'}</button>`:''}</div>
+      <div class="status-card ${exp.tone}"><span class="eyebrow">Export freshness</span><strong>${text(exp.label)}</strong><span class="caption">${text(exp.detail)}</span>${run.status==='ready_for_review'?`<button class="secondary" data-recheck-export ${state.rechecking.has(run.id)?'disabled aria-busy="true"':''}>${state.rechecking.has(run.id)?`${icon('loader-circle','spin')}<span>Rechecking…</span>`:`${icon('refresh-cw')}<span>Recheck for export</span>`}</button>`:''}</div>
     </div>
     <p class="small muted">These checks describe the rehearsal snapshot. Export status is shown above and rechecked on every download.</p>
     ${checksView(review.checks)}`;
@@ -656,9 +751,9 @@ function sqlView() {
   const entry = state.sql.get(run.id) || {status: 'loading'};
   const body = entry.status === 'ok'
     ? `<div class="code" role="region" aria-label="repair.sql, read-only" tabindex="0">${entry.text.replace(/\r?\n$/, '').split(/\r?\n/).map((l,i)=>`<div class="code-line"><span class="ln">${i+1}</span><span class="lt">${sqlTint(l)}</span></div>`).join('')}</div>`
-    : entry.status === 'error' ? `<div class="callout stop">${text(entry.message)}</div>` : '<div class="log-empty">Rechecking freshness and loading repair.sql…</div>';
+    : entry.status === 'error' ? `<div class="callout stop">${text(entry.message)}</div>` : `<div class="code code-loading"><p class="caption">${icon('loader-circle','spin')} Rechecking freshness and loading repair.sql…</p>${skeleton(12)}</div>`;
   return `<div class="sql-head"><div><span class="eyebrow">repair.sql · read-only</span><h2>Guarded repair script</h2></div>
-      <div class="sql-actions"><button class="secondary" data-copy-sql ${entry.status!=='ok'?'disabled':''}>Copy</button><button class="secondary" data-reload-sql>Recheck and reload</button><button class="secondary" data-download="repair.sql">↓ Download</button></div></div>
+      <div class="sql-actions"><button class="secondary" data-copy-sql ${entry.status!=='ok'?'disabled':''}>${icon('copy')}<span>Copy</span></button><button class="secondary" data-reload-sql>${icon('refresh-cw')}<span>Recheck and reload</span></button><button class="secondary" data-download="repair.sql">${icon('download')}<span>Download</span></button></div></div>
     <p class="small muted">Not applied by this workbench. Loaded through the freshness-gated download route${entry.at?` at ${time(entry.at)}`:''}. The script uses <span class="mono">BEGIN IMMEDIATE</span> and rolls back if table state differs from the rehearsal. Human review is required.</p>
     ${body}`;
 }
@@ -699,7 +794,7 @@ function citeBlock(ref, cancel, keep, focus) {
   if (!data) ensureFile(fileOf(ref)).then(() => renderContext()).catch(error => notice(error.message));
   const label = line ? lineLabel(line.text, cancel, keep) : '';
   return `<div class="cite ${ref===focus?'focus':''}"><div class="cite-head"><button class="citation" data-open-ref="${escape(ref)}" title="Open in Evidence">${text(ref)}</button>${label?`<span class="line-tag">${text(label)}</span>`:''}</div>
-    <pre class="cite-line">${line?tint(line.text):data?'Line not found in the loaded evidence.':'Loading exact line…'}</pre></div>`;
+    ${line?`<pre class="cite-line">${tint(line.text)}</pre>`:data?'<pre class="cite-line">Line not found in the loaded evidence.</pre>':`<div class="cite-line">${skeleton(2)}</div>`}</div>`;
 }
 
 function orderContext(id, focusRef) {
@@ -708,7 +803,7 @@ function orderContext(id, focusRef) {
   const planned = !change && state.run?.plan?.cancellations.find(a => a.order_id === id);
   const record = change?.before || ordersById().get(id) || review?.preserved_orders.find(o => o.id === id);
   if (!record) return `<p class="muted">This record is not in the selected incident.</p>`;
-  let html = `<h2 class="mono ctx-title">${text(id)}</h2><p class="small muted">${purchase(record)}</p><button class="link small" data-copy-value="${escape(id)}" data-copy-what="Order ID">Copy order ID</button>`;
+  let html = `<h2 class="mono ctx-title">${text(id)}</h2><p class="small muted">${purchase(record)}</p><button class="link small" data-copy-value="${escape(id)}" data-copy-what="Order ID">${icon('copy')}<span>Copy order ID</span></button>`;
   if (change) html += `<div class="ctx-status">${badge('Changed on the copy', true)}<span class="caption">Engine before/after at rehearsal</span></div>${fieldTable(change.before, change.after)}`;
   else if (planned) html += `<div class="ctx-status">${badge('Proposed cancellation')}<span class="caption">Not rehearsed yet · current source values</span></div>${fieldTable(record)}`;
   else if (review) html += `<div class="ctx-status">${badge('Unchanged at rehearsal', 'ok')}${laterIds(review).has(id)?badge('Later purchase'):''}</div>${fieldTable(record)}`;
@@ -749,7 +844,7 @@ function lineContext(ref) {
   try { const parsed = line && JSON.parse(line.text); if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) fields = `<h3>Fields</h3>${fieldTable(parsed)}`; } catch (_) { /* not JSON */ }
   const citedBy = citedRefs().get(ref) || [];
   return `<h2 class="mono ctx-title">${text(ref)}</h2><div class="ctx-status">${badge('Exact evidence line')}${citedBy.length?badge(`Cited by ${citedBy.length}`, 'ok'):''}</div>
-    <pre class="cite-line">${line?tint(line.text):'Loading exact line…'}</pre>${fields}
+    ${line?`<pre class="cite-line">${tint(line.text)}</pre>`:`<div class="cite-line">${skeleton(2)}</div>`}${fields}
     ${citedBy.length?`<h3>Cited for cancelling</h3><div class="id-grid">${citedBy.map(id=>`<button class="id-chip mono" data-key="order:${escape(id)}">${text(id)}</button>`).join('')}</div>`:''}
     ${state.tab!=='evidence'?`<button class="secondary" data-open-ref="${escape(ref)}">Open in Evidence</button>`:''}`;
 }
@@ -760,8 +855,8 @@ function eventContext(id) {
   const hits = data ? data.lines.filter(l => l.text.includes(id)) : [];
   return `<h2 class="mono ctx-title">${text(id)}</h2><div class="ctx-status">${badge('No commit evidence', true)}</div>
     <p class="small">This imported source event has no committed-write record linking it to an order ID, so the script stopped instead of guessing.</p>
-    ${data?(hits.length?`<h3>In source_orders.json</h3>${hits.map(l=>`<div class="cite"><div class="cite-head"><button class="citation" data-open-ref="${escape(l.ref)}">${text(l.ref)}</button></div><pre class="cite-line">${tint(l.text)}</pre></div>`).join('')}`:'<p class="small muted">Not found in source_orders.json.</p>'):'<p class="small muted">Loading source_orders.json…</p>'}
-    <button class="secondary" data-search-event="${escape(id)}">Search events.jsonl for this event</button>`;
+    ${data?(hits.length?`<h3>In source_orders.json</h3>${hits.map(l=>`<div class="cite"><div class="cite-head"><button class="citation" data-open-ref="${escape(l.ref)}">${text(l.ref)}</button></div><pre class="cite-line">${tint(l.text)}</pre></div>`).join('')}`:'<p class="small muted">Not found in source_orders.json.</p>'):skeleton(3)}
+    <button class="secondary" data-search-event="${escape(id)}">${icon('file-search')}<span>Search events.jsonl for this event</span></button>`;
 }
 
 function renderContext() {
@@ -770,13 +865,17 @@ function renderContext() {
   // Narrow screens show it as a sliding sheet that opens only on an explicit selection.
   box.classList.toggle('open', !!sel && !!state.incident && state.sheet);
   if (!sel || !state.incident) {
-    box.innerHTML = `<div class="ctx-head"><span class="eyebrow">Details</span></div><div class="ctx-empty"><h2>Nothing selected</h2>
-      <p class="small muted">Select a record, evidence line, check or citation to see exact values here.</p></div>`;
+    state.ctxKey = null;
+    box.innerHTML = `<div class="ctx-head"><span class="eyebrow">Details</span></div><div class="ctx-empty">${icon('info', 'empty-icon')}<h2>Nothing selected</h2>
+      <p class="small muted">Select a record, evidence line, check or citation to see exact values here. Press <kbd>${paletteKeyLabel()}</kbd> to jump anywhere.</p></div>`;
     return;
   }
-  const kinds = {order: ['Record', orderContext], product: ['Product', productContext], check: ['Check', checkContext], line: ['Evidence line', lineContext], event: ['Missing evidence', eventContext]};
-  const [label, view] = kinds[sel.kind] || ['Details', () => ''];
-  box.innerHTML = `<div class="ctx-head"><span class="eyebrow">${label}</span><button class="icon-button" data-close-context aria-label="Close details">×</button></div><div class="ctx-body">${view(sel.id, sel.focusRef)}</div>`;
+  const kinds = {order: ['hash', 'Record', orderContext], product: ['package', 'Product', productContext], check: ['shield-check', 'Check', checkContext], line: ['file-text', 'Evidence line', lineContext], event: ['file-search', 'Missing evidence', eventContext]};
+  const [iconName, label, view] = kinds[sel.kind] || ['info', 'Details', () => ''];
+  // Animate only when the selection changes, not when a cited line finishes loading into the same view.
+  const key = `${sel.kind}:${sel.id}`, entering = state.ctxKey !== key;
+  state.ctxKey = key;
+  box.innerHTML = `<div class="ctx-head"><span class="eyebrow">${icon(iconName)}${label}</span><button class="icon-button" data-close-context aria-label="Close details">${icon('x')}</button></div><div class="ctx-body${entering ? ' enter' : ''}">${view(sel.id, sel.focusRef)}</div>`;
 }
 
 function select(key, {focusRef = null, keepFocus = false} = {}) {
@@ -811,7 +910,7 @@ function markSelection() {
 async function act(action) {
   if (state.busy) return;
   const id = state.incident.id;
-  state.busy = true; notice(); render();
+  Object.assign(state, {busy: true, busyAction: action}); notice(); render();
   try {
     const path = action === 'investigate' ? `/api/incidents/${id}/investigate` : `/api/runs/${state.run.id}/rehearse`;
     const run = await api(path, true);
@@ -820,15 +919,25 @@ async function act(action) {
     if (action === 'rehearse') {
       state.runMeta.set(run.id, {rehearsedAt: new Date()});
       state.exportChecks.delete(run.id); state.sql.delete(run.id);
+      if (run.review) state.countUp = run.id;
     }
     if (state.incident.id === id) {
       Object.assign(state, {run, filter: '', changeQuery: ''});
       if (action === 'investigate') Object.assign(state, {selection: null, tab: 'investigation'});
       else state.tab = run.review ? 'changes' : 'investigation';
     }
+    // Confirmations are transient; a refusal stays on screen as a notice.
     if (run.status === 'blocked') notice(run.summary);
+    else if (action === 'investigate') toast(run.status === 'stopped' ? 'Investigation stopped · evidence needed' : run.plan ? `Proposal ready · ${run.plan.cancellations.length} cancellations` : statusOf(run)[0], run.status === 'stopped' ? 'warn' : 'ok');
+    else if (run.review) {
+      const passed = run.review.checks.filter(c => c.passed).length;
+      toast(run.status === 'ready_for_review' ? `Rehearsed on a copy · ${passed}/${run.review.checks.length} checks passed` : `Checks failed at rehearsal · ${passed}/${run.review.checks.length} passed`, run.status === 'ready_for_review' ? 'ok' : 'error');
+    }
   } catch (error) { notice(error.message); }
-  finally { state.busy = false; render(); $('#content').focus({preventScroll: true}); }
+  finally {
+    Object.assign(state, {busy: false, busyAction: null});
+    transition(() => { render(); $('#content').focus({preventScroll: true}); }, 'case');
+  }
 }
 
 // Every artifact request goes through the server's freshness gate. A delayed failure updates
@@ -836,7 +945,10 @@ async function act(action) {
 async function fetchArtifact(name) {
   const incidentId = state.incident.id, runId = state.run.id;
   const incidentTitle = state.incident.title || incidentId;
-  const response = await fetch(`/api/runs/${runId}/artifacts/${encodeURIComponent(name)}`);
+  setLoading(true);
+  let response;
+  try { response = await fetch(`/api/runs/${runId}/artifacts/${encodeURIComponent(name)}`); }
+  finally { setLoading(false); }
   if (!response.ok) {
     const value = await response.json();
     const updated = await api(`/api/runs/${runId}`);
@@ -852,31 +964,36 @@ async function fetchArtifact(name) {
 }
 
 async function download(name) {
-  const runId = state.run.id;
-  const response = await fetchArtifact(name);
-  const url = URL.createObjectURL(await response.blob()), a = document.createElement('a');
-  a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url), 1000);
-  if (state.run?.id === runId && (state.tab === 'checks' || state.tab === 'changes')) renderPanel();
+  const runId = state.run.id, button = $(`[data-download="${name}"]`);
+  button?.setAttribute?.('aria-busy', 'true');
+  try {
+    const response = await fetchArtifact(name);
+    const url = URL.createObjectURL(await response.blob()), a = document.createElement('a');
+    a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url), 1000);
+    toast(`${name} downloaded · freshness check passed`);
+    if (state.run?.id === runId && (state.tab === 'checks' || state.tab === 'changes')) renderPanel();
+  } finally { button?.removeAttribute?.('aria-busy'); }
 }
 
-// Polite status message for assistive technology (visible text alone is not reliably announced).
-function announce(message) {
-  const region = $('#sr-status');
-  if (!region) return;
-  region.textContent = '';
-  setTimeout(() => { region.textContent = message; }, 30);
-}
-
-async function copyText(button, value, what, restLabel) {
-  try { await navigator.clipboard.writeText(value); button.textContent = 'Copied'; announce(`${what} copied`); }
-  catch (_) { button.textContent = 'Copy unavailable'; announce(`${what} could not be copied`); }
-  setTimeout(() => { if (button.isConnected) button.textContent = restLabel; }, 1500);
+// Copy feedback: the button briefly confirms in place, and a toast (a polite live region) announces the result.
+const copyLabels = new WeakMap();
+async function copyText(button, value, what) {
+  if (button && !copyLabels.has(button)) copyLabels.set(button, button.innerHTML);
+  try {
+    await navigator.clipboard.writeText(value);
+    if (button) button.innerHTML = `${icon('check')}<span>Copied</span>`;
+    toast(`${what} copied`);
+  } catch (_) {
+    if (button) button.innerHTML = `${icon('circle-x')}<span>Copy unavailable</span>`;
+    toast(`${what} could not be copied`, 'warn');
+  }
+  if (button) setTimeout(() => { if (button.isConnected) button.innerHTML = copyLabels.get(button); }, 1500);
 }
 
 async function copySql(button) {
   const entry = state.sql.get(state.run?.id);
   if (entry?.status !== 'ok') return;
-  await copyText(button, entry.text, 'repair.sql', 'Copy');
+  await copyText(button, entry.text, 'repair.sql');
 }
 
 async function recheckExport() {
@@ -888,6 +1005,7 @@ async function recheckExport() {
   try {
     const response = await fetchArtifact('report.json');
     await response.text();
+    toast('Freshness check passed · source, evidence and candidate unchanged');
   } catch (error) { notice(error.message); }
   finally {
     state.rechecking.delete(runId);
@@ -895,13 +1013,95 @@ async function recheckExport() {
   }
 }
 
+/* ---------- Command palette ---------- */
+
+const palette = {items: [], active: 0, ran: false, returnFocus: null};
+const paletteKeyLabel = () => (typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || '')) ? '⌘K' : 'Ctrl K';
+
+function goToCase(id) {
+  if (id !== (state.switching || state.incident?.id)) location.hash = `case=${id}`;
+}
+
+function inspectOrder(id) {
+  const review = state.run?.review;
+  const inReview = review && (review.changes.some(c => c.before.id === id) || review.preserved_orders.some(o => o.id === id));
+  setTab(inReview ? 'changes' : 'investigation');
+  select(`order:${id}`);
+}
+
+// Every command calls an existing local action; the palette adds navigation, not new capability.
+function paletteCommands(query) {
+  const q = query.trim().toLowerCase(), words = q.split(/\s+/).filter(Boolean), items = [];
+  const add = (group, label, hint, iconName, run, extra = '') => items.push({group, label, hint, icon: iconName, run, hay: `${group} ${label} ${hint} ${extra}`.toLowerCase()});
+  const run = state.run;
+  if (state.incident && !state.busy) {
+    add('Actions', run ? 'New offline investigation' : 'Start offline investigation', 'Offline script · no model', run ? 'refresh-cw' : 'play', () => act('investigate'), 'investigate run start');
+    if (run?.status === 'proposed') add('Actions', 'Rehearse on a disposable copy', 'Copy only', 'flask-conical', () => act('rehearse'), 'rehearse');
+    if (run?.status === 'ready_for_review') {
+      add('Actions', 'Recheck for export', 'Freshness check', 'refresh-cw', () => { setTab('checks'); return recheckExport(); }, 'recheck freshness');
+      for (const name of run.downloads) add('Actions', `Download ${name}`, 'Rechecks freshness first', 'download', () => download(name), 'export artifact');
+    }
+    if (run) add('Actions', 'Copy run ID', run.id, 'copy', () => copyText(null, run.id, 'Run ID'));
+  }
+  for (const tab of TABS) add('Go to', TAB_META[tab][1], 'Tab', TAB_META[tab][0], () => setTab(tab, true), 'tab');
+  state.cases.forEach(c => add('Cases', c.title, caseStatus(c.id)[0], 'folder-open', () => goToCase(c.id), 'case incident'));
+  for (const r of state.history.get(state.incident?.id) || []) add('Runs', `Run ${shortId(r.id)}`, `${statusOf(r)[0]} · started ${started(r.created_at)}`, 'history', () => loadRun(r.id), r.id);
+  // "L28", "line 28" or "events.jsonl:L28" opens that exact evidence line.
+  const line = /^(?:([\w-]+\.(?:jsonl|json|txt)):)?l(?:ine)?\s*(\d{1,5})$/.exec(q);
+  if (line && state.incident) {
+    const name = line[1] || state.ev.name, ref = `${name}:L${Number(line[2])}`;
+    if (state.incident.artifacts.some(a => a.name === name)) add('Evidence', `Open ${ref}`, 'Exact evidence line', 'file-text', () => { openInEvidence(ref); select(`line:${ref}`, {keepFocus: true}); }, q);
+  }
+  if (q.length >= 3) {
+    (state.incident?.orders || []).filter(o => o.id.toLowerCase().includes(q) || o.customer.toLowerCase().includes(q)).slice(0, 6)
+      .forEach(o => add('Orders', o.id, `${o.customer} · ${o.sku} × ${o.quantity}`, 'hash', () => inspectOrder(o.id), q));
+  }
+  return words.length ? items.filter(i => words.every(w => i.hay.includes(w))).slice(0, 30) : items.filter(i => i.group !== 'Orders');
+}
+
+function renderPalette() {
+  const input = $('#palette-input'), list = $('#palette-list');
+  palette.items = paletteCommands(input.value);
+  palette.active = Math.min(palette.active, Math.max(0, palette.items.length - 1));
+  let group = '';
+  list.innerHTML = palette.items.length ? palette.items.map((item, i) => {
+    const head = item.group !== group ? `<li class="palette-group" role="presentation">${text(group = item.group)}</li>` : '';
+    return `${head}<li class="palette-item" role="option" id="pal-${i}" data-palette-index="${i}" aria-selected="${i === palette.active}">${icon(item.icon)}<span class="palette-label">${text(item.label)}</span><span class="palette-hint">${text(item.hint)}</span></li>`;
+  }).join('') : '<li class="palette-empty" role="presentation">No matches. Try a case, a tab, an order ID or L28.</li>';
+  if (palette.items.length) input.setAttribute('aria-activedescendant', `pal-${palette.active}`); else input.removeAttribute('aria-activedescendant');
+  list.querySelector(`#pal-${palette.active}`)?.scrollIntoView({block: 'nearest'});
+}
+
+function openPalette() {
+  const dialog = $('#palette');
+  if (!dialog || typeof dialog.showModal !== 'function' || dialog.open) return;
+  Object.assign(palette, {returnFocus: document.activeElement, ran: false, active: 0});
+  $('#palette-input').value = '';
+  renderPalette();
+  dialog.showModal();
+  $('#palette-input').focus();
+}
+
+function runPaletteItem(index) {
+  const item = palette.items[index];
+  if (!item) return;
+  palette.ran = true;
+  $('#palette').close();
+  Promise.resolve().then(item.run).catch(error => notice(error.message));
+}
+
 /* ---------- Events ---------- */
 
 document.addEventListener('click', event => {
+  if (event.target.id === 'palette') { event.target.close(); return; } // backdrop click
+  const option = event.target.closest?.('[data-palette-index]');
+  if (option) { runPaletteItem(Number(option.dataset.paletteIndex)); return; }
   const el = event.target.closest('button, [data-key]');
   if (!el || el.disabled) return;
   const d = el.dataset;
   let task;
+  if (d.palette !== undefined) openPalette();
+  if (d.dismissToast) dismissToast(document.getElementById(d.dismissToast));
   if (d.case && d.case !== (state.switching || state.incident?.id)) {
     // The hash gives each case a link and browser back/forward; hashchange performs the switch.
     const hash = `#case=${d.case}`;
@@ -919,7 +1119,7 @@ document.addEventListener('click', event => {
   if (d.searchEvent) openInEvidence(null, d.searchEvent, 'events.jsonl');
   if (d.closeContext !== undefined) closeContext();
   if (d.copySql !== undefined) task = copySql(el);
-  if (d.copyValue !== undefined) { el.dataset.copyLabel ||= el.textContent; task = copyText(el, d.copyValue, d.copyWhat || 'ID', el.dataset.copyLabel); }
+  if (d.copyValue !== undefined) task = copyText(el, d.copyValue, d.copyWhat || 'ID');
   if (d.recheckExport !== undefined) task = recheckExport();
   if (d.reloadSql !== undefined) task = loadSql();
   if (d.key) select(d.key, {focusRef: d.focusRef || null});
@@ -928,6 +1128,21 @@ document.addEventListener('click', event => {
 
 document.addEventListener('keydown', event => {
   const t = event.target, key = event.key;
+  if ((event.ctrlKey || event.metaKey) && String(key).toLowerCase() === 'k') {
+    event.preventDefault();
+    if ($('#palette')?.open) $('#palette').close(); else openPalette();
+    return;
+  }
+  if (t.id === 'palette-input') {
+    if (key === 'ArrowDown' || key === 'ArrowUp') {
+      event.preventDefault();
+      const n = palette.items.length;
+      if (n) palette.active = (palette.active + (key === 'ArrowDown' ? 1 : -1) + n) % n;
+      renderPalette();
+    } else if (key === 'Enter') { event.preventDefault(); runPaletteItem(palette.active); }
+    return; // Escape is handled by the native <dialog>
+  }
+  if ($('#palette')?.open) return;
   if (t.getAttribute?.('role') === 'tab' && ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(key)) {
     event.preventDefault();
     const index = TABS.indexOf(state.tab);
@@ -968,6 +1183,7 @@ document.addEventListener('keydown', event => {
 });
 
 document.addEventListener('input', event => {
+  if (event.target.id === 'palette-input') { palette.active = 0; renderPalette(); return; }
   if (event.target.id === 'ev-search') { state.ev.query = event.target.value; renderEvidence(); }
   if (event.target.id === 'change-search' && state.run?.review) { state.changeQuery = event.target.value; $('#change-table').innerHTML = changesTable(state.run.review.changes); markSelection(); }
 });
@@ -988,7 +1204,12 @@ window.addEventListener('hashchange', () => {
   selectCase(target.id, target.tab).catch(error => notice(error.message));
 });
 
+// The palette returns focus to where it was opened unless a command moved it on purpose.
+$('#palette').addEventListener('close', () => { if (!palette.ran && palette.returnFocus?.isConnected) palette.returnFocus.focus(); });
+window.addEventListener('resize', positionTabIndicator);
+
 api('/api/incidents').then(async data => {
+  $('#palette-key').textContent = paletteKeyLabel();
   state.cases = data.incidents;
   // Restore each case's last recorded status from this server session before showing the sidebar.
   await Promise.all(state.cases.map(c => refreshHistory(c.id).catch(() => null)));
