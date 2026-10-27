@@ -153,3 +153,26 @@ a correct repair. Elapsed time includes scoring; script read/rehearsal counts
 are not model tool-use measurements. No model results are generated or inferred.
 The default nine trials are three development scenario variants at three seeds
 within one incident family, not nine distinct failure types or blind holdouts.
+
+## Provider-response validation
+
+The controller validates response, choice, message, tool-call, usage and finish
+metadata containers before using them. A malformed tool-call batch is rejected
+in full before any of its tools run, even if its first request is a valid
+copy-only rehearsal. Tool call IDs must be unique throughout the investigation.
+Validly structured calls with bad JSON arguments or unsupported tool names keep
+the existing local error-feedback behavior so a model can revise its request.
+
+The final result must use the three declared fields: outcome, summary and
+rehearsal_id. Stops require a null ID. Repairs still require an actual successful
+run-local rehearsal and the existing freshness-gated export. These checks do not
+assess the quality of a model's explanation or justify its decision to stop.
+
+Response objects received by the controller are retained in **responses.json**
+alongside **transcript.json** and **result.json**. This preserves rejected
+structures for debugging without putting invalid envelopes into the next model
+request. API keys and authorization headers are not part of these response
+objects. Transport failures retain the responses and observations already seen.
+HTTP request format, execution budgets, registered tools, engine/checker authority
+and the source database are unchanged. Validation uses offline transports;
+account-level Meta compatibility still requires a real authorized smoke test.

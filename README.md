@@ -129,6 +129,13 @@ successful rehearsal and the original data and evidence remain unchanged.
 The output is a proposal for human review, not automatic production approval.
 The investigation transcript and provider-reported token usage are recorded in
 the agent session directory. The API key and authorization headers are not logged.
+The controller also saves **responses.json**, containing response objects received
+from the transport, including rejected response shapes. Invalid envelopes or
+tool-call structures produce a saved error result; the entire tool-call batch is
+validated before dispatch. Bad argument JSON and unsupported tool names still
+return local tool feedback so the investigation can continue. Final answers must
+contain exactly **outcome**, **summary**, and **rehearsal_id**, with a null ID for
+a stop. These protocol checks do not establish whether a stop is justified.
 
 ### Test appropriate stopping
 
