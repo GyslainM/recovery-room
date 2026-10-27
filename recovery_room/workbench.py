@@ -31,10 +31,17 @@ DOWNLOADS = {"repair.sql": "application/sql", "plan.json": "application/json",
              "report.json": "application/json", "report.html": "text/html"}
 ASSETS = {"/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascript"),
           "/style.css": ("style.css", "text/css")}
+RUN_SUMMARY_FIELDS = ("id", "incident_id", "status", "summary", "mode", "created_at")
 
 
 class ReviewConflict(ValueError):
     """A run is stopped, failed, or no longer matches its inputs."""
+
+
+def _public_review_error(exc: Exception) -> str:
+    if isinstance(exc, OSError):
+        return "Local incident or rehearsal artifact unavailable. Restore the session files and start a new investigation."
+    return str(exc)
 
 
 class Workbench:
@@ -59,6 +66,14 @@ class Workbench:
             raise KeyError("Unknown run identifier.")
         return self.runs[identifier]
 
+    def list_runs(self, incident_id: str) -> list[dict]:
+        self.incident(incident_id)
+        # Reverse insertion order makes tied timestamps deterministic: newest first.
+        records = [record for record in reversed(list(self.runs.values()))
+                   if record["incident_id"] == incident_id]
+        records.sort(key=lambda record: record["created_at"], reverse=True)
+        return [{field: record[field] for field in RUN_SUMMARY_FIELDS} for record in records]
+
     def cases(self) -> list[dict]:
         return [{"id": key, "title": title, "scenario": scenario, "synthetic": True}
                 for key, (title, scenario) in CASES.items()]
@@ -77,6 +92,7 @@ class Workbench:
         if len(self.runs) >= 64:
             raise ReviewConflict("This local session has reached 64 investigations. Start a new session.")
         run_id = "run-" + uuid.uuid4().hex[:12]
+        created_at = datetime.now(timezone.utc).isoformat(timespec="microseconds")
         folder = self.root / "investigations" / run_id
         folder.mkdir(parents=True)
         trace = []
@@ -113,6 +129,7 @@ class Workbench:
             reason = (f"The event-aware script found {len(plan['cancellations'])} repeated writes linked to the same "
                       "source events. It proposes retaining each first recorded write. Rehearsal is still required.")
         record = {"id": run_id, "incident_id": identifier, "mode": MODE,
+                  "created_at": created_at,
                   "status": "proposed" if plan else "stopped", "summary": reason,
                   "stop_reason": ("missing_commit_mappings" if missing else "no_supported_repeats") if not plan else None,
                   "missing_event_ids": missing, "trace": trace, "plan": plan,
@@ -151,7 +168,7 @@ class Workbench:
                 self._finalize(identifier)
                 record["downloads"] = list(DOWNLOADS)
         except (ValueError, OSError, sqlite3.Error) as exc:
-            record.update(status="blocked", summary=str(exc), downloads=[])
+            record.update(status="blocked", summary=_public_review_error(exc), downloads=[])
         self._save(record)
         return copy.deepcopy(record)
 
@@ -169,6 +186,7 @@ class Workbench:
                 "cancellations": len(targets),
                 "untargeted_preserved": sum(current.get(key) == row for key, row in originals.items() if key not in targets),
                 "checkout_total": len(checkout),
+                "checkout_order_ids": [row["id"] for row in checkout],
                 "checkout_preserved": sum(current.get(row["id"]) == row for row in checkout),
                 "changes": [{"before": originals[action["order_id"]], "after": current[action["order_id"]],
                              "duplicate_of": action["duplicate_of"], "evidence_refs": action["evidence_refs"]}
@@ -196,9 +214,9 @@ class Workbench:
             # Revalidate every download, even if artifacts already exist on disk.
             self._finalize(identifier)
         except (ValueError, OSError, sqlite3.Error) as exc:
-            record.update(status="blocked", summary=str(exc), downloads=[])
+            record.update(status="blocked", summary=_public_review_error(exc), downloads=[])
             self._save(record)
-            raise ReviewConflict(str(exc)) from None
+            raise ReviewConflict(record["summary"]) from None
         return (Path(self.results[identifier]["folder"]) / filename).read_bytes()
 
 
@@ -268,6 +286,12 @@ def make_server(workbench: Workbench, port: int = 8765) -> HTTPServer:
                         return self._send((Path(__file__).parent / "web" / filename).read_bytes(), mime)
                     if parts == ["api", "incidents"]:
                         return self._json({"mode": MODE, "incidents": workbench.cases()})
+                    if parts == ["api", "runs"]:
+                        query = parse_qs(url.query, keep_blank_values=True, strict_parsing=True)
+                        if (set(query) != {"incident"} or len(query["incident"]) != 1
+                                or not query["incident"][0]):
+                            raise ValueError("Supply exactly one nonempty incident identifier.")
+                        return self._json({"runs": workbench.list_runs(query["incident"][0])})
                     if len(parts) == 3 and parts[:2] == ["api", "incidents"]:
                         return self._json(workbench.overview(parts[2]))
                     if len(parts) == 5 and parts[:2] == ["api", "incidents"] and parts[3] == "artifacts":
@@ -283,7 +307,8 @@ def make_server(workbench: Workbench, port: int = 8765) -> HTTPServer:
                         return self._send(data, DOWNLOADS[parts[4]], filename=parts[4])
                 self._json({"error": "Unknown local endpoint."}, 404)
             except PermissionError as exc:
-                self._json({"error": str(exc)}, 403)
+                message = _public_review_error(exc) if exc.filename is not None or exc.errno is not None else str(exc)
+                self._json({"error": message}, 403)
             except KeyError:
                 self._json({"error": "Unknown incident, run or artifact identifier."}, 404)
             except ReviewConflict as exc:

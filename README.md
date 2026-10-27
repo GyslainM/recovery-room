@@ -71,6 +71,15 @@ an existing one. The UI keeps current results when switching cases within the
 page; a reload resets that browser view. Saved artifacts remain on disk.
 This local server is for curated fixtures, not deployment or arbitrary uploads.
 
+The approved backend contracts now support current-session history through
+`GET /api/runs?incident=<id>`: `{"runs": [...]}`, newest first, with `id`,
+`incident_id`, `status`, `summary`, `mode` and server-owned UTC `created_at`.
+Run records retain that creation time across rehearsal and blocked exports.
+Non-null reviews include `checkout_order_ids` for the server-classified later
+purchases. The frontend run-history integration is still pending; these routes
+do not load previous server sessions or revalidate exports. Restart an already
+running server after updating Python code to load the new routes.
+
 ### What the offline demo proves
 
 - A 50-order import stops after writing 20 orders.
