@@ -30,7 +30,8 @@ CASES = {
 DOWNLOADS = {"repair.sql": "application/sql", "plan.json": "application/json",
              "report.json": "application/json", "report.html": "text/html"}
 ASSETS = {"/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascript"),
-          "/style.css": ("style.css", "text/css")}
+          "/style.css": ("style.css", "text/css"),
+          "/fonts/InterVariable.woff2": ("fonts/InterVariable.woff2", "font/woff2")}
 RUN_SUMMARY_FIELDS = ("id", "incident_id", "status", "summary", "mode", "created_at")
 
 
@@ -230,7 +231,10 @@ def make_server(workbench: Workbench, port: int = 8765) -> HTTPServer:
 
         def _send(self, value: bytes, content_type: str, status=200, filename=None):
             self.send_response(status)
-            self.send_header("Content-Type", content_type + "; charset=utf-8")
+            # Text responses retain UTF-8; binary assets such as WOFF2 have no charset.
+            textual = content_type.startswith("text/") or content_type in {"application/json", "application/sql"}
+            suffix = "; charset=utf-8" if textual else ""
+            self.send_header("Content-Type", content_type + suffix)
             self.send_header("Content-Length", str(len(value)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
@@ -281,8 +285,8 @@ def make_server(workbench: Workbench, port: int = 8765) -> HTTPServer:
                     if len(parts) == 4 and parts[:2] == ["api", "runs"] and parts[3] == "rehearse":
                         return self._json(workbench.rehearse(parts[2]))
                 else:
-                    if url.path in ASSETS and not url.query:
-                        filename, mime = ASSETS[url.path]
+                    if self.path in ASSETS:
+                        filename, mime = ASSETS[self.path]
                         return self._send((Path(__file__).parent / "web" / filename).read_bytes(), mime)
                     if parts == ["api", "incidents"]:
                         return self._json({"mode": MODE, "incidents": workbench.cases()})

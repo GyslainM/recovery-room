@@ -149,6 +149,61 @@ class HTTPTests(WorkbenchCase):
         self.assertIn("attachment", headers["Content-Disposition"])
         self.assertIn(b"BEGIN IMMEDIATE", body)
 
+    def test_inter_font_has_binary_mime_bytes_and_existing_security_headers(self):
+        status, headers, body = self.request("/fonts/InterVariable.woff2")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "font/woff2")
+        self.assertEqual(body[:4], b"wOF2")
+        self.assertGreater(len(body), 4)
+        font = Path(__file__).resolve().parents[1] / "recovery_room" / "web" / "fonts" / "InterVariable.woff2"
+        self.assertEqual(body, font.read_bytes())
+        self.assertEqual(int(headers["Content-Length"]), len(body))
+        self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(headers["Referrer-Policy"], "no-referrer")
+        root_headers = self.request("/")[1]
+        self.assertEqual(headers["Content-Security-Policy"], root_headers["Content-Security-Policy"])
+
+    def test_font_allowlist_rejects_other_names_queries_and_traversal(self):
+        paths = ("/fonts", "/fonts/", "/fonts/OFL.txt", "/fonts/InterVariable-Italic.woff2",
+                 "/fonts/unknown.woff2", "/fonts/intervariable.woff2",
+                 "/fonts/InterVariable.woff2?v=4.1", "/fonts/InterVariable.woff2?",
+                 "/fonts/InterVariable.woff2/", "/fonts//InterVariable.woff2",
+                 "/fonts/../app.js", "/fonts/%2e%2e/app.js", "/fonts/%2e%2e%2fapp.js",
+                 "/fonts/..%5capp.js", "/fonts/../../.env", "/fonts/%49nterVariable.woff2")
+        for path in paths:
+            with self.subTest(path=path):
+                status, _, body = self.request(path)
+                self.assertIn(status, (400, 404))
+                self.assertNotEqual(body[:4], b"wOF2")
+        status, _, _ = self.request("/fonts/InterVariable.woff2", "POST", "{}",
+                                    {"Content-Type": "application/json"})
+        self.assertEqual(status, 404)
+        self.assertEqual(self.request("/fonts/InterVariable.woff2", "HEAD")[0], 501)
+        self.assertFalse(self.app.runs)
+
+    def test_font_uses_same_host_origin_and_cross_site_guard(self):
+        path = "/fonts/InterVariable.woff2"
+        for headers in ({"Host": "other.example"}, {"Origin": "https://other.example"},
+                        {"Origin": "null"}, {"Sec-Fetch-Site": "cross-site"}):
+            with self.subTest(headers=headers):
+                self.assertEqual(self.request(path, headers=headers)[0], 403)
+        for hostname in ("127.0.0.1", "localhost"):
+            host = f"{hostname}:{self.server.server_port}"
+            status, _, body = self.request(path, headers={"Host": host, "Origin": "http://" + host,
+                                                        "Sec-Fetch-Site": "same-origin"})
+            self.assertEqual(status, 200)
+            self.assertEqual(body[:4], b"wOF2")
+
+    def test_text_assets_and_json_keep_utf8_content_types(self):
+        for path, mime in (("/", "text/html"), ("/app.js", "text/javascript"),
+                           ("/style.css", "text/css"), ("/api/incidents", "application/json")):
+            with self.subTest(path=path):
+                status, headers, body = self.request(path)
+                self.assertEqual(status, 200)
+                self.assertEqual(headers["Content-Type"], mime + "; charset=utf-8")
+                self.assertTrue(body.decode("utf-8"))
+
     def test_browser_api_cannot_select_paths_evaluator_databases_or_sql(self):
         paths = ("/evaluation/ground_truth.json", "/api/incidents/../../evaluation/ground_truth.json",
                  "/api/incidents/C:%5CUsers%5Cmucyo", "/api/incidents/import-retry/artifacts/ground_truth.json",
