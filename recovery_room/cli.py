@@ -81,11 +81,13 @@ def main(argv: list[str] | None = None) -> int:
     benchmark = sub.add_parser("benchmark", help="Evaluate the offline event-aware script on development fixtures; no API calls.")
     benchmark.add_argument("--out", type=Path, help="New output directory; previous evaluations are preserved.")
     benchmark.add_argument("--seeds", type=int, nargs="+", default=[7, 23, 41], help="1 to 10 distinct seeds (default: 7 23 41). Seeds vary IDs, not failure families.")
+    benchmark.add_argument("--scenarios", choices=SCENARIOS, nargs="+",
+                           help="Opt into selected format/incident variants; defaults to the original three cases.")
     args = parser.parse_args(argv)
     try:
         if args.command == "benchmark":
             from .evaluation import run_benchmark
-            benchmark_result = run_benchmark(args.out or default_output("benchmark"), args.seeds)
+            benchmark_result = run_benchmark(args.out or default_output("benchmark"), args.seeds, args.scenarios)
             value = {key: value for key, value in benchmark_result.items() if key != "trials"}
         elif args.command == "serve":
             from .workbench import serve

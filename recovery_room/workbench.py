@@ -27,6 +27,8 @@ CASES = {
     "missing-evidence": ("Commit evidence missing", "missing-evidence"),
     "multiple-retries": ("Two retries after partial imports", "multiple-retries"),
 }
+# CLI evaluation can opt into this format variation; the browser's default cases stay unchanged.
+CASE_CATALOG = {**CASES, "split-evidence": ("Archived commits across CSV and JSONL", "split-evidence")}
 DOWNLOADS = {"repair.sql": "application/sql", "plan.json": "application/json",
              "report.json": "application/json", "report.html": "text/html"}
 ASSETS = {"/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascript"),
@@ -46,13 +48,19 @@ def _public_review_error(exc: Exception) -> str:
 
 
 class Workbench:
-    def __init__(self, root: Path, seed: int = 23):
+    def __init__(self, root: Path, seed: int = 23, *, case_ids: tuple[str, ...] | None = None):
+        identifiers = tuple(CASES) if case_ids is None else case_ids
+        if (not isinstance(identifiers, tuple) or not identifiers
+                or any(not isinstance(key, str) or key not in CASE_CATALOG for key in identifiers)
+                or len(set(identifiers)) != len(identifiers)):
+            raise ValueError("Choose distinct case identifiers from the built-in catalog.")
+        self.catalog = {key: CASE_CATALOG[key] for key in identifiers}
         # Every launch gets a fresh namespace, preserving earlier user runs.
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=False)
         self.incidents = {
             key: create_incident(self.root / key, scenario, seed=seed)
-            for key, (_, scenario) in CASES.items()
+            for key, (_, scenario) in self.catalog.items()
         }
         self.runs: dict[str, dict] = {}
         self.results: dict[str, dict] = {}
@@ -77,12 +85,12 @@ class Workbench:
 
     def cases(self) -> list[dict]:
         return [{"id": key, "title": title, "scenario": scenario, "synthetic": True}
-                for key, (title, scenario) in CASES.items()]
+                for key, (title, scenario) in self.catalog.items()]
 
     def overview(self, identifier: str) -> dict:
         incident = self.incident(identifier)
         state = snapshot(incident / "orders.db")
-        return {"id": identifier, "title": CASES[identifier][0], "scenario": CASES[identifier][1], "mode": MODE,
+        return {"id": identifier, "title": self.catalog[identifier][0], "scenario": self.catalog[identifier][1], "mode": MODE,
                 "note": read_artifact(incident, "incident_note.txt"),
                 "artifacts": list_artifacts(incident), "schema": schema_for_agent(incident / "orders.db"),
                 "orders": state["orders"], "products": state["products"],
@@ -106,9 +114,11 @@ class Workbench:
         evidence_hash = evidence_fingerprint(incident)
         source_hash = fingerprint(snapshot(incident / "orders.db"))
         observe("get_schema", {}, schema_for_agent(incident / "orders.db"))
-        observe("list_artifacts", {}, list_artifacts(incident))
+        artifacts = observe("list_artifacts", {}, list_artifacts(incident))
         # These are actual bounded reads, recorded as script observations.
-        for name in ("incident_note.txt", "source_orders.json", "events.jsonl"):
+        names = ["incident_note.txt", "source_orders.json", "events.jsonl"]
+        names.extend(item["name"] for item in artifacts if item["name"] == "commit_receipts.csv")
+        for name in names:
             line = 1
             while line is not None:
                 arguments = {"name": name, "start_line": line, "max_lines": 200}

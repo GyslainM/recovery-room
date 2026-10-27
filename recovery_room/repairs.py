@@ -12,12 +12,12 @@ import uuid
 
 from .checks import check_state
 from .db import TABLES, copy_database, fingerprint, snapshot
-from .fixtures import ARTIFACTS, evidence_index
+from .fixtures import artifact_names, evidence_index, read_artifact
 
 
 def evidence_fingerprint(incident: Path) -> str:
     digest = hashlib.sha256()
-    for name in ARTIFACTS:
+    for name in artifact_names(incident):
         path = incident / "evidence" / name
         if path.is_symlink() or path.resolve().parent != (incident / "evidence").resolve():
             raise ValueError("Evidence files must remain inside the incident evidence directory.")
@@ -281,6 +281,14 @@ def finalize_report(incident: Path, result: dict) -> dict:
         raise ValueError("The source changed since rehearsal. Run a new rehearsal before exporting.")
     if evidence_fingerprint(incident) != result["evidence_fingerprint"]:
         raise ValueError("The evidence changed since rehearsal. Run a new rehearsal before exporting.")
+    _, refs = evidence_index(incident)
+    cited_lines = {}
+    for action in result["plan"]["cancellations"]:
+        for ref in action["evidence_refs"]:
+            if ref not in refs:
+                raise ValueError("A cited evidence line is unavailable.")
+            name, number = ref.rsplit(":L", 1)
+            cited_lines[ref] = read_artifact(incident, name, int(number), 1)["lines"][0]["text"]
     folder = Path(result["folder"])
     (folder / "repair.sql").write_text(export_sql(result), encoding="utf-8")
     (folder / "plan.json").write_text(json.dumps(result["plan"], indent=2), encoding="utf-8")
@@ -303,11 +311,10 @@ def finalize_report(incident: Path, result: dict) -> dict:
         "<li><strong>PASS · " + escape(check["name"]) + "</strong><br>" + escape(check["detail"]) + "</li>"
         for check in result["checks"]
     )
-    _, refs = evidence_index(incident)
     action_rows = "".join(
         "<tr><td>" + escape(action["order_id"]) + "</td><td>" + escape(action["duplicate_of"])
         + "</td><td>" + "<br>".join(
-            escape(ref) + "<br><small>" + escape(json.dumps(refs[ref], sort_keys=True)) + "</small>"
+            escape(ref) + "<br><small>" + escape(cited_lines[ref]) + "</small>"
             for ref in action["evidence_refs"]
         ) + "</td></tr>"
         for action in result["plan"]["cancellations"]

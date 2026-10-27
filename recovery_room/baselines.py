@@ -20,7 +20,7 @@ def event_aware_plan(incident) -> dict | None:
         return None
     return {
         "rationale": "Deterministic baseline: join committed writes by source event and retain the first write. "
-        "This is a competent scripted solution for the starter's structured complete evidence; no model is involved.",
+        "The bounded parser handles the supplied JSONL and optional sequenced CSV archive; no model is involved.",
         "cancellations": actions,
     }
 

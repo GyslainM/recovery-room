@@ -90,6 +90,16 @@ new freshness observation even when the recorded rehearsal passed.
 
 ### What the offline demo proves
 
+For the opt-in harder CSV/JSONL evidence variation and its honest script
+comparison, see [the split-evidence case](docs/EVIDENCE_CASE.md). Run it offline:
+
+~~~cmd
+py -3 -m recovery_room benchmark --scenarios complete split-evidence --seeds 7 23 41
+~~~
+
+The competent script handles both formats. This adds a development comparison,
+without claiming model advantage or changing the browser's three default cases.
+
 - A 50-order import stops after writing 20 orders.
 - Retrying the full file leaves 70 imported records, including 20 repeats.
 - Ten genuine purchases arrive afterward. They intentionally resemble earlier purchases.

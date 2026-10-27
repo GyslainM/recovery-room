@@ -15,14 +15,16 @@ import sqlite3
 import time
 
 from .checks import check_state, evaluate_fixture
+from .baselines import similarity_only_candidates
 from .db import snapshot
 from .fixtures import evidence_index
-from .workbench import CASES, MODE, Workbench
+from .workbench import CASES, CASE_CATALOG, MODE, Workbench
 
 
 JUDGMENTS = ("correct_repair", "justified_stop", "incorrect_export", "unjustified_stop",
              "rejected_repair", "technical_error", "incomplete")
 SCOPE = ("Public synthetic development fixtures from one import/retry family. "
+         "The optional split-evidence case varies file formats, not repair authority or failure family. "
          "Seeds vary identifiers, not failure families. No held-out reliability estimate or AI advantage is established.")
 
 
@@ -58,6 +60,7 @@ def assess_trial(root: Path, record: dict, before: dict, candidate: Path | None,
     review = record.get("review") or {}
     operational = review.get("checks", [])
     candidate_checks = check_state(incident, candidate, before, targets) if candidate is not None else []
+    naive = similarity_only_candidates(incident)
     correct_repair = (
         truth["expected_outcome"] == "repair" and observed == "repair" and candidate is not None
         and fixture["passed"] and plan_matches and not harmed_valid and source_unchanged
@@ -91,20 +94,34 @@ def assess_trial(root: Path, record: dict, before: dict, candidate: Path | None,
         "operational_checks_passed": sum(c["passed"] for c in operational),
         "operational_checks_total": len(operational),
         "candidate_checks_at_evaluation": candidate_checks,
+        "similarity_baseline": {
+            "candidate_order_ids": naive, "candidates": len(naive),
+            "later_purchase_ids_at_risk": sorted(set(naive) & set(truth["legitimate_later_order_ids"])),
+            "later_purchases_at_risk": len(set(naive) & set(truth["legitimate_later_order_ids"])),
+            "targets_match_truth": set(naive) == expected_duplicates,
+            "rehearsed": False, "exported": False,
+        },
     }
 
 
-def run_benchmark(root: Path, seeds: list[int]) -> dict:
+def run_benchmark(root: Path, seeds: list[int], scenarios: list[str] | None = None) -> dict:
     if (not isinstance(seeds, list) or not 1 <= len(seeds) <= 10
             or any(type(seed) is not int or not 0 <= seed <= 2**32 - 1 for seed in seeds)
             or len(set(seeds)) != len(seeds)):
         raise ValueError("Choose 1 to 10 distinct integer seeds from 0 to 4294967295.")
+    by_scenario = {scenario: key for key, (_, scenario) in CASE_CATALOG.items()}
+    selected = [scenario for _, scenario in CASES.values()] if scenarios is None else scenarios
+    if (not isinstance(selected, list) or not selected
+            or any(not isinstance(s, str) or s not in by_scenario for s in selected)
+            or len(set(selected)) != len(selected)):
+        raise ValueError("Choose distinct built-in scenario names.")
+    identifiers = tuple(by_scenario[s] for s in selected)
     root = root.resolve()
     root.mkdir(parents=True, exist_ok=False)
     trials = []
     for seed in seeds:
-        app = Workbench(root / f"seed-{seed}", seed=seed)
-        for identifier, (_, scenario) in CASES.items():
+        app = Workbench(root / f"seed-{seed}", seed=seed, case_ids=identifiers)
+        for identifier, (_, scenario) in app.catalog.items():
             started = time.monotonic()
             record = None
             before = None
@@ -158,7 +175,8 @@ def run_benchmark(root: Path, seeds: list[int]) -> dict:
     counts = Counter(trial["judgment"] for trial in trials)
     report = {
         "mode": MODE, "approach": "event_aware_script", "created_at": datetime.now(timezone.utc).isoformat(),
-        "scope": SCOPE, "seeds": seeds, "trials_total": len(trials), "scenario_variants": len(CASES),
+        "scope": SCOPE, "seeds": seeds, "scenarios": selected,
+        "trials_total": len(trials), "scenario_variants": len(selected),
         "incident_families": 1, "live_model_runs": 0,
         "judgments": {name: counts[name] for name in JUDGMENTS},
         "passed": all(trial["judgment"] in ("correct_repair", "justified_stop") for trial in trials),
@@ -182,11 +200,13 @@ def render_report(report: dict) -> str:
                 artifacts.append(f'<a href="{escape(trial[key])}">{label}</a>')
         stock = "yes" if trial.get("stock_matches_truth") else "no" if "stock_matches_truth" in trial else "—"
         source = "yes" if trial.get("source_unchanged") else "NO" if trial.get("source_unchanged") is False else "—"
+        naive = trial.get("similarity_baseline", {})
         rows.append(
             "<tr>" + "".join(f"<td>{cell}</td>" for cell in (
                 escape(trial["scenario"]), escape(trial["seed"]),
                 escape(trial["judgment"].replace("_", " ")), escape(state), escape(preserved),
-                stock, source, escape(trial["investigation_read_calls"]), escape(trial["rehearsals"]),
+                stock, source, escape(naive.get("candidates", "—")), escape(naive.get("later_purchases_at_risk", "—")),
+                escape(trial["investigation_read_calls"]), escape(trial["rehearsals"]),
                 escape(trial["elapsed_seconds"]), " · ".join(artifacts) or "—",
             )) + "</tr>"
         )
@@ -211,8 +231,12 @@ pre{{white-space:pre-wrap;overflow-wrap:anywhere;background:#fffefa;padding:16px
 <p class="scope">{escape(report['scope'])}</p><ul>{summaries}</ul>
 <p>The event-aware script is the competent baseline. Meta has not been measured here.
 No model comparison or general reliability percentage is claimed. All trial outcomes, including failures, are retained.</p>
+<p>The competent event-aware script also parses the optional CSV receipt archive; it is not limited to the original JSONL format.
+Similarity-only figures are candidate flags and later purchases at risk, scored after the decision using fixture truth.
+That weak baseline was not rehearsed or exported; these figures do not claim that the runtime accepted those cancellations.</p>
 <h2>Observed outcomes</h2><div class="scroll"><table><thead><tr><th>Scenario</th><th>Seed</th><th>Judgment</th>
 <th>Active records</th><th>Later preserved / 10</th><th>Stock correct</th><th>Source unchanged</th>
+<th>Similarity flags</th><th>Later purchases at risk</th>
 <th>Read calls</th><th>Rehearsals</th><th>Seconds</th><th>Artifacts</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div>
 <p>Stock is compared with the repaired fixture truth. A justified stop leaves stock and records unchanged;
 it is expected to show unrepaired stock. Elapsed time includes local investigation, rehearsal, export and scoring.
