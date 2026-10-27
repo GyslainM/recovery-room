@@ -72,7 +72,7 @@ function renderCases() {
   $('#cases').innerHTML = state.cases.map((c,i)=>{
     const active = c.id === (state.switching || state.incident?.id);
     const [label, tone] = caseStatus(c.id);
-    return `<button class="case ${active?'active':''}" data-case="${escape(c.id)}" ${state.busy?'disabled':''} ${active?'aria-current="page"':''}><small>CASE ${String(i+1).padStart(2,'0')} / SYNTHETIC</small><strong>${text(c.title)}</strong><span class="case-status ${tone}">${text(label)}</span></button>`;
+    return `<button class="case ${active?'active':''}" data-case="${escape(c.id)}" ${state.busy?'disabled':''} ${active?'aria-current="page"':''}><small>Case ${String(i+1).padStart(2,'0')} · synthetic</small><strong>${text(c.title)}</strong><span class="case-status ${tone}">${text(label)}</span></button>`;
   }).join('');
 }
 
@@ -104,6 +104,7 @@ async function selectCase(identifier) {
     });
     $('#artifact').innerHTML = incident.artifacts.map(a=>`<option value="${escape(a.name)}">${text(a.name)} · ${text(a.bytes)} B</option>`).join('');
     $('#artifact').value = state.artifact;
+    $('#goto-line').value = '';
     if (location.hash !== `#case=${identifier}`) history.replaceState(null, '', `#case=${identifier}`);
     render();
     focusWorkspace();
@@ -133,7 +134,7 @@ function render() {
 function incidentView() {
   const {incident, busy} = state;
   const multipleRetries = incident.scenario === 'multiple-retries';
-  return `<div class="section-heading"><h2>${multipleRetries?'Two partial imports. Two retries.':'A partial import. A full retry.'}</h2>${badge('OPEN INCIDENT',true)}</div>
+  return `<div class="section-heading"><h2>${multipleRetries?'Two partial imports. Two retries.':'A partial import. A full retry.'}</h2>${badge('Open incident',true)}</div>
     <p class="incident-note">${multipleRetries?'Two attempts lost their connections after partial writes. A final retry completed, then customers made genuine purchases.':'The importer lost its connection after some writes. It retried the source file while customers continued buying.'} Similar-looking purchases may be legitimate.</p>
     <div class="metrics">${metric(incident.active_orders,'active order records')}${metric(incident.artifacts.length,'evidence files')}${metric(incident.products.length,'products affected')}</div>
     <div class="callout"><strong>The question to resolve</strong><br>Which records repeat the same source action, and which later purchases must stay? A stock correction also needs a compensating ledger entry.</div>
@@ -147,10 +148,10 @@ function incidentView() {
 function investigateView() {
   const {run, busy} = state;
   const stopped = run.status === 'stopped';
-  return `<div class="section-heading"><h2>${stopped?'Evidence needed to continue':'A bounded proposal'}</h2>${badge(stopped?'STOPPED':'SCRIPT OBSERVATIONS',stopped)}</div>
+  return `<div class="section-heading"><h2>${stopped?'Evidence needed to continue':'A bounded proposal'}</h2>${badge(stopped?'Stopped':'Script observations',stopped)}</div>
     <div class="callout ${stopped?'stop':''}"><strong>${stopped?'No repair exported.':'Investigation result'}</strong><br>${text(run.summary)}</div>
     <p class="small muted">The steps below are actual local function calls made by the deterministic script. They are not model reasoning or a replay of a model run.</p>
-    <ol class="trace">${run.trace.map((step,i)=>`<li><details><summary>${String(i+1).padStart(2,'0')} ${text(step.tool)}<span>${text(step.arguments.name|| (step.tool==='query_database'?'read-only SQLite':'observed result'))}</span></summary><pre>${text(JSON.stringify({arguments:step.arguments,result:step.result},null,2))}</pre></details></li>`).join('')}</ol>
+    <details class="trace-wrap"><summary>${run.trace.length} local function calls · deterministic script</summary><ol class="trace">${run.trace.map((step,i)=>`<li><details><summary>${String(i+1).padStart(2,'0')} ${text(step.tool)}<span>${text(step.arguments.name|| (step.tool==='query_database'?'read-only SQLite':'observed result'))}</span></summary><pre>${text(JSON.stringify({arguments:step.arguments,result:step.result},null,2))}</pre></details></li>`).join('')}</ol></details>
     ${run.plan?`<div class="section-heading"><h3>Proposed cancellations</h3>${badge(`${run.plan.cancellations.length} targets`)}</div><p class="small muted">Keep the first recorded write for each source event. Each target cites both committed writes; select one to inspect them side by side.</p>${planTable(run.plan)}
     <div class="action-row"><button class="primary ${busy?'busy':''}" data-action="rehearse" ${busy?'disabled':''}>${busy?'Rehearsing on a copy…':'Rehearse on a disposable copy →'}</button><span class="caption">Engine validates evidence and resulting state</span></div>`:
     `<h3>Next useful step</h3><p class="small">Recover the committed-write logs for the missing source events, then investigate again. The source has not been changed.</p><details><summary class="small">${run.missing_event_ids.length} source events without commit evidence</summary><pre>${text(run.missing_event_ids.join('\n'))}</pre></details>`}
@@ -170,7 +171,7 @@ function reviewView() {
     entry.orders += 1; entry.units += change.before.quantity;
     fromCancellations.set(change.before.sku, entry);
   }
-  return `<div class="section-heading"><h2>${ready?'Rehearsed. Ready for your review.':'Export unavailable'}</h2>${badge(ready?'COPY ONLY':run.status.toUpperCase(),!ready)}</div>
+  return `<div class="section-heading"><h2>${ready?'Rehearsed. Ready for your review.':'Export unavailable'}</h2>${badge(ready?'Copy only':(RUN_STATUS[run.status]?.[0]||run.status.replaceAll('_',' ')),!ready)}</div>
     <div class="callout ${ready?'success':'stop'}">${text(run.summary)}</div>
     <div class="metrics four">${metric(`${review.before_active} → ${review.after_active}`,'active records')}${metric(review.cancellations,'duplicate orders cancelled')}${metric(`${review.checkout_preserved} / ${review.checkout_total}`,'later checkout purchases intact')}${metric(`${passed} / ${review.checks.length}`,'independent checks passed')}</div>
     <ul class="assurance" aria-label="Review boundaries">
