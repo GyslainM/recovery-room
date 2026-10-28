@@ -15,6 +15,9 @@ const state = {
   selection: null, sheet: false, lastFocus: null, filter: '', changeQuery: '',
   // rechecking: run IDs with an explicit export recheck in flight (one per run, never a global lock).
   runMeta: new Map(), exportChecks: new Map(), sql: new Map(), rechecking: new Set(),
+  // Recorded model runs (read-only history). source is per case: 'script' (offline) or 'recorded'.
+  // Recording IDs are kept apart from run IDs and never reach rehearse, SQL or download helpers.
+  source: 'script', recordings: new Map(), recId: null, recording: null, recSeq: 0, stepFilter: 'all',
 };
 const escape = (value) => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const text = (value) => escape(value);
@@ -45,7 +48,7 @@ const RUN_STATUS = {
 const MODE_INFO = {
   offline_deterministic_engine_demo_NOT_a_model_run: {
     short: 'Offline demo · No model', long: 'Offline deterministic script · no model',
-    method: 'Actual local function calls, without model or API calls. Meta credits pending.',
+    method: 'Actual local function calls, without model or API calls. Recorded Meta runs are shown separately as read-only history.',
   },
 };
 // Display grouping only; unknown check names fall into "Other checks".
@@ -77,7 +80,7 @@ async function api(path, post = false) {
   try {
     const response = await fetch(path, post ? {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'} : {});
     const value = await response.json();
-    if (!response.ok) throw new Error(value.error || 'The local request failed.');
+    if (!response.ok) throw Object.assign(new Error(value.error || 'The local request failed.'), {status: response.status});
     return value;
   } finally { setLoading(false); }
 }
@@ -120,7 +123,10 @@ function transition(update, kind = 'swap') {
   const root = document.documentElement;
   root.dataset.vt = kind;
   try {
-    document.startViewTransition(once).finished.catch(() => {}).finally(() => { if (root.dataset.vt === kind) delete root.dataset.vt; });
+    const vt = document.startViewTransition(once);
+    // A transition is skipped when another starts first; the update still runs, so ignore the rejection.
+    vt.ready.catch(() => {});
+    vt.finished.catch(() => {}).finally(() => { if (root.dataset.vt === kind) delete root.dataset.vt; });
   } catch (_) { once(); delete root.dataset.vt; }
   setTimeout(once, 250);
 }
@@ -164,7 +170,9 @@ const compactId = (id) => String(id).length > 14 ? `${String(id).slice(0,8)}…$
 const idRef = (id, tone = '', query = '') => {
   const full = String(id), q = query.trim();
   const shown = q && full.toLowerCase().includes(q.toLowerCase()) ? highlight(full, q) : '';
-  return `<span class="id-link mono ${tone}" data-key="order:${escape(full)}" title="${escape(full)}">${shown || `<span aria-hidden="true">${text(compactId(full))}</span><span class="sr-only">${text(full)}</span>`}</span>`;
+  const label = shown || `<span aria-hidden="true">${text(compactId(full))}</span><span class="sr-only">${text(full)}</span>`;
+  if (!active().selectable) return `<span class="mono ${tone}" title="${escape(full)}">${label}</span>`;
+  return `<span class="id-link mono ${tone}" data-key="order:${escape(full)}" title="${escape(full)}">${label}</span>`;
 };
 const ordersById = () => new Map((state.incident?.orders || []).map(o => [o.id, o]));
 const isTyping = (el) => !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT');
@@ -174,6 +182,31 @@ const shortId = (id) => String(id).replace(/^run-/, '').slice(0, 8);
 const started = (iso) => { const d = iso ? new Date(iso) : null; return d && !Number.isNaN(d.getTime()) ? d.toLocaleTimeString([], {hour: 'numeric', minute: '2-digit', second: '2-digit', timeZoneName: 'short'}) : ''; };
 // Later purchases come from the server's review (checkout_order_ids); the UI applies no rule of its own.
 const laterIds = (review) => new Set(review?.checkout_order_ids || []);
+
+/* ---------- Active source: offline script run or recorded model run ---------- */
+
+const recordedMode = () => state.source === 'recorded';
+const REC_OUTCOME = {repair: ['Repair recorded', 'ok', 'circle-check'], stop: ['Stopped · recorded', 'warn', 'ban'], error: ['Error · recorded', 'danger', 'circle-x'], incomplete: ['Incomplete · recorded', 'warn', 'triangle-alert']};
+const recOutcome = (r) => REC_OUTCOME[r?.outcome] || [String(r?.outcome || 'unknown').replaceAll('_', ' '), '', 'info'];
+const REC_LABEL = 'Recorded model run, not live'; // the server's fixed provenance label; always shown from provenance when present
+const TIMESTAMP_SOURCE = {result_file_mtime: 'time from the saved result file', agent_result: 'time recorded by the agent'};
+const INPUT_PROVENANCE = {verified_legacy_file_manifest: 'inputs verified against a saved file manifest', native_capture: 'inputs fingerprinted before the first model call'};
+// A recording may link into the current evidence and records only when the server enables citations
+// for it AND it belongs to the case on screen.
+const recCitations = (r) => !!r && r.citations_enabled === true && r.incident_id === state.incident?.id;
+
+// Where review, plan and citations come from right now. Recorded data is historical and read-only.
+function active() {
+  if (recordedMode()) {
+    const r = state.recording, review = r?.review || null, allowed = recCitations(r);
+    const plan = review ? {cancellations: review.changes.map(c => ({order_id: c.before.id, duplicate_of: c.duplicate_of,
+      evidence_refs: c.evidence_refs || [], recorded_evidence_refs_text: c.recorded_evidence_refs_text}))} : null;
+    return {recorded: true, review, plan, citations: allowed, selectable: allowed};
+  }
+  return {recorded: false, review: state.run?.review || null, plan: state.run?.plan || null, citations: true, selectable: true};
+}
+// Row attributes for a selectable record; none when a mismatched recording must not link to current records.
+const selAttrs = (key) => active().selectable ? `class="sel" tabindex="0" data-key="${escape(key)}" aria-selected="false"` : '';
 
 /* ---------- Case navigation ---------- */
 
@@ -226,6 +259,16 @@ function renderCases() {
 function renderRuns() {
   const card = $('#run-card'), runs = state.history.get(state.incident?.id) || [], shown = state.run?.id;
   card.hidden = !state.incident;
+  if (recordedMode()) {
+    const list = recordedList();
+    card.innerHTML = `<div class="side-label">Recorded runs <span>${pad(list.list.length)}</span></div>
+      ${list.status === 'loading' ? skeleton(3) : list.list.length ? `<ol class="run-list">${list.list.map(r => {
+        const [label, tone] = recOutcome(r), current = r.id === state.recId;
+        return `<li><button class="run-item ${current?'current':''}" data-recording="${escape(r.id)}" aria-current="${current?'true':'false'}" title="${escape(`${r.model} · recorded ${r.recorded_at}`)}"><span class="case-status ${tone}">${text(label)}</span><span class="run-meta"><span class="mono">${text(`${r.tool_calls} results`)}</span><time datetime="${escape(r.recorded_at)}">${text(started(r.recorded_at))}</time></span>${r.fixture_matches === false ? '<span class="run-warn">Inputs differ from this case</span>' : ''}</button></li>`;
+      }).join('')}</ol>` : '<p class="run-empty">No recorded runs for this case.</p>'}
+      <p class="run-note">${text(REC_LABEL)} · newest first</p>`;
+    return;
+  }
   card.innerHTML = `<div class="side-label">Runs <span>${pad(runs.length)}</span></div>
     ${runs.length ? `<ol class="run-list">${runs.map(r => {
       const [label, tone] = statusOf(r), current = r.id === shown;
@@ -248,19 +291,21 @@ function updateHash() {
 
 function saveView() {
   if (!state.incident) return;
-  state.views.set(state.incident.id, {tab: state.tab, ev: {...state.ev}, selection: state.selection, filter: state.filter, changeQuery: state.changeQuery});
+  state.views.set(state.incident.id, {tab: state.tab, ev: {...state.ev}, selection: state.selection, filter: state.filter, changeQuery: state.changeQuery, source: state.source, recId: state.recId});
 }
 
 async function selectCase(identifier, tab = null) {
   const version = ++state.version;
   saveView();
   state.switching = identifier;
+  state.recSeq += 1; // drop any recording response still in flight for the previous case
   notice(); renderCases();
   $('#content').setAttribute('aria-busy', 'true');
   try {
     const [incident] = await Promise.all([
       api(`/api/incidents/${encodeURIComponent(identifier)}`),
       refreshHistory(identifier).catch(error => { notice(`Run history unavailable: ${error.message}`); return []; }),
+      refreshRecordings(identifier),
     ]);
     if (version !== state.version) return;
     let run = state.runs.get(identifier) || null;
@@ -274,12 +319,21 @@ async function selectCase(identifier, tab = null) {
     const view = state.views.get(identifier);
     transition(() => {
       if (version !== state.version) return; // a newer case switch started before this frame
+      const restoredRec = view?.recId && recordedList().list.some(r => r.id === view.recId) ? view.recId : null;
+      // A case seen before keeps its own source; a new case opens in the source being browsed now.
+      const source = view?.source || (state.source === 'recorded' ? 'recorded' : 'script');
       Object.assign(state, {
         incident, run, switching: null, sheet: false,
-        tab: tab || view?.tab || (run?.review ? 'changes' : 'investigation'),
+        tab: tab || view?.tab || (source === 'script' && run?.review ? 'changes' : 'investigation'),
         ev: view?.ev ? {...view.ev} : {name: 'events.jsonl', query: '', citedOnly: false, activeRef: null},
         selection: view?.selection || null, filter: view?.filter || '', changeQuery: view?.changeQuery || '',
+        source, recId: null, recording: null, stepFilter: 'all',
       });
+      // A recording selection is refetched (never reused from memory) so its fixture match is current.
+      if (state.source === 'recorded') {
+        const pick = restoredRec || recordedList().list[0]?.id;
+        if (pick) loadRecording(pick, {renderNow: false});
+      }
       render();
       $('#content').focus({preventScroll: true});
     }, 'case');
@@ -290,15 +344,63 @@ async function selectCase(identifier, tab = null) {
 
 /* ---------- Shell ---------- */
 
+// Re-rendering replaces the focused control. For these controls, put keyboard focus back on the
+// replacement (same data attribute and value) so keyboard users don't drop to the top of the page.
+const FOCUS_KEYS = ['source', 'recording', 'stepFilter', 'refreshRecordings'];
+function holdFocus(update) {
+  const el = document.activeElement, key = el?.dataset ? FOCUS_KEYS.find(k => k in el.dataset) : null;
+  update();
+  const now = document.activeElement;
+  if (!key || (now && now !== document.body && now.isConnected)) return;
+  const attr = key.replace(/[A-Z]/g, c => `-${c.toLowerCase()}`), value = el.dataset[key];
+  [...document.querySelectorAll(`[data-${attr}]`)].find(n => n.dataset[key] === value)?.focus({preventScroll: true});
+}
+
 function render() {
   if (!state.incident) return;
-  renderCases();
-  renderRuns();
-  renderHeader();
-  renderTabs();
-  renderPanel();
-  renderContext();
+  holdFocus(() => {
+    renderCases();
+    renderRuns();
+    renderHeader();
+    renderTabs();
+    renderPanel();
+    renderContext();
+  });
   updateHash();
+}
+
+function renderSourceSwitch() {
+  const list = recordedList(), count = list.status === 'ok' ? String(list.list.length) : list.status === 'error' ? '!' : '…';
+  $('#source-switch').innerHTML = `<button data-source="script" aria-pressed="${!recordedMode()}">${icon('play')}<span>Script run · offline</span></button>
+    <button data-source="recorded" aria-pressed="${recordedMode()}">${icon('history')}<span>Recorded model runs</span><span class="count">${count}</span></button>`;
+}
+
+// Recorded mode header: the fixed provenance label is prominent; no rehearse, SQL or download action exists.
+function renderRecordedHeader() {
+  const r = state.recording, list = recordedList();
+  $('#mode-indicator').textContent = r ? recordingLabel(r) : 'Recorded model runs · not live';
+  $('#mode-indicator').classList.remove('unverified');
+  $('#mode-indicator').classList.add('recorded');
+  if (r) {
+    const [label, tone] = recOutcome(r), p = r.provenance || {};
+    $('#incident-meta').innerHTML = `<span class="status ${tone}">${text(label)}</span><span class="chip mono">${text(p.model || 'model not recorded')}</span>
+      <span class="chip">${text(`Recorded ${started(p.recorded_at) || 'time not recorded'}`)}</span><span class="chip">${text(`${r.tool_calls} tool results`)}</span>
+      ${r.fixture_matches === false ? '<span class="chip warn-chip">Inputs differ from this case</span>' : ''}`;
+    $('#run-details').hidden = false;
+    $('#run-details-body').innerHTML = `<dl class="run-facts">
+      <dt>Recording ID</dt><dd><span class="mono">${text(r.id)}</span> <button class="link" data-copy-value="${escape(r.id)}" data-copy-what="Recording ID">${icon('copy')}<span>Copy recording ID</span></button></dd>
+      <dt>Label</dt><dd>${text(recordingLabel(r))}</dd>
+      <dt>Model and mode</dt><dd class="mono">${text(`${p.model || 'not recorded'} · ${p.mode || 'not recorded'}`)}</dd>
+      <dt>Recorded</dt><dd>${text(started(p.recorded_at) || 'Not recorded')}${p.timestamp_source ? ` · ${text(TIMESTAMP_SOURCE[p.timestamp_source] || p.timestamp_source)}` : ''}</dd>
+      <dt>Inputs</dt><dd>${text(INPUT_PROVENANCE[p.input_provenance] || p.input_provenance || 'Not recorded')}${r.fixture_matches ? ' · match this case now' : ' · do not match this case'}</dd>
+      <dt>Boundary</dt><dd>Read-only history. Nothing here calls a model, rehearses or exports.</dd>
+    </dl>`;
+  } else {
+    $('#incident-meta').innerHTML = `<span class="status">${text(list.status === 'ok' ? `${list.list.length} recorded runs` : 'Loading recorded runs…')}</span>`;
+    $('#run-details').hidden = true;
+    $('#run-details-body').innerHTML = '';
+  }
+  $('#header-actions').innerHTML = `<button class="secondary" data-source="script">${icon('play')}<span>Back to script run</span></button>`;
 }
 
 function renderHeader() {
@@ -306,6 +408,9 @@ function renderHeader() {
   const [label, tone] = statusOf(run);
   $('#title').textContent = incident.title;
   $('#crumb-case').textContent = incident.title;
+  renderSourceSwitch();
+  if (recordedMode()) { renderRecordedHeader(); return; }
+  $('#mode-indicator').classList.remove('recorded');
   const mode = run?.mode || incident.mode, info = modeInfo(mode);
   $('#mode-indicator').textContent = info.short;
   $('#mode-indicator').classList.toggle('unverified', !!info.unverified);
@@ -340,12 +445,12 @@ function olderRunNote(run) {
 }
 
 function renderTabs() {
-  const review = state.run?.review;
+  const review = active().review;
   const counts = {
     evidence: state.incident.artifacts.length,
     changes: review ? review.changes.length : '',
     checks: review ? `${review.checks.filter(c => c.passed).length}/${review.checks.length}` : '',
-    sql: review && state.run.status !== 'ready_for_review' ? 'unavailable' : '',
+    sql: recordedMode() ? 'n/a' : review && state.run.status !== 'ready_for_review' ? 'unavailable' : '',
   };
   for (const tab of TABS) {
     const button = $(`#tab-${tab}`), selected = tab === state.tab, [iconName, label] = TAB_META[tab];
@@ -369,13 +474,16 @@ function setTab(tab, focusTab = false) {
 }
 
 function renderPanel() {
-  const views = {investigation: investigationView, evidence: evidenceView, changes: changesView, checks: checksTab, sql: sqlView};
-  const reviewing = state.run?.review && ['changes', 'checks', 'sql'].includes(state.tab);
+  // Recorded mode has its own read-only views; offline rehearse, SQL and download helpers are never reached.
+  const views = recordedMode()
+    ? {investigation: recordedInvestigationView, evidence: evidenceView, changes: recordedChangesView, checks: recordedChecksView, sql: recordedSqlView}
+    : {investigation: investigationView, evidence: evidenceView, changes: changesView, checks: checksTab, sql: sqlView};
+  const reviewing = !recordedMode() && state.run?.review && ['changes', 'checks', 'sql'].includes(state.tab);
   $('#content').innerHTML = `${reviewing ? reviewJump() : ''}${views[state.tab]()}`;
   if (state.tab === 'evidence') renderEvidence();
-  if (state.tab === 'sql') maybeLoadSql();
+  if (state.tab === 'sql' && !recordedMode()) maybeLoadSql();
   markSelection();
-  if (state.countUp && state.countUp === state.run?.id && state.tab === 'changes') { state.countUp = null; animateCounts(); }
+  if (!recordedMode() && state.countUp && state.countUp === state.run?.id && state.tab === 'changes') { state.countUp = null; animateCounts(); }
 }
 
 // The tab bar already moves between Changes, Checks and SQL; this only adds the jump to the artifacts.
@@ -449,12 +557,14 @@ function investigationView() {
 function orderTable(rows) {
   return table(['Purchase','Order','Status','Source reference'],
     rows.map(o=>[purchaseCell(o),idRef(o.id),text(o.status),`<span class="mono">${text(o.source_reference||'—')}</span>`]),
-    rows.map(o=>`class="sel" tabindex="0" data-key="order:${escape(o.id)}" aria-selected="false"`));
+    rows.map(o=>selAttrs(`order:${o.id}`)));
 }
 
 // Citation shortcuts inside a selectable row. Keyboard users select the row (one tab stop per row);
-// the details panel then lists the same citations with links into Evidence.
+// the details panel then lists the same citations with links into Evidence. When a recording's
+// citations are disabled, the server's recorded text is shown as plain text and never linkified.
 function citations(action) {
+  if (!active().citations) return `<span class="mono ref-text">${text(action.recorded_evidence_refs_text || action.evidence_refs.join(', ') || '—')}</span>`;
   return `<span class="citations">${action.evidence_refs.map(ref=>`<button class="citation" tabindex="-1" data-key="order:${escape(action.order_id)}" data-focus-ref="${escape(ref)}">${text(ref)}</button>`).join('')}</span>`;
 }
 
@@ -462,7 +572,209 @@ function planTable(plan) {
   const orders = ordersById();
   return table(['Purchase','Cancel duplicate','Keep original','Evidence'],
     plan.cancellations.map(a=>[purchaseCell(orders.get(a.order_id)),idRef(a.order_id,'cancelled'),idRef(a.duplicate_of),citations(a)]),
-    plan.cancellations.map(a=>`class="sel" tabindex="0" data-key="order:${escape(a.order_id)}" aria-selected="false"`));
+    plan.cancellations.map(a=>selAttrs(`order:${a.order_id}`)));
+}
+
+/* ---------- Recorded model runs (read-only history) ---------- */
+
+const fmtNum = (n) => Number.isFinite(n) ? n.toLocaleString() : '—';
+const recordingLabel = (r) => r?.provenance?.label || REC_LABEL;
+const recordedList = () => state.recordings.get(state.incident?.id) || {status: 'loading', list: []};
+
+async function refreshRecordings(caseId) {
+  const previous = state.recordings.get(caseId);
+  if (!previous) state.recordings.set(caseId, {status: 'loading', list: []});
+  try {
+    const list = await api(`/api/incidents/${encodeURIComponent(caseId)}/recordings`);
+    state.recordings.set(caseId, {status: 'ok', list: Array.isArray(list) ? list : []});
+  } catch (error) {
+    state.recordings.set(caseId, {status: 'error', list: previous?.list || [], error: error.message});
+  }
+  return state.recordings.get(caseId);
+}
+
+// Loads one recording for the case on screen. Every request refetches, because the server rechecks the
+// fixture match each time. A late response for another case or selection is dropped.
+async function loadRecording(id, {renderNow = true} = {}) {
+  const caseId = state.incident.id, seq = ++state.recSeq;
+  Object.assign(state, {recId: id, recording: null, selection: null, sheet: false, stepFilter: 'all'});
+  if (renderNow) render();
+  try {
+    const detail = await api(`/api/recordings/${encodeURIComponent(id)}`);
+    if (seq !== state.recSeq || state.incident?.id !== caseId) return;
+    transition(() => { if (seq === state.recSeq && state.incident?.id === caseId) { state.recording = detail; render(); } }, 'case');
+  } catch (error) {
+    if (seq !== state.recSeq || state.incident?.id !== caseId) return;
+    Object.assign(state, {recId: null, recording: null});
+    if (error.status === 404) {
+      notice('That recording is no longer available in this server session, for example after a server restart. Choose one from the refreshed list.');
+      await refreshRecordings(caseId);
+    } else notice(`Recording unavailable: ${error.message}`);
+    if (state.incident?.id === caseId) render();
+  }
+}
+
+function setSource(source) {
+  if (source === state.source || !['script', 'recorded'].includes(source) || !state.incident) return;
+  Object.assign(state, {source, selection: null, sheet: false});
+  const newest = recordedList().list[0];
+  if (source === 'recorded' && !state.recId && newest) loadRecording(newest.id, {renderNow: false});
+  transition(() => render(), 'case');
+}
+
+function recordedPending() {
+  const list = recordedList();
+  if (list.status === 'loading') return `<div class="rec-loading">${skeleton(8)}</div>`;
+  if (list.status === 'error') return `<div class="callout stop">${text(`Recorded runs could not be loaded: ${list.error}`)}</div><button class="secondary" data-refresh-recordings>${icon('refresh-cw')}<span>Try again</span></button>`;
+  if (!list.list.length) return emptyState('No recorded model runs for this case', 'Recordings are imported from saved command-line agent runs. This page never starts a live model run.', 'history');
+  if (!state.recId) return emptyState('Choose a recorded run', 'Pick a recording from the list in the sidebar.', 'history');
+  return `<div class="rec-loading">${skeleton(10)}</div>`;
+}
+
+function recBanner(r) {
+  const p = r.provenance || {};
+  const when = started(p.recorded_at) || 'time not recorded';
+  const source = p.timestamp_source ? ` (${TIMESTAMP_SOURCE[p.timestamp_source] || p.timestamp_source.replaceAll('_', ' ')})` : '';
+  return `<div class="rec-banner">${icon('history')}<div><strong>${text(recordingLabel(r))}</strong><span>${text(`${p.model || 'Model not recorded'} · recorded ${when}${source}`)}</span></div></div>
+    ${r.fixture_matches === false || r.fixture_warning ? `<div class="callout stop rec-warning">${icon('triangle-alert')}<span>${text(r.fixture_warning || 'Recording inputs do not match the served case. Current-case citations are disabled.')}</span></div>` : ''}
+    ${r.incident_id !== state.incident?.id ? `<div class="callout stop rec-warning">${icon('triangle-alert')}<span>${text(`This recording belongs to another case (${r.incident_id}). Links into the current case are disabled.`)}</span></div>` : ''}`;
+}
+
+// Evidence references: links into the current inspector only when allowed; otherwise plain recorded text.
+function refsView(refs, recordedText) {
+  if (active().citations && Array.isArray(refs) && refs.length) return `<span class="citations">${refs.map(ref => `<button class="citation" data-open-ref="${escape(ref)}">${text(ref)}</button>`).join('')}</span>`;
+  return `<span class="mono ref-text">${text(recordedText || (Array.isArray(refs) ? refs.join(', ') : '') || '—')}</span>`;
+}
+
+function argSummary(call) {
+  const a = call.arguments;
+  if (call.name === 'read_artifact' && a && typeof a === 'object') return `${a.name ?? ''}${a.start_line ? ` · from L${a.start_line}` : ''}${a.max_lines ? ` · up to ${a.max_lines} lines` : ''}`;
+  if (call.name === 'query_database' && a?.sql) return String(a.sql).replace(/\s+/g, ' ').slice(0, 96);
+  if (call.name === 'rehearse_repair' && a?.plan) return `${(a.plan.cancellations || []).length} proposed cancellations`;
+  if (a && typeof a === 'object' && !Array.isArray(a) && !Object.keys(a).length) return 'no arguments';
+  return JSON.stringify(a ?? null).slice(0, 96);
+}
+
+function argsView(call) {
+  const a = call.arguments;
+  if (call.name === 'rehearse_repair' && a?.plan) {
+    const rows = a.plan.cancellations || [];
+    return `<h4>Proposed plan</h4>${a.plan.rationale ? `<p class="tl-text">${text(a.plan.rationale)}</p>` : ''}
+      ${rows.length ? table(['Cancel', 'Keep', 'Cited evidence'], rows.map(c => [`<span class="mono cancelled">${text(c.order_id)}</span>`, `<span class="mono">${text(c.duplicate_of)}</span>`, refsView(c.evidence_refs, c.recorded_evidence_refs_text)])) : '<p class="caption">No cancellations in this plan.</p>'}`;
+  }
+  if (call.name === 'query_database' && a?.sql) return `<h4>Read-only SQL</h4><pre class="tl-sql">${String(a.sql).split(/\r?\n/).map(sqlTint).join('\n')}</pre>`;
+  return `<h4>Arguments</h4><pre>${text(JSON.stringify(a ?? null, null, 2))}</pre>`;
+}
+
+function resultView(call, res) {
+  const v = res.result;
+  if (res.error) return `<div class="tl-error">${icon('circle-x')}<div><strong>Rejected by the local runtime</strong><p>${text(v && typeof v === 'object' && 'error' in v ? v.error : JSON.stringify(v))}</p></div></div>`;
+  if (call.name === 'rehearse_repair' && v && Array.isArray(v.checks)) {
+    const ok = v.checks.filter(c => c.passed).length;
+    return `<h4>Rehearsal result</h4><p class="small">${v.passed ? 'Passed' : 'Did not pass'} · ${ok}/${v.checks.length} checks${v.status ? ` · ${text(v.status)}` : ''}</p>
+      <ul class="tl-checks">${v.checks.map(c => `<li class="${c.passed ? '' : 'fail'}">${icon(c.passed ? 'check' : 'x')}<span>${text(c.name.replaceAll('_', ' '))}</span></li>`).join('')}</ul>`;
+  }
+  if (call.name === 'read_artifact' && v && Array.isArray(v.lines)) {
+    const shown = v.lines.slice(0, 12);
+    return `<h4>Lines returned</h4><p class="caption">${text(`${v.lines.length} of ${v.total_lines ?? '?'} lines from ${v.name ?? 'the file'}`)}</p>
+      <div class="tl-lines">${shown.map(l => `<div class="tl-line">${refsView(l.ref ? [l.ref] : [], l.recorded_ref_text)}<span class="lt">${text(l.text)}</span></div>`).join('')}</div>
+      ${v.lines.length > shown.length ? `<p class="caption">${text(`${v.lines.length - shown.length} more lines are in this recording.`)}</p>` : ''}`;
+  }
+  if (call.name === 'query_database' && v && Array.isArray(v.rows)) {
+    const cols = Array.isArray(v.columns) ? v.columns : Object.keys(v.rows[0] || {});
+    return `<h4>Rows returned · ${v.rows.length}${v.truncated ? '+' : ''}</h4>${v.rows.length ? table(cols.map(text), v.rows.slice(0, 6).map(row => cols.map(c => `<span class="mono">${text(row[c] ?? 'NULL')}</span>`))) : '<p class="caption">No rows.</p>'}${v.rows.length > 6 ? `<p class="caption">${text(`${v.rows.length - 6} more rows are in this recording.`)}</p>` : ''}`;
+  }
+  return `<h4>Result</h4><pre>${text(JSON.stringify(v ?? null, null, 2))}</pre>`;
+}
+
+function callItem(call, res, n) {
+  const executed = call.has_result !== false && !!res;
+  const [status, tone] = !executed ? ['Requested · no result recorded', ''] : res.error ? ['Rejected', 'danger'] : ['Result recorded', 'ok'];
+  const open = !!res?.error || call.name === 'rehearse_repair';
+  return `<li class="tl-item tl-call${res?.error ? ' rejected' : ''}${executed ? '' : ' pending'}"><span class="tl-dot">${icon(res?.error ? 'circle-x' : 'wrench')}</span>
+    <details class="tl-card"${open ? ' open' : ''}><summary class="tl-head"><span class="tl-no">${pad(n)}</span><span class="tool mono">${text(call.name)}</span><span class="tl-arg mono">${text(argSummary(call))}</span>${call.truncated || res?.truncated ? badge('Truncated preview') : ''}${badge(status, tone)}</summary>
+      <div class="tl-detail">${argsView(call)}${executed ? resultView(call, res) : '<p class="caption">This call was recorded without an executed result, so it is not shown as completed.</p>'}</div></details></li>`;
+}
+
+function assistantItem(step, n) {
+  return `<li class="tl-item tl-assistant"><span class="tl-dot">${icon('bot')}</span><div class="tl-card"><div class="tl-head"><span class="tl-no">${pad(n)}</span><span class="tl-kind">Model message</span></div>
+    <p class="tl-text">${step.text ? text(step.text) : '<span class="faint">No text in this response.</span>'}</p></div></li>`;
+}
+
+function timelineItems(r) {
+  const results = new Map(r.steps.filter(s => s.kind === 'tool_result').map(s => [s.call_id, s]));
+  const callIds = new Set(r.steps.filter(s => s.kind === 'tool_call').map(s => s.call_id));
+  const out = []; let n = 0;
+  for (const step of r.steps) {
+    if (step.kind === 'tool_result' && callIds.has(step.call_id)) continue; // shown inside its call
+    n += 1;
+    const res = step.kind === 'tool_call' ? results.get(step.call_id) : null;
+    const rejected = step.kind === 'tool_call' ? !!res?.error : step.kind === 'tool_result' && step.error;
+    if (state.stepFilter === 'tools' && step.kind === 'assistant') continue;
+    if (state.stepFilter === 'messages' && step.kind !== 'assistant') continue;
+    if (state.stepFilter === 'rejected' && !rejected) continue;
+    if (step.kind === 'assistant') out.push(assistantItem(step, n));
+    else if (step.kind === 'tool_call') out.push(callItem(step, res, n));
+    else out.push(`<li class="tl-item tl-call${step.error ? ' rejected' : ''}"><span class="tl-dot">${icon('info')}</span><div class="tl-card"><div class="tl-head"><span class="tl-no">${pad(n)}</span><span class="tl-kind">Result without a matching call</span></div><div class="tl-detail"><pre>${text(JSON.stringify(step.result ?? null, null, 2))}</pre></div></div></li>`);
+  }
+  return out.join('') || '<li class="tl-empty">No steps match this filter.</li>';
+}
+
+function recordedInvestigationView() {
+  const r = state.recording;
+  if (!r) return recordedPending();
+  const [label, tone] = recOutcome(r), usage = r.usage || {};
+  const results = new Map(r.steps.filter(s => s.kind === 'tool_result').map(s => [s.call_id, s]));
+  const calls = r.steps.filter(s => s.kind === 'tool_call');
+  const rejected = calls.filter(c => results.get(c.call_id)?.error).length + r.steps.filter(s => s.kind === 'tool_result' && s.error && !calls.some(c => c.call_id === s.call_id)).length;
+  const messages = r.steps.filter(s => s.kind === 'assistant').length;
+  const heading = {repair: 'A recorded repair', stop: 'The model stopped', error: 'The attempt ended with an error', incomplete: 'The attempt did not finish'}[r.outcome] || 'Recorded attempt';
+  // Counts match the list below, where each result is shown inside its call.
+  const callIds = new Set(calls.map(c => c.call_id));
+  const shown = r.steps.filter(s => !(s.kind === 'tool_result' && callIds.has(s.call_id))).length;
+  const filters = [['all', `All · ${shown}`], ['tools', `Tool calls · ${shown - messages}`], ['messages', `Model messages · ${messages}`], ['rejected', `Rejected · ${rejected}`]];
+  return `${recBanner(r)}
+    <div class="section-heading"><h2>${heading}</h2>${badge(label, tone)}</div>
+    <div class="callout ${tone === 'ok' ? 'success' : 'stop'}"><strong>Recorded final summary</strong><br>${text(r.final?.summary || r.summary || 'No summary recorded.')}</div>
+    <div class="metrics four">${metric(r.tool_calls, 'tool results recorded')}${metric(Number.isFinite(r.elapsed_seconds) ? `${Math.round(r.elapsed_seconds)} s` : '—', 'elapsed, as reported')}${metric(usage.available ? fmtNum(usage.total_tokens) : '—', usage.available ? 'tokens, as reported' : 'usage unavailable')}${metric(rejected, 'rejected tool results')}</div>
+    <p class="small muted">${usage.available ? text(`Input ${fmtNum(usage.input_tokens)} (cached ${fmtNum(usage.cached_input_tokens)}) · output ${fmtNum(usage.output_tokens)}, which already includes ${fmtNum(usage.reasoning_tokens)} reasoning · ${fmtNum(usage.response_count)} responses with usage. No cost is shown.`) : 'This recording did not include usage totals.'}
+      The steps below are the recorded tool calls, results and model messages, in order. Nothing here runs again.</p>
+    <div class="tl-tools"><div class="segmented" role="group" aria-label="Filter steps">${filters.map(([key, name]) => `<button data-step-filter="${key}" aria-pressed="${state.stepFilter === key}">${text(name)}</button>`).join('')}</div><button class="link small" data-expand-steps>Expand all</button></div>
+    <ol class="timeline">${timelineItems(r)}</ol>`;
+}
+
+function recordedChangesView() {
+  const r = state.recording;
+  if (!r) return recordedPending();
+  if (!r.review) return `${recBanner(r)}${r.outcome === 'stop'
+    ? emptyState('No repair was recorded', 'The model stopped instead of proposing a repair, so this recording has no rehearsal review.', 'ban')
+    : emptyState('No verified repair in this recording', `This attempt ended as ${r.outcome}; no verified rehearsal review was recorded.`, 'circle-x')}`;
+  const review = r.review, passed = review.checks.filter(c => c.passed).length;
+  return `${recBanner(r)}
+    <div class="section-heading"><h2>Recorded repair review</h2>${badge('Recorded at rehearsal')}</div>
+    <div class="callout">${text(r.review_observation || 'Recorded at rehearsal; not a current export check.')}</div>
+    <div class="metrics four">${metric(`${review.before_active} → ${review.after_active}`,'active records')}${metric(review.cancellations,'duplicate orders cancelled')}${metric(`${review.checkout_preserved} / ${review.checkout_total}`,'later checkout purchases intact')}${metric(`${passed} / ${review.checks.length}`,'checks passed at recorded rehearsal')}</div>
+    <ul class="assurance" aria-label="Recording boundaries"><li>${text(recordingLabel(r))}</li><li>Historical review data</li><li>No rehearsal, SQL or downloads from recordings</li></ul>
+    ${diffView(review)}
+    <p class="caption">Read-only history. To produce exportable SQL, run the offline script and rehearse it on a disposable copy.</p>`;
+}
+
+function recordedChecksView() {
+  const r = state.recording;
+  if (!r) return recordedPending();
+  if (!r.review) return `${recBanner(r)}${emptyState('No checks in this recording', 'Checks run only when a rehearsal is recorded. This attempt did not record one.', 'shield-check')}`;
+  const review = r.review, passed = review.checks.filter(c => c.passed).length;
+  return `${recBanner(r)}
+    <div class="section-heading"><h2>Recorded operational checks</h2>${badge(`${passed} / ${review.checks.length} passed`, !review.passed)}</div>
+    <div class="status-cards">
+      <div class="status-card ${review.passed ? 'ok' : 'danger'}"><span class="eyebrow">At recorded rehearsal</span><strong>${passed} / ${review.checks.length} checks passed</strong><span class="caption">${text(r.review_observation || '')}</span></div>
+      <div class="status-card"><span class="eyebrow">Export</span><strong>Not available for recordings</strong><span class="caption">Recordings have no downloads. Exports come only from a current offline rehearsal, which rechecks freshness.</span></div>
+    </div>
+    ${checksView(review.checks)}`;
+}
+
+function recordedSqlView() {
+  return `${state.recording ? recBanner(state.recording) : ''}${emptyState('No SQL for recorded runs', 'Recordings are read-only history with no downloads. Guarded SQL comes only from a current offline rehearsal, which rechecks freshness first.', 'database')}`;
 }
 
 /* ---------- Evidence ---------- */
@@ -490,8 +802,9 @@ function ensureFile(name) {
 }
 
 function citedRefs() {
-  const cited = new Map();
-  for (const action of state.run?.plan?.cancellations || []) {
+  const cited = new Map(), source = active();
+  if (!source.citations) return cited;
+  for (const action of source.plan?.cancellations || []) {
     for (const ref of action.evidence_refs) {
       if (!cited.has(ref)) cited.set(ref, []);
       cited.get(ref).push(action.order_id);
@@ -529,10 +842,11 @@ function selectionRefs() {
 }
 
 function orderLink(id) {
-  const change = state.run?.review?.changes.find(c => c.before.id === id);
-  if (change) return {refs: change.evidence_refs, keep: change.duplicate_of};
-  const action = state.run?.plan?.cancellations.find(a => a.order_id === id);
-  return action ? {refs: action.evidence_refs, keep: action.duplicate_of} : null;
+  const source = active();
+  const change = source.review?.changes.find(c => c.before.id === id);
+  if (change) return {refs: source.citations ? change.evidence_refs : [], keep: change.duplicate_of};
+  const action = source.plan?.cancellations.find(a => a.order_id === id);
+  return action ? {refs: source.citations ? action.evidence_refs : [], keep: action.duplicate_of} : null;
 }
 
 const lineLabel = (raw, cancel, keep) => cancel && raw.includes(cancel) ? 'cancellation target' : keep && raw.includes(keep) ? 'retained write' : '';
@@ -544,7 +858,7 @@ function evidenceView() {
     </div>
     <div class="log-tools">
       <label class="search">${icon('search')}<span class="sr-only">Search lines</span><input id="ev-search" type="search" placeholder="Search lines" value="${escape(ev.query)}" autocomplete="off" spellcheck="false"><kbd aria-hidden="true">/</kbd></label>
-      ${cited.size?`<button class="toggle" data-cited-only aria-pressed="${ev.citedOnly}"><span class="dot" aria-hidden="true"></span>Cited by plan</button>`:''}
+      ${cited.size?`<button class="toggle" data-cited-only aria-pressed="${ev.citedOnly}"><span class="dot" aria-hidden="true"></span>${recordedMode()?'Cited by recording':'Cited by plan'}</button>`:''}
       <label class="goto">Line <input id="ev-goto" type="number" min="1" step="1" inputmode="numeric" aria-label="Go to line number"></label>
       <span id="ev-count" class="caption" role="status"></span>
     </div>
@@ -670,7 +984,7 @@ function diffView(review) {
     ${table(['','Product','on_hand','Change','From cancellations'],review.stock.map(p=>{
       const delta = p.after - p.before, entry = byProduct.get(p.sku);
       return [`<span class="sym ${delta?'mod':'same'}">${delta?'~':'='}</span>`,`${text(p.name)} <span class="mono faint">${text(p.sku)}</span>`,`<span class="before num">${text(p.before)}</span> → <span class="after num">${text(p.after)}</span>`,`<span class="${delta>0?'positive':delta<0?'cancelled':''} num">${delta>0?'+':''}${text(delta)}</span>`,entry?`${entry.orders} orders · +${entry.units} units`:'—'];
-    }),review.stock.map(p=>`class="sel" tabindex="0" data-key="product:${escape(p.sku)}" aria-selected="false"`))}
+    }),review.stock.map(p=>selAttrs(`product:${p.sku}`)))}
     <div class="group-head"><h4>preserved work</h4><span class="caption">Later purchases in this synthetic case. At rehearsal, ${text(review.checkout_preserved)} of ${text(review.checkout_total)} remained unchanged.</span></div>
     ${orderTable(checkout)}
     <details class="fold"><summary>Other untouched records · ${others.length}</summary>${orderTable(others)}</details>
@@ -684,8 +998,8 @@ function changesTable(changes) {
   if (!rows.length) return `<div class="log-empty">No changed records match.</div>`;
   return table(['Purchase','Cancelled order','Status on copy','Keeps original','Evidence'],rows.map(c=>{
     const changed = Object.keys(c.before).filter(k => c.before[k] !== c.after[k]);
-    return [purchaseCell(c.before),`<span class="sym mod" title="${escape(changed.join(', '))} changed">~</span> ${idRef(c.before.id,'cancelled',q)}`,`<span class="before">${text(c.before.status)}</span> → <span class="after">${text(c.after.status)}</span>`,idRef(c.duplicate_of,'',q),citations({order_id:c.before.id,evidence_refs:c.evidence_refs})];
-  }),rows.map(c=>`class="sel" tabindex="0" data-key="order:${escape(c.before.id)}" aria-selected="false"`));
+    return [purchaseCell(c.before),`<span class="sym mod" title="${escape(changed.join(', '))} changed">~</span> ${idRef(c.before.id,'cancelled',q)}`,`<span class="before">${text(c.before.status)}</span> → <span class="after">${text(c.after.status)}</span>`,idRef(c.duplicate_of,'',q),citations({order_id:c.before.id,evidence_refs:c.evidence_refs||[],recorded_evidence_refs_text:c.recorded_evidence_refs_text})];
+  }),rows.map(c=>selAttrs(`order:${c.before.id}`)));
 }
 
 function artifactsView(run) {
@@ -798,43 +1112,49 @@ function citeBlock(ref, cancel, keep, focus) {
 }
 
 function orderContext(id, focusRef) {
-  const review = state.run?.review;
+  const source = active(), review = source.review, recorded = source.recorded;
   const change = review?.changes.find(c => c.before.id === id);
-  const planned = !change && state.run?.plan?.cancellations.find(a => a.order_id === id);
-  const record = change?.before || ordersById().get(id) || review?.preserved_orders.find(o => o.id === id);
-  if (!record) return `<p class="muted">This record is not in the selected incident.</p>`;
+  const planned = !change && source.plan?.cancellations.find(a => a.order_id === id);
+  // A recording's details come only from its own historical review, never from current-case records.
+  const findIn = (oid) => review?.changes.find(c => c.before.id === oid)?.before || review?.preserved_orders.find(o => o.id === oid);
+  const record = change?.before || (recorded ? findIn(id) : ordersById().get(id) || findIn(id));
+  if (!record) return `<p class="muted">This record is not in the selected ${recorded ? 'recording' : 'incident'}.</p>`;
+  const when = recorded ? 'Recorded at rehearsal · not a current export check' : 'Engine before/after at rehearsal';
   let html = `<h2 class="mono ctx-title">${text(id)}</h2><p class="small muted">${purchase(record)}</p><button class="link small" data-copy-value="${escape(id)}" data-copy-what="Order ID">${icon('copy')}<span>Copy order ID</span></button>`;
-  if (change) html += `<div class="ctx-status">${badge('Changed on the copy', true)}<span class="caption">Engine before/after at rehearsal</span></div>${fieldTable(change.before, change.after)}`;
+  if (change) html += `<div class="ctx-status">${badge(recorded ? 'Changed on the recorded copy' : 'Changed on the copy', true)}<span class="caption">${when}</span></div>${fieldTable(change.before, change.after)}`;
   else if (planned) html += `<div class="ctx-status">${badge('Proposed cancellation')}<span class="caption">Not rehearsed yet · current source values</span></div>${fieldTable(record)}`;
   else if (review) html += `<div class="ctx-status">${badge('Unchanged at rehearsal', 'ok')}${laterIds(review).has(id)?badge('Later purchase'):''}</div>${fieldTable(record)}`;
   else html += `<div class="ctx-status">${badge('Source record')}</div>${fieldTable(record)}`;
-  const link = change ? {refs: change.evidence_refs, keep: change.duplicate_of} : planned ? {refs: planned.evidence_refs, keep: planned.duplicate_of} : null;
+  const link = change ? {refs: change.evidence_refs || [], text: change.recorded_evidence_refs_text, keep: change.duplicate_of} : planned ? {refs: planned.evidence_refs, keep: planned.duplicate_of} : null;
   if (link) {
-    html += `<div class="ctx-keep"><h3>Retained purchase</h3><button class="link mono" data-key="order:${escape(link.keep)}">${text(link.keep)}</button><p>${purchase(ordersById().get(link.keep))}</p></div>`;
-    html += `<h3>Supporting evidence</h3>${link.refs.map(ref => citeBlock(ref, id, link.keep, focusRef)).join('')}`;
+    const kept = recorded ? findIn(link.keep) : ordersById().get(link.keep);
+    html += `<div class="ctx-keep"><h3>Retained purchase</h3>${source.selectable ? `<button class="link mono" data-key="order:${escape(link.keep)}">${text(link.keep)}</button>` : `<span class="mono">${text(link.keep)}</span>`}<p>${purchase(kept)}</p></div>`;
+    html += source.citations
+      ? `<h3>Supporting evidence</h3>${link.refs.map(ref => citeBlock(ref, id, link.keep, focusRef)).join('')}`
+      : `<h3>Recorded evidence references</h3><p class="mono ref-text">${text(link.text || '—')}</p><p class="caption">Historical text only. Citations are disabled because the recording's inputs do not match this case.</p>`;
   }
-  const citedBy = (state.run?.plan?.cancellations || []).filter(a => a.duplicate_of === id);
-  if (citedBy.length) html += `<h3>Retained for</h3><div class="id-grid">${citedBy.map(a=>`<button class="id-chip mono" data-key="order:${escape(a.order_id)}">${text(a.order_id)}</button>`).join('')}</div>`;
+  const citedBy = (source.plan?.cancellations || []).filter(a => a.duplicate_of === id);
+  if (citedBy.length && source.selectable) html += `<h3>Retained for</h3><div class="id-grid">${citedBy.map(a=>`<button class="id-chip mono" data-key="order:${escape(a.order_id)}">${text(a.order_id)}</button>`).join('')}</div>`;
   return html;
 }
 
 function productContext(sku) {
-  const review = state.run?.review, row = review?.stock.find(p => p.sku === sku);
+  const source = active(), review = source.review, row = review?.stock.find(p => p.sku === sku);
   if (!row) return `<p class="muted">No rehearsal data for this product.</p>`;
   const changes = review.changes.filter(c => c.before.sku === sku);
   return `<h2 class="ctx-title">${text(row.name)} <span class="mono faint">${text(sku)}</span></h2>
-    <div class="ctx-status">${badge(row.after !== row.before ? 'Changed on the copy' : 'Unchanged', row.after !== row.before)}<span class="caption">Engine before/after at rehearsal</span></div>
+    <div class="ctx-status">${badge(row.after !== row.before ? 'Changed on the copy' : 'Unchanged', row.after !== row.before)}<span class="caption">${source.recorded ? 'Recorded at rehearsal · not a current export check' : 'Engine before/after at rehearsal'}</span></div>
     ${fieldTable({sku, name: row.name, on_hand: row.before}, {sku, name: row.name, on_hand: row.after})}
     ${changes.length?`<h3>From ${changes.length} cancellations</h3><div class="id-grid">${changes.map(c=>`<button class="id-chip mono" data-key="order:${escape(c.before.id)}">${text(c.before.id)} · +${text(c.before.quantity)}</button>`).join('')}</div>`:''}`;
 }
 
 function checkContext(name) {
-  const check = state.run?.review?.checks.find(c => c.name === name);
+  const source = active(), check = source.review?.checks.find(c => c.name === name);
   if (!check) return `<p class="muted">This check is not in the current review.</p>`;
   return `<h2 class="ctx-title">${text(name.replaceAll('_', ' '))}</h2>
-    <div class="ctx-status">${badge(check.passed ? 'Passed' : 'Failed', check.passed ? 'ok' : 'danger')}<span class="caption">${text(groupOf(name))} · observed at rehearsal</span></div>
+    <div class="ctx-status">${badge(check.passed ? 'Passed' : 'Failed', check.passed ? 'ok' : 'danger')}<span class="caption">${text(groupOf(name))} · ${source.recorded ? 'recorded at rehearsal' : 'observed at rehearsal'}</span></div>
     <p class="small">${text(check.detail)}</p><p class="caption mono">${text(name)}</p>
-    <p class="small muted">Checks run on the rehearsal snapshot and cannot be edited by the plan. Export status is rechecked separately on every download.</p>`;
+    <p class="small muted">${source.recorded ? text(state.recording?.review_observation || 'Recorded at rehearsal; not a current export check.') : 'Checks run on the rehearsal snapshot and cannot be edited by the plan. Export status is rechecked separately on every download.'}</p>`;
 }
 
 function lineContext(ref) {
@@ -1034,7 +1354,15 @@ function paletteCommands(query) {
   const q = query.trim().toLowerCase(), words = q.split(/\s+/).filter(Boolean), items = [];
   const add = (group, label, hint, iconName, run, extra = '') => items.push({group, label, hint, icon: iconName, run, hay: `${group} ${label} ${hint} ${extra}`.toLowerCase()});
   const run = state.run;
-  if (state.incident && !state.busy) {
+  if (state.incident) {
+    const recs = recordedList().list;
+    if (recordedMode()) add('Actions', 'Show script run', 'Offline script · no model', 'play', () => setSource('script'), 'script offline');
+    else if (recs.length) add('Actions', 'Show recorded model runs', `${recs.length} recorded · not live`, 'history', () => setSource('recorded'), 'recorded model meta');
+    for (const r of recs) add('Recorded runs', `${recOutcome(r)[0]} · ${started(r.recorded_at)}`, `${r.model} · ${r.tool_calls} tool results`, 'history',
+      () => { if (!recordedMode()) setSource('recorded'); return loadRecording(r.id); }, `recording ${r.outcome}`);
+  }
+  // Offline actions exist only in script mode; recordings are never rehearsed, exported or rechecked.
+  if (state.incident && !state.busy && !recordedMode()) {
     add('Actions', run ? 'New offline investigation' : 'Start offline investigation', 'Offline script · no model', run ? 'refresh-cw' : 'play', () => act('investigate'), 'investigate run start');
     if (run?.status === 'proposed') add('Actions', 'Rehearse on a disposable copy', 'Copy only', 'flask-conical', () => act('rehearse'), 'rehearse');
     if (run?.status === 'ready_for_review') {
@@ -1045,14 +1373,15 @@ function paletteCommands(query) {
   }
   for (const tab of TABS) add('Go to', TAB_META[tab][1], 'Tab', TAB_META[tab][0], () => setTab(tab, true), 'tab');
   state.cases.forEach(c => add('Cases', c.title, caseStatus(c.id)[0], 'folder-open', () => goToCase(c.id), 'case incident'));
-  for (const r of state.history.get(state.incident?.id) || []) add('Runs', `Run ${shortId(r.id)}`, `${statusOf(r)[0]} · started ${started(r.created_at)}`, 'history', () => loadRun(r.id), r.id);
+  if (!recordedMode()) for (const r of state.history.get(state.incident?.id) || []) add('Runs', `Run ${shortId(r.id)}`, `${statusOf(r)[0]} · started ${started(r.created_at)}`, 'history', () => loadRun(r.id), r.id);
   // "L28", "line 28" or "events.jsonl:L28" opens that exact evidence line.
   const line = /^(?:([\w-]+\.(?:jsonl|json|txt)):)?l(?:ine)?\s*(\d{1,5})$/.exec(q);
   if (line && state.incident) {
     const name = line[1] || state.ev.name, ref = `${name}:L${Number(line[2])}`;
     if (state.incident.artifacts.some(a => a.name === name)) add('Evidence', `Open ${ref}`, 'Exact evidence line', 'file-text', () => { openInEvidence(ref); select(`line:${ref}`, {keepFocus: true}); }, q);
   }
-  if (q.length >= 3) {
+  // Order search reads current-case records, so it is offered only in script mode.
+  if (q.length >= 3 && !recordedMode()) {
     (state.incident?.orders || []).filter(o => o.id.toLowerCase().includes(q) || o.customer.toLowerCase().includes(q)).slice(0, 6)
       .forEach(o => add('Orders', o.id, `${o.customer} · ${o.sku} × ${o.quantity}`, 'hash', () => inspectOrder(o.id), q));
   }
@@ -1101,6 +1430,15 @@ document.addEventListener('click', event => {
   const d = el.dataset;
   let task;
   if (d.palette !== undefined) openPalette();
+  if (d.source) setSource(d.source);
+  if (d.recording && d.recording !== state.recId) task = loadRecording(d.recording);
+  if (d.stepFilter) { state.stepFilter = d.stepFilter; holdFocus(renderPanel); }
+  if (d.expandSteps !== undefined) {
+    const items = [...document.querySelectorAll('#content .timeline details')], open = items.some(x => !x.open);
+    items.forEach(x => { x.open = open; });
+    el.textContent = open ? 'Collapse all' : 'Expand all';
+  }
+  if (d.refreshRecordings !== undefined) { const caseId = state.incident.id; task = refreshRecordings(caseId).then(() => { if (state.incident?.id === caseId) render(); }); }
   if (d.dismissToast) dismissToast(document.getElementById(d.dismissToast));
   if (d.case && d.case !== (state.switching || state.incident?.id)) {
     // The hash gives each case a link and browser back/forward; hashchange performs the switch.
@@ -1185,13 +1523,13 @@ document.addEventListener('keydown', event => {
 document.addEventListener('input', event => {
   if (event.target.id === 'palette-input') { palette.active = 0; renderPalette(); return; }
   if (event.target.id === 'ev-search') { state.ev.query = event.target.value; renderEvidence(); }
-  if (event.target.id === 'change-search' && state.run?.review) { state.changeQuery = event.target.value; $('#change-table').innerHTML = changesTable(state.run.review.changes); markSelection(); }
+  if (event.target.id === 'change-search' && active().review) { state.changeQuery = event.target.value; $('#change-table').innerHTML = changesTable(active().review.changes); markSelection(); }
 });
 
 document.addEventListener('change', event => {
-  if (event.target.id !== 'change-filter' || !state.run?.review) return;
+  if (event.target.id !== 'change-filter' || !active().review) return;
   state.filter = event.target.value;
-  $('#change-table').innerHTML = changesTable(state.run.review.changes);
+  $('#change-table').innerHTML = changesTable(active().review.changes);
   markSelection();
 });
 
