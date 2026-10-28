@@ -67,6 +67,8 @@ def main(argv: list[str] | None = None) -> int:
     agent.add_argument("--out", type=Path, default=Path("runs"))
     agent.add_argument("--model")
     agent.add_argument("--max-rounds", type=int, default=16)
+    agent.add_argument("--max-completion-tokens", type=int, default=4096,
+                       help="1024 to 16384 tokens per response, including reasoning (default: 4096); not a dollar cap.")
     repair = sub.add_parser("rehearse", help="Rehearse a user-supplied bounded plan on a fresh copy.")
     repair.add_argument("--incident", type=Path, required=True)
     repair.add_argument("--plan", type=Path, required=True)
@@ -99,7 +101,7 @@ def main(argv: list[str] | None = None) -> int:
             incident = create_incident(args.out, args.scenario, args.seed)
             value = {"incident": str(incident.resolve()), "scenario": args.scenario, "agent_has_no_access_to_evaluation_directory": True}
         elif args.command == "agent":
-            client = MetaClient(args.model)
+            client = MetaClient(args.model, max_completion_tokens=args.max_completion_tokens)
             value = run_agent(args.incident.resolve(), args.out, client, max_rounds=args.max_rounds)
             print(json.dumps(value, indent=2))
             return 0 if value["final"]["outcome"] in ("repair", "stop") else 1

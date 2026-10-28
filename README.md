@@ -145,14 +145,45 @@ The live command sends the selected incident's records and evidence to Meta.
 Use the supplied synthetic fixtures for this first test.
 No network call is made by the offline demo, tests, fixture creation, or rehearsal command.
 
-Default model: **muse-spark-1.3**. Select an enabled model with
-**--model muse-wonder-1.0** or the **RECOVERY_ROOM_MODEL** environment variable.
+Default model: **muse-spark-1.3**. Select another enabled model with
+**--model** or the **RECOVERY_ROOM_MODEL** environment variable.
 Availability must be checked in your account. The client uses the documented
 Meta Chat Completions tool protocol, the standard-library HTTP client, and the
-fixed official endpoint. Live compatibility has not yet been verified.
+fixed official endpoint. A first live development pass with Muse Spark 1.3 on
+October 28, 2026 produced one independently verified repair, one verified stop,
+and two output-token-limit errors across four public fixture variants. This
+establishes live integration, not general reliability or an AI advantage.
+Subsequent **budget-aware-v1** runs with 24 rounds and 8192 completion tokens
+independently verified both previously failed repairs: split evidence **80 → 60**
+and multiple retries **100 → 60**, preserving all 10 later purchases in each.
+Across all seven actual attempts, four completed correctly and three earlier
+attempts failed or remained incomplete. The earlier attempts remain retained;
+these development observations do not establish a general model pass rate.
 It caps model rounds, local function calls, context bytes, and completion tokens.
 These are execution bounds, not a currency-denominated spend limit.
 There are no automatic network retries or background calls.
+
+The default completion budget remains **4096 tokens per response**, including
+reasoning. Choose an explicit budget from **1024 to 16384** with
+**--max-completion-tokens**. For example, a separately labelled retry can use:
+
+~~~bash
+python -m recovery_room agent --incident runs/live-case/incident --out runs/live-case/agent-runs --max-completion-tokens 8192 --max-rounds 24
+~~~
+
+Each **result.json** records **configuration** (rounds, local tool calls and
+completion tokens, plus **prompt_version**) and **last_finish_reason**. The
+budget-aware prompt states the actual round/tool limits, encourages efficient
+bounded reads and reserves room for rehearsal/finalization. It supplies no
+fixture answers. Exhausting the rounds remains an **incomplete** outcome with
+**error_code: model_round_limit**, not a justified stop or a successful repair.
+A provider **length** finish is
+an error with **error_code: completion_token_limit**; no tool calls from that
+partial response are executed, and no repair is exported on the strength of
+an incomplete response. Raw responses and usage remain saved, with no automatic
+retry. Increasing the ceiling does not guarantee completion. Preserve failed
+attempts and report changed-budget runs separately. The browser remains an
+explicitly offline demonstration; recorded-model API proposal C is deferred.
 
 The agent can inspect the schema, issue read-only queries, read allowlisted evidence
 with line citations, and request a narrowly structured repair rehearsal. It cannot

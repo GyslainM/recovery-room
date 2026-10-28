@@ -8,7 +8,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from recovery_room.agent import run_agent
+from recovery_room.agent import PROMPT_VERSION, run_agent
 from recovery_room.baselines import event_aware_plan
 from recovery_room.db import snapshot
 from recovery_room.fixtures import create_incident
@@ -195,3 +195,81 @@ class AgentResponseTests(unittest.TestCase):
         self.assertIn("Test-only transport failure", result["error"])
         self.assertEqual(result["tool_calls"], 1)
         self.assertEqual(json.loads((Path(result["session"]) / "responses.json").read_text()), [request])
+
+    def test_length_response_retains_usage_and_never_dispatches_partial_tools_or_retries(self):
+        repair = function_call("repair", "rehearse_repair", json.dumps({"plan": event_aware_plan(self.incident)}))
+        for fields in ({"content": None}, {"content": '{"outcome":"repair"'},
+                       {"content": None, "tool_calls": [repair]}):
+            with self.subTest(fields=fields):
+                payload = completion(fields, usage={"completion_tokens": 8192,
+                    "completion_tokens_details": {"reasoning_tokens": 8190}})
+                payload["choices"][0]["finish_reason"] = "length"
+                result = self.assert_recorded_error(payload)
+                self.assertEqual(result["error_code"], "completion_token_limit")
+                self.assertEqual(result["last_finish_reason"], "length")
+                self.assertIn("No automatic retry", result["error"])
+                self.assertEqual(result["usage"], [payload["usage"]])
+
+    def test_completion_settings_are_saved_with_the_recorded_error(self):
+        payload = completion({"content": None})
+        payload["choices"][0]["finish_reason"] = "length"
+        client = SequenceTransport([payload])
+        client.max_completion_tokens = 8192
+        result = run_agent(self.incident, self.root / "runs", client, max_rounds=12, max_calls=24)
+        self.assertEqual(result["configuration"], {
+            "max_rounds": 12, "max_tool_calls": 24, "max_completion_tokens": 8192,
+            "prompt_version": PROMPT_VERSION})
+        self.assertIn("8,192", result["error"])
+        self.assertEqual(len(client.requests), 1)
+        self.assertEqual(json.loads((Path(result["session"]) / "result.json").read_text()), result)
+
+    def test_length_after_successful_rehearsal_cannot_export(self):
+        request = completion({"tool_calls": [function_call("repair", "rehearse_repair",
+            json.dumps({"plan": event_aware_plan(self.incident)}))]})
+        truncated = stopped()
+        truncated["choices"][0]["finish_reason"] = "length"
+        result, client = self.run_transport([request, truncated])
+        self.assertEqual(result["error_code"], "completion_token_limit")
+        self.assertEqual(result["final"]["outcome"], "error")
+        self.assertIsNone(result["candidate_path"])
+        self.assertIsNone(result["report_path"])
+        self.assertEqual(len(client.requests), 2)
+        folder = Path(result["session"])
+        self.assertEqual(len(list(folder.rglob("candidate.db"))), 1)
+        self.assertFalse(list(folder.rglob("repair.sql")))
+
+    def test_noncompleted_response_with_tools_cannot_dispatch(self):
+        for reason in ("stop", "content_filter", "unknown"):
+            with self.subTest(reason=reason):
+                payload = completion({"tool_calls": [function_call("schema")]})
+                payload["choices"][0]["finish_reason"] = reason
+                self.assert_recorded_error(payload)
+
+    def test_round_exhaustion_is_explicit_retains_observations_and_does_not_retry(self):
+        payload = completion({"tool_calls": [function_call("schema")]})
+        client = SequenceTransport([payload, stopped()])
+        result = run_agent(self.incident, self.root / "runs", client, max_rounds=1, max_calls=3)
+        self.assertEqual(result["final"]["outcome"], "incomplete")
+        self.assertEqual(result["error_code"], "model_round_limit")
+        self.assertEqual(len(client.requests), 1)
+        self.assertEqual(result["tool_calls"], 1)
+        self.assertIsNone(result["candidate_path"])
+        self.assertEqual(snapshot(self.incident / "orders.db"), self.original)
+        folder = Path(result["session"])
+        trace = json.loads((folder / "transcript.json").read_text())
+        self.assertEqual(trace[-1]["tool_call_id"], "schema")
+        self.assertEqual(json.loads((folder / "responses.json").read_text()), [payload])
+        self.assertFalse(list(folder.rglob("repair.sql")))
+
+    def test_actual_budget_is_in_request_and_saved_prompt_version_without_fixture_answers(self):
+        client = SequenceTransport([stopped()])
+        result = run_agent(self.incident, self.root / "runs", client, max_rounds=24, max_calls=32)
+        instruction = client.requests[0][0]["content"]
+        self.assertIn("24 model responses", instruction)
+        self.assertIn("32 local tool calls", instruction)
+        self.assertIn("after rehearsal", instruction)
+        self.assertNotIn("ground_truth.json", instruction)
+        self.assertNotIn("ord_", instruction)
+        self.assertNotIn("evt_", instruction)
+        self.assertEqual(result["configuration"]["prompt_version"], PROMPT_VERSION)
+        self.assertEqual(result["mode"], "test_transport")

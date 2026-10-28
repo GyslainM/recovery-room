@@ -67,6 +67,8 @@ TOOLS = [
     }, ["plan"]),
 ]
 
+PROMPT_VERSION = "budget-aware-v1"
+
 INSTRUCTIONS = """
 You investigate one legacy orders-and-inventory import incident.
 Inspect schema, original state, and supplied evidence before reaching a conclusion.
@@ -81,6 +83,14 @@ You have read-only investigation tools and a narrowly scoped rehearsal tool.
 You cannot execute arbitrary code, change the original, change checks, access evaluator
 files, refund payments, or reverse shipments. This is a synthetic local application.
 Paginate long evidence files rather than assuming the first page is complete.
+Plan your investigation within the supplied model-round and local tool-call budgets.
+Gather related database fields in bounded queries instead of repeatedly counting or
+listing facts already observed. Read all relevant evidence; efficiency never replaces
+evidence. Once the evidence supports a complete plan, request a rehearsal rather than
+continuing redundant confirmation. Reserve responses for rehearsal and the final answer.
+Budget pressure never justifies guessing a citation, skipping checks, or calling a
+repair successful without a successful rehearsal. A stop must identify actual missing
+evidence, not merely conceal that you ran out of investigation time.
 You may revise a rejected plan based on actual tool results. Do not invent a failed
 first attempt for dramatic effect. Checks report observed state, not your opinion.
 When complete, return ONLY a JSON object:
@@ -97,7 +107,10 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class MetaClient:
-    def __init__(self, model: str | None = None):
+    def __init__(self, model: str | None = None, *, max_completion_tokens: int = 4096):
+        if type(max_completion_tokens) is not int or not 1024 <= max_completion_tokens <= 16384:
+            raise ValueError("Choose 1024 to 16384 completion tokens per response, including reasoning.")
+        self.max_completion_tokens = max_completion_tokens
         self.key = os.environ.get("MODEL_API_KEY", "").strip()
         if not self.key:
             raise ValueError("Set MODEL_API_KEY in your local shell before running the live agent.")
@@ -107,7 +120,7 @@ class MetaClient:
     def complete(self, messages: list[dict]) -> dict:
         body = json.dumps({
             "model": self.model, "messages": messages, "tools": TOOLS,
-            "parallel_tool_calls": False, "max_completion_tokens": 4096,
+            "parallel_tool_calls": False, "max_completion_tokens": self.max_completion_tokens,
         }).encode()
         if len(body) > 300_000:
             raise ValueError("Investigation context limit reached; no further API call was sent.")
@@ -234,7 +247,10 @@ def run_agent(incident: Path, output: Path, client, max_rounds: int = 16, max_ca
     session.mkdir(parents=True)
     tools = AgentTools(incident, session)
     messages = [
-        {"role": "developer", "content": INSTRUCTIONS},
+        {"role": "developer", "content": INSTRUCTIONS + (
+            f"\nInvestigation budget: at most {max_rounds} model responses and {max_calls} local tool calls. "
+            "The final answer also consumes a model response; allow room for it after rehearsal.\n"
+        )},
         {"role": "user", "content": "Investigate this incident. Read the incident note and evidence; rehearse a supported correction or stop with the missing evidence."},
     ]
     start = time.monotonic()
@@ -245,13 +261,26 @@ def run_agent(incident: Path, output: Path, client, max_rounds: int = 16, max_ca
     final = {"outcome": "incomplete", "summary": "Model-round limit reached.", "rehearsal_id": None}
     verified = None
     error = None
+    error_code = None
+    last_finish_reason = None
     try:
         for _ in range(max_rounds):
             response = client.complete(messages)
             responses.append(response)
             message, requested, observed_usage, finish_reason = _completion_fields(response)
+            last_finish_reason = finish_reason
             usage.append(observed_usage)
             messages.append(message)
+            if finish_reason == "length":
+                error_code = "completion_token_limit"
+                limit = getattr(client, "max_completion_tokens", None)
+                configured = f" (configured maximum: {limit:,}, including reasoning)" if type(limit) is int else ""
+                raise ValueError(
+                    "Model response reached its completion-token limit" + configured + ". "
+                    "No tool calls from this partial response were executed. No automatic retry was made."
+                )
+            if requested and finish_reason not in (None, "tool_calls"):
+                raise ValueError("The model returned tool calls without completing its response.")
             if not requested:
                 if finish_reason not in (None, "stop"):
                     raise ValueError("The model stopped without completing its final answer.")
@@ -276,6 +305,8 @@ def run_agent(incident: Path, output: Path, client, max_rounds: int = 16, max_ca
                     value = {"error": str(exc)}
                 calls += 1
                 messages.append({"role": "tool", "tool_call_id": call_id, "content": json.dumps(value)})
+        else:
+            error_code = "model_round_limit"
     except (ValueError, KeyError, TypeError, IndexError, sqlite3.Error, OSError) as exc:
         verified = None
         error = str(exc)
@@ -283,11 +314,17 @@ def run_agent(incident: Path, output: Path, client, max_rounds: int = 16, max_ca
     result = {
         "mode": "live_meta_agent" if isinstance(client, MetaClient) else "test_transport",
         "model": getattr(client, "model", "test-double"),
+        "configuration": {
+            "max_rounds": max_rounds, "max_tool_calls": max_calls,
+            "max_completion_tokens": getattr(client, "max_completion_tokens", None),
+            "prompt_version": PROMPT_VERSION,
+        },
         "final": final, "tool_calls": calls,
         "elapsed_seconds": round(time.monotonic() - start, 3), "usage": usage,
         "candidate_path": verified["candidate_path"] if verified else None,
         "report_path": str(Path(verified["folder"]) / "report.html") if verified else None,
-        "session": str(session.resolve()), "error": error,
+        "session": str(session.resolve()), "error": error, "error_code": error_code,
+        "last_finish_reason": last_finish_reason,
         "responses_path": str((session / "responses.json").resolve()),
     }
     (session / "transcript.json").write_text(json.dumps(messages, indent=2), encoding="utf-8")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import io
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,7 @@ from unittest.mock import patch
 
 from recovery_room.agent import AgentTools, MetaClient, run_agent
 from recovery_room.baselines import event_aware_plan
+from recovery_room.cli import main as cli_main
 from recovery_room.db import snapshot
 from recovery_room.fixtures import create_incident
 
@@ -103,6 +105,35 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(result["final"]["outcome"], "error")
         self.assertEqual(result["tool_calls"], 0)
 
+    def test_round_budget_allows_rehearsal_and_final_answer_after_long_inspection(self):
+        # Offline regression of the observed 16-read budget exhaustion, not a model evaluation.
+        class LongInspection(ScriptedTransport):
+            def complete(self, messages):
+                self.requests.append(copy.deepcopy(messages))
+                step = len(self.requests)
+                if step <= 16:
+                    return response({"tool_calls": [call(f"read-{step}", "query_database", {
+                        "sql": "SELECT COUNT(*) AS n FROM orders",
+                    })]})
+                if step == 17:
+                    return response({"tool_calls": [call("repair", "rehearse_repair", {"plan": self.plan})]})
+                observed = json.loads(messages[-1]["content"])
+                return response({"content": json.dumps({
+                    "outcome": "repair", "summary": "Offline budget regression; not a live model.",
+                    "rehearsal_id": observed["rehearsal_id"],
+                })})
+
+        original = snapshot(self.incident / "orders.db")
+        limited = run_agent(self.incident, self.root / "limited", LongInspection(event_aware_plan(self.incident)))
+        self.assertEqual(limited["final"]["outcome"], "incomplete")
+        self.assertEqual(limited["error_code"], "model_round_limit")
+        self.assertFalse(list(Path(limited["session"]).rglob("repair.sql")))
+        complete = run_agent(self.incident, self.root / "expanded", LongInspection(event_aware_plan(self.incident)), max_rounds=24)
+        self.assertEqual(complete["final"]["outcome"], "repair")
+        self.assertEqual(complete["mode"], "test_transport")
+        self.assertTrue(Path(complete["report_path"]).is_file())
+        self.assertEqual(snapshot(self.incident / "orders.db"), original)
+
     def test_tool_dispatch_has_no_generic_write_or_file_access(self):
         tools = AgentTools(self.incident, self.root / "runs")
         for name, args in (
@@ -117,6 +148,34 @@ class AgentTests(unittest.TestCase):
         with patch.dict(os.environ, {"MODEL_API_KEY": ""}):
             with self.assertRaisesRegex(ValueError, "Set MODEL_API_KEY"):
                 MetaClient()
+
+    def test_invalid_completion_budget_is_rejected_before_transport_setup(self):
+        with patch("recovery_room.agent.urllib.request.build_opener") as opener:
+            for value in (0, -1, 1023, 16385, True, False, 8192.0, "8192", None):
+                with self.subTest(value=value), self.assertRaisesRegex(ValueError, "1024 to 16384"):
+                    MetaClient(max_completion_tokens=value)
+            opener.assert_not_called()
+
+    def test_cli_completion_budget_reaches_client_and_saved_run(self):
+        class Stop:
+            model = "offline-cli-budget-test-NOT-a-model"
+            max_completion_tokens = 8192
+
+            def complete(self, messages):
+                return response({"content": json.dumps({
+                    "outcome": "stop", "summary": "Test-only CLI transport.", "rehearsal_id": None,
+                })})
+
+        with patch("recovery_room.cli.MetaClient", return_value=Stop()) as factory, \
+                patch("sys.stdout", new_callable=io.StringIO) as output:
+            code = cli_main(["agent", "--incident", str(self.incident), "--out", str(self.root / "cli-runs"),
+                             "--model", "muse-spark-1.3", "--max-completion-tokens", "8192"])
+        factory.assert_called_once_with("muse-spark-1.3", max_completion_tokens=8192)
+        self.assertEqual(code, 0)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["mode"], "test_transport")
+        self.assertEqual(result["configuration"]["max_completion_tokens"], 8192)
+        self.assertEqual(json.loads((Path(result["session"]) / "result.json").read_text()), result)
 
     def test_http_request_matches_documented_chat_tool_protocol_without_a_real_call(self):
         captured = {}
@@ -135,12 +194,16 @@ class AgentTests(unittest.TestCase):
                 captured["body"] = json.loads(request.data)
                 return Response()
 
-        with patch.dict(os.environ, {"MODEL_API_KEY": "local-test-placeholder"}):
-            client = MetaClient("muse-spark-1.3")
-            client.opener = Opener()
-            client.complete([{"role": "user", "content": "test"}])
-        self.assertEqual(captured["url"], "https://api.meta.ai/v1/chat/completions")
-        self.assertFalse(captured["body"]["parallel_tool_calls"])
-        self.assertEqual(captured["body"]["max_completion_tokens"], 4096)
-        self.assertIn("function", captured["body"]["tools"][0])
-        self.assertNotIn("local-test-placeholder", json.dumps(captured["body"]))
+        for settings, expected in (({}, 4096), ({"max_completion_tokens": 8192}, 8192),
+                                   ({"max_completion_tokens": 1024}, 1024),
+                                   ({"max_completion_tokens": 16384}, 16384)):
+            with self.subTest(settings=settings), patch.dict(os.environ, {"MODEL_API_KEY": "local-test-placeholder"}):
+                client = MetaClient("muse-spark-1.3", **settings)
+                client.opener = Opener()
+                client.complete([{"role": "user", "content": "test"}])
+                self.assertEqual(captured["url"], "https://api.meta.ai/v1/chat/completions")
+                self.assertFalse(captured["body"]["parallel_tool_calls"])
+                self.assertEqual(captured["body"]["max_completion_tokens"], expected)
+                self.assertNotIn("reasoning_effort", captured["body"])
+                self.assertIn("function", captured["body"]["tools"][0])
+                self.assertNotIn("local-test-placeholder", json.dumps(captured["body"]))
