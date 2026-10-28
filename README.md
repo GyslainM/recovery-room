@@ -156,9 +156,17 @@ establishes live integration, not general reliability or an AI advantage.
 Subsequent **budget-aware-v1** runs with 24 rounds and 8192 completion tokens
 independently verified both previously failed repairs: split evidence **80 → 60**
 and multiple retries **100 → 60**, preserving all 10 later purchases in each.
-Across all seven actual attempts, four completed correctly and three earlier
+Across those first seven actual attempts, four completed correctly and three earlier
 attempts failed or remained incomplete. The earlier attempts remain retained;
 these development observations do not establish a general model pass rate.
+A subsequent frozen-configuration check and fixed repeat pass produced **six
+correct outcomes**, giving **eight observed correct outcomes under budget-aware-v1**
+(two per supported case, identical public seed-23 inputs). Every repair passed
+independent evaluation and SQL replay; stops were separately reviewed. One stop
+summary had an order-count wording imprecision, preserved in the review notes.
+All **13** actual attempts are retained: **10** correct completed outcomes and
+**3** earlier unsuccessful attempts across configurations. These small development
+observations are not a general reliability estimate. See **VALIDATION.md**.
 It caps model rounds, local function calls, context bytes, and completion tokens.
 These are execution bounds, not a currency-denominated spend limit.
 There are no automatic network retries or background calls.
