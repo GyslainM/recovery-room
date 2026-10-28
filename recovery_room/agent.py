@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 import sqlite3
 import time
@@ -11,9 +12,9 @@ import urllib.error
 import urllib.request
 import uuid
 
-from .db import query_database, schema_for_agent
+from .db import fingerprint, query_database, schema_for_agent, snapshot
 from .fixtures import list_artifacts, read_artifact
-from .repairs import finalize_report, rehearse
+from .repairs import evidence_fingerprint, finalize_report, rehearse
 
 
 PLAN_SCHEMA = {
@@ -263,7 +264,11 @@ def run_agent(incident: Path, output: Path, client, max_rounds: int = 16, max_ca
     error = None
     error_code = None
     last_finish_reason = None
+    input_fingerprints = None
     try:
+        # Capture provenance before the first transport call, including runs that stop/fail.
+        input_fingerprints = {"source": fingerprint(snapshot(incident / "orders.db")),
+                              "evidence": evidence_fingerprint(incident)}
         for _ in range(max_rounds):
             response = client.complete(messages)
             responses.append(response)
@@ -311,9 +316,16 @@ def run_agent(incident: Path, output: Path, client, max_rounds: int = 16, max_ca
         verified = None
         error = str(exc)
         final = {"outcome": "error", "summary": error, "rehearsal_id": None}
+    try:
+        inputs_unchanged = input_fingerprints is not None and input_fingerprints == {
+            "source": fingerprint(snapshot(incident / "orders.db")), "evidence": evidence_fingerprint(incident)}
+    except (ValueError, OSError, sqlite3.Error):
+        inputs_unchanged = False
     result = {
         "mode": "live_meta_agent" if isinstance(client, MetaClient) else "test_transport",
         "model": getattr(client, "model", "test-double"),
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "input_fingerprints": input_fingerprints, "inputs_unchanged": inputs_unchanged,
         "configuration": {
             "max_rounds": max_rounds, "max_tool_calls": max_calls,
             "max_completion_tokens": getattr(client, "max_completion_tokens", None),

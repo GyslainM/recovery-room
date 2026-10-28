@@ -19,6 +19,7 @@ from .baselines import event_aware_plan
 from .db import fingerprint, query_database, schema_for_agent, snapshot
 from .fixtures import create_incident, evidence_index, list_artifacts, read_artifact
 from .repairs import evidence_fingerprint, finalize_report, rehearse
+from .recordings import RecordingCatalog
 
 
 MODE = "offline_deterministic_engine_demo_NOT_a_model_run"
@@ -48,13 +49,15 @@ def _public_review_error(exc: Exception) -> str:
 
 
 class Workbench:
-    def __init__(self, root: Path, seed: int = 23, *, case_ids: tuple[str, ...] | None = None):
+    def __init__(self, root: Path, seed: int = 23, *, case_ids: tuple[str, ...] | None = None,
+                 recordings: Path | None = None):
         identifiers = tuple(CASES) if case_ids is None else case_ids
         if (not isinstance(identifiers, tuple) or not identifiers
                 or any(not isinstance(key, str) or key not in CASE_CATALOG for key in identifiers)
                 or len(set(identifiers)) != len(identifiers)):
             raise ValueError("Choose distinct case identifiers from the built-in catalog.")
         self.catalog = {key: CASE_CATALOG[key] for key in identifiers}
+        self.recordings = RecordingCatalog(recordings, self.catalog)
         # Every launch gets a fresh namespace, preserving earlier user runs.
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=False)
@@ -86,6 +89,12 @@ class Workbench:
     def cases(self) -> list[dict]:
         return [{"id": key, "title": title, "scenario": scenario, "synthetic": True}
                 for key, (title, scenario) in self.catalog.items()]
+
+    def list_recordings(self, identifier: str) -> list[dict]:
+        return self.recordings.list(identifier, self.incident(identifier))
+
+    def recording(self, identifier: str) -> dict:
+        return self.recordings.detail(identifier, self.incidents)
 
     def overview(self, identifier: str) -> dict:
         incident = self.incident(identifier)
@@ -306,6 +315,14 @@ def make_server(workbench: Workbench, port: int = 8765) -> HTTPServer:
                                 or not query["incident"][0]):
                             raise ValueError("Supply exactly one nonempty incident identifier.")
                         return self._json({"runs": workbench.list_runs(query["incident"][0])})
+                    if len(parts) == 4 and parts[:2] == ["api", "incidents"] and parts[3] == "recordings":
+                        if url.query or "?" in self.path or url.path.endswith("/"):
+                            raise ValueError("Recording endpoints accept exact paths without query parameters.")
+                        return self._json(workbench.list_recordings(parts[2]))
+                    if len(parts) == 3 and parts[:2] == ["api", "recordings"]:
+                        if url.query or "?" in self.path or url.path.endswith("/"):
+                            raise ValueError("Recording endpoints accept exact paths without query parameters.")
+                        return self._json(workbench.recording(parts[2]))
                     if len(parts) == 3 and parts[:2] == ["api", "incidents"]:
                         return self._json(workbench.overview(parts[2]))
                     if len(parts) == 5 and parts[:2] == ["api", "incidents"] and parts[3] == "artifacts":
@@ -335,13 +352,16 @@ def make_server(workbench: Workbench, port: int = 8765) -> HTTPServer:
     return HTTPServer(("127.0.0.1", port), Handler)
 
 
-def serve(root: Path, port: int = 8765) -> None:
+def serve(root: Path, port: int = 8765, *, recordings: Path | None = None,
+          case_ids: tuple[str, ...] | None = None) -> None:
     if not 0 <= port <= 65535:
         raise ValueError("Port must be from 0 to 65535 (0 selects a free local port).")
-    workbench = Workbench(root)
+    workbench = Workbench(root, recordings=recordings, case_ids=case_ids)
     with make_server(workbench, port) as server:
         print(f"Recovery Room local workbench: http://127.0.0.1:{server.server_port}", flush=True)
         print("OFFLINE deterministic script. Synthetic cases. No model or API calls.", flush=True)
+        if recordings is not None:
+            print(f"{len(workbench.recordings.records)} recordings available: Recorded model run, not live.", flush=True)
         print(f"Session artifacts: {workbench.root}\nPress Ctrl+C to stop.", flush=True)
         try:
             server.serve_forever()

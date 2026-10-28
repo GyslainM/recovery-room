@@ -191,7 +191,44 @@ partial response are executed, and no repair is exported on the strength of
 an incomplete response. Raw responses and usage remain saved, with no automatic
 retry. Increasing the ceiling does not guarantee completion. Preserve failed
 attempts and report changed-budget runs separately. The browser remains an
-explicitly offline demonstration; recorded-model API proposal C is deferred.
+explicitly offline demonstration. Approved proposal C now supplies a separate
+read-only recording API; frontend integration is handed to Claude in
+**[docs/RECORDED_RUNS_HANDOFF.md](docs/RECORDED_RUNS_HANDOFF.md)**.
+
+### Recorded model runs (read-only)
+
+The optional recording library never calls a model or replays a tool. Import a
+saved Meta attempt locally, then opt the server into that library:
+
+~~~bash
+python -m recovery_room recording --incident runs/live-case/incident --session runs/live-case/agent-runs/agent-REPLACE_ME --incident-id import-retry --out runs/recordings
+python -m recovery_room serve --recordings runs/recordings --port 0
+~~~
+
+Older attempts without native input fingerprints additionally require their
+original **--input-manifest runs/live-case/source-before.json**. The manifest
+and session must remain with the original incident root and every original file
+must still match its pre-run hash. Provenance is never inferred from a case name.
+Future agent runs record pre-call source/evidence fingerprints, an unchanged-input
+flag and a UTC recorded_at timestamp, including stops and errors.
+
+**GET /api/incidents/{id}/recordings** returns a newest-first JSON array;
+**GET /api/recordings/{id}** returns a sanitized, bounded timeline, final outcome,
+reported usage and historical review. The fixed provenance label is **Recorded
+model run, not live**. IDs are server-owned and scoped to that server session.
+The normal investigation/rehearsal actions and global mode remain explicitly
+offline. No recordings are exposed unless the operator supplies --recordings.
+
+Every list/detail request compares both input fingerprints with the served case.
+On mismatch, citations_enabled is false and linkable reference fields are
+removed/emptied; historical reference text and review remain visible with a warning.
+Recorded reviews have no downloads and never imply fresh export availability.
+The existing current offline rehearsal/export checks remain unchanged.
+
+The original three browser cases remain the default. To include the already
+supported split-evidence variation, pass **--cases import-retry missing-evidence
+multiple-retries split-evidence**. Importing and serving require no API key.
+See the handoff for exact fields, security/size bounds, examples and UI states.
 
 The agent can inspect the schema, issue read-only queries, read allowlisted evidence
 with line citations, and request a narrowly structured repair rehearsal. It cannot

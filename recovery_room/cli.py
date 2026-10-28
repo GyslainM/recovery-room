@@ -69,6 +69,12 @@ def main(argv: list[str] | None = None) -> int:
     agent.add_argument("--max-rounds", type=int, default=16)
     agent.add_argument("--max-completion-tokens", type=int, default=4096,
                        help="1024 to 16384 tokens per response, including reasoning (default: 4096); not a dollar cap.")
+    recording = sub.add_parser("recording", help="Import a saved Meta attempt into a sanitized read-only recording library; no API call.")
+    recording.add_argument("--incident", type=Path, required=True)
+    recording.add_argument("--session", type=Path, required=True)
+    recording.add_argument("--incident-id", choices=("import-retry", "missing-evidence", "multiple-retries", "split-evidence"), required=True)
+    recording.add_argument("--out", type=Path, required=True, help="Server-owned recordings library root.")
+    recording.add_argument("--input-manifest", type=Path, help="Original pre-run file hashes, required for legacy runs without native provenance.")
     repair = sub.add_parser("rehearse", help="Rehearse a user-supplied bounded plan on a fresh copy.")
     repair.add_argument("--incident", type=Path, required=True)
     repair.add_argument("--plan", type=Path, required=True)
@@ -80,6 +86,9 @@ def main(argv: list[str] | None = None) -> int:
     local = sub.add_parser("serve", help="Open a local offline investigation/review workbench; no API calls.")
     local.add_argument("--out", type=Path, help="Fresh session directory; existing runs are never overwritten.")
     local.add_argument("--port", type=int, default=8765)
+    local.add_argument("--recordings", type=Path, help="Server-owned sanitized recording library; no live execution.")
+    local.add_argument("--cases", nargs="+", choices=("import-retry", "missing-evidence", "multiple-retries", "split-evidence"),
+                       help="Opt into distinct built-in cases; defaults remain the original three.")
     benchmark = sub.add_parser("benchmark", help="Evaluate the offline event-aware script on development fixtures; no API calls.")
     benchmark.add_argument("--out", type=Path, help="New output directory; previous evaluations are preserved.")
     benchmark.add_argument("--seeds", type=int, nargs="+", default=[7, 23, 41], help="1 to 10 distinct seeds (default: 7 23 41). Seeds vary IDs, not failure families.")
@@ -93,8 +102,12 @@ def main(argv: list[str] | None = None) -> int:
             value = {key: value for key, value in benchmark_result.items() if key != "trials"}
         elif args.command == "serve":
             from .workbench import serve
-            serve(args.out or default_output("workbench"), args.port)
+            serve(args.out or default_output("workbench"), args.port, recordings=args.recordings,
+                  case_ids=tuple(args.cases) if args.cases is not None else None)
             return 0
+        elif args.command == "recording":
+            from .recordings import export_recording
+            value = export_recording(args.incident, args.session, args.incident_id, args.out, input_manifest=args.input_manifest)
         elif args.command == "demo":
             value = offline_demo(args.out or default_output("demo"), args.seed)
         elif args.command == "fixture":
