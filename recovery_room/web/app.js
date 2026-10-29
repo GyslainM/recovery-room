@@ -1856,8 +1856,98 @@ function applyRail() {
     button.setAttribute('title', rail ? 'Expand sidebar · [' : 'Collapse sidebar · [');
     button.innerHTML = icon(rail ? 'panel-left-open' : 'panel-left-close');
   }
+  applyWidth();
   positionTabIndicator();
 }
+// The open sidebar can be dragged between 200px and 400px (less on small screens). Dragging past its
+// narrowest width folds it to the rail and dragging out of the rail opens it again; double-click resets
+// it. The splitter also works from the keyboard. The width is remembered in this browser.
+const WIDTH_KEY = 'recovery-room.sidebar-width';
+const SIDE = {min: 200, max: 400, rail: 56, fold: 140, step: 16, bigStep: 48};
+const sideDefault = () => typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 1200px)').matches ? 228 : 240;
+// Leave the workspace at least about 700px; never below the default width.
+const sideMax = () => Math.max(sideDefault(), Math.min(SIDE.max, (window.innerWidth || 1280) - 700));
+const clampSide = (px) => Math.round(Math.min(sideMax(), Math.max(SIDE.min, px)));
+function storedWidth() {
+  try { const n = Number(window.localStorage?.getItem(WIDTH_KEY)); return Number.isFinite(n) && n > 0 ? n : null; } catch (_) { return null; }
+}
+const sideWidth = () => { const w = state.sideWidth === undefined ? storedWidth() : state.sideWidth; return w == null ? sideDefault() : clampSide(w); };
+function applyWidth() {
+  const app = $('.app');
+  if (!app?.style || !app.classList) return;
+  const custom = state.sideWidth === undefined ? storedWidth() : state.sideWidth;
+  if (custom == null) app.style.removeProperty('--side-w'); else app.style.setProperty('--side-w', `${clampSide(custom)}px`);
+  const handle = $('.resizer'), rail = app.classList.contains('nav-rail'), w = rail ? SIDE.rail : sideWidth();
+  if (!handle?.setAttribute) return;
+  handle.setAttribute('aria-valuemax', String(sideMax()));
+  handle.setAttribute('aria-valuenow', String(w));
+  handle.setAttribute('aria-valuetext', rail ? 'Folded to icons' : `${w} pixels wide`);
+}
+function saveSidebar() {
+  try {
+    window.localStorage?.setItem(RAIL_KEY, state.railPref);
+    if (state.sideWidth == null) window.localStorage?.removeItem(WIDTH_KEY); else window.localStorage?.setItem(WIDTH_KEY, String(state.sideWidth));
+  } catch (_) { /* this page only */ }
+}
+// One sidebar layout for a drag step or key press: open at a width, or folded.
+function setSidebar({rail, width}) {
+  state.railPref = rail ? 'rail' : 'full';
+  if (width !== undefined) state.sideWidth = width == null ? null : clampSide(width);
+  applyRail();
+}
+function resetSidebar() {
+  if (isNarrow()) return;
+  setSidebar({rail: false, width: null});
+  saveSidebar();
+}
+function resizeKey(event) {
+  const rail = $('.app').classList.contains('nav-rail'), w = sideWidth();
+  const step = event.shiftKey ? SIDE.bigStep : SIDE.step;
+  let next = null;
+  if (event.key === 'ArrowLeft') next = rail ? null : w <= SIDE.min ? {rail: true} : {rail: false, width: w - step};
+  else if (event.key === 'ArrowRight') next = rail ? {rail: false} : {rail: false, width: w + step};
+  else if (event.key === 'Home') next = {rail: false, width: SIDE.min};
+  else if (event.key === 'End') next = {rail: false, width: sideMax()};
+  else if (event.key === 'Enter') next = {rail: !rail};
+  else return false;
+  event.preventDefault();
+  if (next) { setSidebar(next); saveSidebar(); }
+  return true;
+}
+
+let sideDrag = null, sideFrame = 0;
+function startSideDrag(event, handle) {
+  if (event.button !== 0 || isNarrow()) return;
+  event.preventDefault();
+  const app = $('.app');
+  sideDrag = {id: event.pointerId, x: event.clientX, from: $('#sidebar').getBoundingClientRect().width, moved: false,
+    // keep: the open width before this drag, so folding and opening again comes back to it.
+    keep: state.sideWidth === undefined ? storedWidth() : state.sideWidth, undo: {pref: state.railPref, width: state.sideWidth}};
+  try { handle.setPointerCapture(event.pointerId); } catch (_) { /* a mouse without capture still works */ }
+  app.classList.add('resizing');
+}
+function moveSideDrag(event) {
+  if (!sideDrag || event.pointerId !== sideDrag.id) return;
+  const dx = event.clientX - sideDrag.x;
+  if (!sideDrag.moved && Math.abs(dx) < 3) return;
+  sideDrag.moved = true;
+  const raw = sideDrag.from + dx;
+  sideDrag.next = raw < SIDE.fold ? {rail: true, width: sideDrag.keep} : {rail: false, width: raw};
+  if (!sideFrame) sideFrame = requestAnimationFrame(() => { sideFrame = 0; if (sideDrag?.next) setSidebar(sideDrag.next); });
+}
+function endSideDrag(event, cancel = false) {
+  if (!sideDrag || (event && event.pointerId !== sideDrag.id)) return;
+  const drag = sideDrag;
+  sideDrag = null;
+  if (sideFrame) { cancelAnimationFrame(sideFrame); sideFrame = 0; }
+  try { $('.resizer').releasePointerCapture(drag.id); } catch (_) { /* already released */ }
+  $('.app').classList.remove('resizing');
+  if (cancel) { state.railPref = drag.undo.pref; state.sideWidth = drag.undo.width; applyRail(); return; }
+  if (!drag.moved) return;
+  if (drag.next) setSidebar(drag.next);
+  saveSidebar();
+}
+
 function toggleRail() {
   if (isNarrow()) return;
   state.railPref = $('.app').classList.contains('nav-rail') ? 'full' : 'rail';
@@ -2035,6 +2125,8 @@ document.addEventListener('keydown', event => {
     return; // Escape is handled by the native <dialog>
   }
   if ($('#palette')?.open) return;
+  if (key === 'Escape' && sideDrag) { event.preventDefault(); endSideDrag(null, true); return; }
+  if (t.classList?.contains('resizer') && !isNarrow() && resizeKey(event)) return;
   if (key === 'Escape' && state.nav) { event.preventDefault(); closeNav(); return; }
   if ((key === '[' || event.code === 'BracketLeft') && !event.shiftKey && !isTyping(t) && !event.ctrlKey && !event.metaKey && !event.altKey && !isNarrow()) { event.preventDefault(); toggleRail(); return; }
   if (t.getAttribute?.('role') === 'tab' && ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(key)) {
@@ -2109,6 +2201,11 @@ window.addEventListener('hashchange', () => {
 // The palette returns focus to where it was opened unless a command moved it on purpose.
 $('#palette').addEventListener('close', () => { if (!palette.ran && palette.returnFocus?.isConnected) palette.returnFocus.focus(); });
 window.addEventListener('resize', () => { positionTabIndicator(); applyRail(); if (state.nav && !isNarrow()) setNav(false); });
+document.addEventListener('pointerdown', event => { const handle = event.target.closest?.('.resizer'); if (handle) startSideDrag(event, handle); });
+document.addEventListener('pointermove', moveSideDrag);
+document.addEventListener('pointerup', event => endSideDrag(event));
+document.addEventListener('pointercancel', event => endSideDrag(event, true));
+document.addEventListener('dblclick', event => { if (event.target.closest?.('.resizer')) resetSidebar(); });
 
 api('/api/incidents').then(async data => {
   document.querySelectorAll('.palette-key').forEach(k => { k.textContent = paletteKeyLabel(); });
