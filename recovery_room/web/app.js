@@ -234,44 +234,59 @@ async function loadRun(runId) {
   }, 'case');
 }
 
+// A case's progress ring describes its newest script run: one quarter per completed step (investigate,
+// rehearse); a mark when it stopped or was refused (amber) or failed checks (red); dashed when not started.
+const RING_WEDGE = (i, r = 3.6, c = 7.5) => {
+  const a0 = -Math.PI / 2 + i * Math.PI / 2, a1 = a0 + Math.PI / 2, f = (n) => n.toFixed(2);
+  return `<path d="M${c} ${c} L${f(c + r * Math.cos(a0))} ${f(c + r * Math.sin(a0))} A${r} ${r} 0 0 1 ${f(c + r * Math.cos(a1))} ${f(c + r * Math.sin(a1))} Z"/>`;
+};
+function ringSvg(status) {
+  const tone = !status ? 'none' : status === 'failed_checks' ? 'danger' : ['stopped', 'blocked'].includes(status) ? 'warn' : 'ok';
+  const done = status === 'proposed' ? 1 : status === 'ready_for_review' ? 2 : 0;
+  const inner = tone === 'warn' || tone === 'danger' ? '<rect x="6.75" y="3.9" width="1.5" height="4.7" rx=".6"/><circle cx="7.5" cy="10.7" r=".9"/>'
+    : Array.from({length: done}, (_, i) => RING_WEDGE(i)).join('');
+  return `<svg class="ring ${tone}" viewBox="0 0 15 15" width="15" height="15" aria-hidden="true" focusable="false"><circle class="ring-track" cx="7.5" cy="7.5" r="6.2"/>${inner}</svg>`;
+}
+
+// The open case lists its attempts on one thread: script runs (newest three) and recorded Meta runs,
+// each with its own outcome icon. Choosing one opens it in its source.
+const clockShort = (iso) => { const d = asDate(iso); return d ? d.toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'}) : ''; };
+const dayShort = (iso) => { const d = asDate(iso); return d ? d.toLocaleDateString([], {month: 'short', day: 'numeric'}) : 'no date'; };
+
+function attemptsTree(caseId) {
+  const runs = (state.history.get(caseId) || []).slice(0, 3), recs = state.recordings.get(caseId)?.list || [];
+  const item = (attrs, current, iconHtml, label, meta, title, warn = false) =>
+    `<button class="run-item attempt${current ? ' current' : ''}" ${attrs} aria-current="${current ? 'true' : 'false'}" title="${escape(title)}">${iconHtml}<span class="attempt-label">${text(label)}</span><span class="attempt-meta${warn ? ' warn' : ''}">${text(meta)}</span></button>`;
+  const script = runs.length
+    ? runs.map(r => item(`data-source="script" data-run="${escape(r.id)}"`, !recordedMode() && r.id === state.run?.id, icon('play', 'attempt-icon'),
+        'Script run', clockShort(r.created_at), `Script run ${shortId(r.id)} · ${statusOf(r)[0]} · started ${started(r.created_at) || 'time not recorded'} · offline, no model`))
+    : [item('data-source="script"', !recordedMode(), icon('play', 'attempt-icon'), 'Script run', 'not started', 'Offline script run · not started')];
+  const meta = recs.map((r, i) => {
+    const n = recs.length - i, [label, tone, iconName] = recOutcome(r), differs = r.fixture_matches === false;
+    return item(`data-source="recorded" data-recording="${escape(r.id)}"`, recordedMode() && r.id === state.recId, icon(iconName, `attempt-icon tone-${tone}`),
+      `Meta run ${n}`, differs ? 'inputs differ' : dayShort(r.recorded_at), `Meta run ${n} · ${label} · ${recordedAt(r.recorded_at) || 'time not recorded'} · recorded, not live${differs ? ' · inputs differ from this case' : ''}`, differs);
+  });
+  return `<div class="tree" role="group" aria-label="Attempts on this case">${script.join('')}${meta.join('')}</div>`;
+}
+
 function renderCases() {
-  $('#case-count').textContent = String(state.cases.length).padStart(2, '0');
-  $('#cases-label').textContent = state.source === 'recorded' ? 'Incidents · recorded runs' : 'Incidents · script status';
+  $('#case-count').textContent = String(state.cases.length);
+  $('#cases-label').textContent = 'Incidents';
   const at = state.cases.findIndex(c => c.id === (state.switching || state.incident?.id));
   const where = at >= 0 ? `Case ${pad(at + 1)} of ${pad(state.cases.length)}` : 'Cases';
   $('#nav-toggle-label').textContent = where;
-  $('#nav-toggle').setAttribute('aria-label', `Cases · ${where}`); // the label text is hidden on the narrowest phones
+  $('#nav-toggle').setAttribute('aria-label', `Cases · ${where}`);
   $('#cases').innerHTML = state.cases.map((c, i) => {
     const active = c.id === (state.switching || state.incident?.id);
-    const [label, tone] = caseStatus(c.id);
-    return `<button class="case ${active?'active':''}" data-case="${escape(c.id)}" ${state.busy?'disabled':''} ${active?'aria-current="page"':''}><span class="case-top"><span class="case-no">${pad(i + 1)}</span><strong>${text(c.title)}</strong></span><span class="case-status ${tone}">${text(label)}</span></button>`;
+    const newest = state.history.get(c.id)?.[0], shown = state.runs.get(c.id);
+    const run = shown && (!newest || shown.id === newest.id) ? shown : newest || null;
+    const loading = state.switching === c.id;
+    const [label] = loading ? ['Loading…'] : statusOf(run);
+    const repeats = ['proposed', 'ready_for_review', 'blocked', 'failed_checks'].includes(run?.status) ? run?.plan?.cancellations?.length : undefined;
+    const name = `${pad(i + 1)} ${c.title} · ${label}${Number.isInteger(repeats) ? ` · ${repeats} repeats` : ''}`;
+    const row = `<button class="case${active ? ' active' : ''}${loading ? ' loading' : ''}" data-case="${escape(c.id)}" ${state.busy ? 'disabled' : ''} ${active ? 'aria-current="page"' : ''} aria-label="${escape(name)}" title="${escape(name)}">${ringSvg(run?.status)}<span class="case-title">${text(c.title)}</span>${Number.isInteger(repeats) ? `<span class="case-count">${repeats}</span>` : ''}</button>`;
+    return active && state.incident?.id === c.id ? row + attemptsTree(c.id) : row;
   }).join('');
-}
-
-function renderRuns() {
-  const card = $('#run-card'), runs = state.history.get(state.incident?.id) || [], shown = state.run?.id;
-  card.hidden = !state.incident;
-  if (recordedMode()) {
-    const list = recordedList();
-    card.innerHTML = `<div class="side-label">Recorded runs <span>${pad(list.list.length)}</span></div>
-      ${list.status === 'loading' ? skeleton(3) : list.list.length ? `<ol class="run-list">${list.list.map(r => {
-        const [label, tone] = recOutcome(r), current = r.id === state.recId;
-        // Numbered in recorded order (#1 is the oldest), so attempts stay distinguishable at a glance.
-        const number = list.list.length - list.list.indexOf(r), secs = Number.isFinite(r.elapsed_seconds) ? ` · ${Math.round(r.elapsed_seconds)} s` : '';
-        return `<li><button class="run-item rec-item ${current?'current':''}" data-recording="${escape(r.id)}" aria-current="${current?'true':'false'}" title="${escape(`${r.model} · recorded ${recordedAt(r.recorded_at) || 'time not recorded'} · ${r.id}`)}">
-          <span class="run-line"><span class="case-status ${tone}">${text(label)}</span><span class="run-no mono">#${number}</span></span>
-          <span class="run-meta"><time datetime="${escape(r.recorded_at)}">${text(recordedShort(r.recorded_at))}</time><span>${text(`${r.tool_calls} results${secs}`)}</span></span>
-          ${r.fixture_matches === false ? '<span class="run-warn">Inputs differ from this case</span>' : ''}</button></li>`;
-      }).join('')}</ol>` : '<p class="run-empty">No recorded runs for this case.</p>'}
-      <p class="run-note">${text(REC_LABEL)} · newest first</p>`;
-    return;
-  }
-  card.innerHTML = `<div class="side-label">Runs <span>${pad(runs.length)}</span></div>
-    ${runs.length ? `<ol class="run-list">${runs.map(r => {
-      const [label, tone] = statusOf(r), current = r.id === shown;
-      return `<li><button class="run-item ${current?'current':''}" data-run="${escape(r.id)}" aria-current="${current?'true':'false'}" title="${escape(r.id)} · started ${escape(r.created_at || '')}"><span class="case-status ${tone}">${text(label)}</span><span class="run-meta"><span class="mono">${text(shortId(r.id))}</span><time datetime="${escape(r.created_at || '')}">${text(started(r.created_at))}</time></span></button></li>`;
-    }).join('')}</ol>` : '<p class="run-empty">No runs yet in this server session.</p>'}
-    <p class="run-note">Last recorded status · this server session · newest first</p>`;
 }
 
 function parseHash() {
@@ -323,7 +338,7 @@ async function selectCase(identifier, tab = null) {
         incident, run, switching: null, sheet: false,
         tab: tab || view?.tab || (source === 'script' && run?.review ? 'changes' : 'investigation'),
         ev: view?.ev ? {...view.ev} : {name: 'events.jsonl', query: '', citedOnly: false, activeRef: null},
-        selection: view?.selection || null, filter: view?.filter || '', changeQuery: view?.changeQuery || '',
+        selection: view?.selection || null, filter: view?.filter || '', changeQuery: view?.changeQuery || '', reconActive: null,
         source, recId: null, recording: null, stepFilter: 'all',
       });
       // A recording selection is refetched (never reused from memory) so its fixture match is current.
@@ -343,7 +358,7 @@ async function selectCase(identifier, tab = null) {
 
 // Re-rendering replaces the focused control. For these controls, put keyboard focus back on the
 // replacement (same data attribute and value) so keyboard users don't drop to the top of the page.
-const FOCUS_KEYS = ['source', 'recording', 'stepFilter', 'refreshRecordings'];
+const FOCUS_KEYS = ['recording', 'run', 'source', 'stepFilter', 'refreshRecordings', 'navRail'];
 function holdFocus(update) {
   const el = document.activeElement, key = el?.dataset ? FOCUS_KEYS.find(k => k in el.dataset) : null;
   update();
@@ -358,7 +373,6 @@ function render() {
   holdFocus(() => {
     renderWelcome();
     renderCases();
-    renderRuns();
     renderHeader();
     renderTabs();
     renderPanel();
@@ -519,7 +533,12 @@ function setTab(tab, focusTab = false) {
   transition(() => {
     state.tab = tab;
     renderTabs(); renderPanel(); renderActions(); updateHash();
-    if (changed) $('#content').scrollTop = 0;
+    if (changed) {
+      $('#content').scrollTop = 0;
+      // Phones scroll the page instead of the panel: start the new tab right under the sticky tab bar.
+      const top = $('.workspace').getBoundingClientRect().top + window.scrollY - $('.tabs').offsetHeight;
+      if (window.scrollY > top) window.scrollTo({top});
+    }
     if (!state.selection) renderContext(); // the guide's shortcut follows the tab
     if (focusTab) $(`#tab-${tab}`).focus();
   }, tab === state.tab ? 'swap' : direction);
@@ -607,9 +626,159 @@ function callsView(trace) {
     }).join('')}</ol>`;
 }
 
+/* ---------- What happened: the incident, reconstructed from the evidence ---------- */
+
+// Lane names for the attempts in the synthetic evidence; an unknown attempt is shown as written.
+const ATTEMPT_LABEL = {'import-first': 'First import', 'import-retry-partial': 'Partial retry', 'import-retry': 'Retry', 'web-checkout': 'Customer checkouts'};
+const RECON_FILES = ['events.jsonl', 'commit_receipts.csv'];
+const RECON_LANE = 30; // px per lane; the SVG uses the same units vertically
+
+// The committed writes and incident markers in the evidence files, in commit order: commit_seq when
+// every write records one (split, out-of-order exports), otherwise file order. Nothing here decides what
+// repeats: that comes only from the engine's plan or a recording's review, passed in as pairs.
+function evidenceWrites() {
+  const names = new Set(state.incident.artifacts.map(a => a.name));
+  const files = RECON_FILES.filter(n => names.has(n));
+  if (!files.length) return {writes: [], marks: [], lanes: []};
+  const data = files.map(n => [n, fileData(n)]);
+  if (data.some(([, d]) => !d)) {
+    if (!state.reconWaiting) {
+      state.reconWaiting = true;
+      const caseId = state.incident.id;
+      Promise.all(files.map(ensureFile)).then(() => { state.reconWaiting = false; if (state.incident?.id === caseId && state.tab === 'investigation') renderPanel(); })
+        .catch(() => { state.reconWaiting = false; });
+    }
+    return null;
+  }
+  const writes = [], marks = [];
+  let seen = 0, lastAttempt = '';
+  for (const [name, d] of data) {
+    let header = null;
+    for (const line of d.lines) {
+      let row = null;
+      if (name.endsWith('.csv')) {
+        const cells = line.text.split(',');
+        if (!header) { header = cells; continue; }
+        row = Object.fromEntries(header.map((h, j) => [h, cells[j]]));
+      } else {
+        try { row = JSON.parse(line.text); } catch (_) { continue; }
+      }
+      if (!row || typeof row !== 'object') continue;
+      const at = seen++;
+      if (row.type === 'write_committed' && row.order_id) {
+        const seq = row.commit_seq === undefined || row.commit_seq === '' ? null : Number(row.commit_seq);
+        writes.push({ref: line.ref, at, attempt: String(row.attempt || 'unknown'), order_id: String(row.order_id), event_id: String(row.event_id || ''), seq: Number.isFinite(seq) ? seq : null});
+        lastAttempt = String(row.attempt || lastAttempt);
+      } else if (row.type === 'connection_lost' || row.type === 'log_gap') {
+        const attempt = String(row.attempt || (row.type === 'log_gap' ? '' : lastAttempt) || '');
+        marks.push({ref: line.ref, at, type: row.type, attempt, detail: String(row.detail || '')});
+        if (row.attempt) lastAttempt = String(row.attempt);
+      }
+    }
+  }
+  const bySeq = writes.length > 0 && writes.every(w => w.seq !== null);
+  writes.sort((a, b) => bySeq ? a.seq - b.seq : a.at - b.at);
+  writes.forEach((w, i) => { w.x = i; });
+  // A marker sits after the last write before it (file order), or after its attempt's last write (commit order).
+  for (const m of marks) {
+    const own = writes.filter(w => w.attempt === m.attempt);
+    m.x = bySeq ? (own.length ? Math.max(...own.map(w => w.x)) + 1 : 0) : writes.filter(w => w.at < m.at).length;
+  }
+  const first = new Map();
+  for (const item of [...writes, ...marks]) if (item.attempt && (!first.has(item.attempt) || item.x < first.get(item.attempt))) first.set(item.attempt, item.x);
+  const lanes = [...first.keys()].sort((a, b) => first.get(a) - first.get(b) || a.localeCompare(b));
+  for (const m of marks) if (!m.attempt && lanes.length) m.attempt = lanes[0];
+  return {writes, marks, lanes, bySeq, files};
+}
+
+const reconLabel = (w, lane, role) => {
+  const o = ordersById().get(w.order_id);
+  return `Commit ${w.x + 1} · ${ATTEMPT_LABEL[lane] || lane}${o ? ` · ${o.customer} ${o.sku} × ${o.quantity}` : ''} · ${w.order_id}${role ? ` · ${role}` : ''}`;
+};
+
+// pairs: [{order_id: the repeated (cancelled) order, duplicate_of: the first write that stays}].
+function reconstructionView(pairs = null, {recorded = false, stopped = null} = {}) {
+  const model = evidenceWrites();
+  const head = `<div class="recon-head"><h3 id="recon-title">What happened</h3><span class="caption">Committed writes in order, read from the evidence files</span></div>`;
+  if (model === null) return `<section class="recon" aria-labelledby="recon-title">${head}${skeleton(3)}</section>`;
+  const {writes, marks, lanes} = model;
+  if (!writes.length && !marks.length) return '';
+  const n = Math.max(writes.length, 1), height = Math.max(lanes.length, 1) * RECON_LANE;
+  const laneOf = new Map(lanes.map((l, i) => [l, i]));
+  const byOrder = new Map(writes.map(w => [w.order_id, w]));
+  const kept = new Set(), repeat = new Set(), arcs = [];
+  for (const p of pairs || []) {
+    const r = byOrder.get(p.order_id), k = byOrder.get(p.duplicate_of);
+    if (!r || !k) continue;
+    repeat.add(r.x); kept.add(k.x); arcs.push([k, r]);
+  }
+  const top = (w) => laneOf.get(w.attempt) * RECON_LANE + 7, bottom = (w) => top(w) + RECON_LANE - 14;
+  const role = (w) => repeat.has(w.x) ? (recorded ? 'cancelled in this recording' : 'repeat · cancelled on the copy') : kept.has(w.x) ? 'first write · stays' : pairs ? 'untouched' : '';
+  const selectable = active().selectable;
+  const ticks = writes.map(w => `<rect class="recon-tick ${repeat.has(w.x) ? 'repeat' : kept.has(w.x) ? 'kept' : ''}" data-i="${w.x}" ${selectable ? `data-key="order:${escape(w.order_id)}"` : ''} x="${w.x + 0.18}" y="${top(w)}" width="0.64" height="${RECON_LANE - 14}"><title>${text(reconLabel(w, w.attempt, role(w)))}</title></rect>`).join('');
+  const curves = arcs.map(([k, r]) => {
+    const xk = k.x + 0.5, xr = r.x + 0.5;
+    if (laneOf.get(k.attempt) === laneOf.get(r.attempt)) { const y = top(k); return `<path class="recon-arc" d="M${xk} ${y} C${xk} ${y - 10}, ${xr} ${y - 10}, ${xr} ${y}"/>`; }
+    const y1 = bottom(k), y2 = top(r), mid = (y1 + y2) / 2;
+    return `<path class="recon-arc" d="M${xk} ${y1} C${xk} ${mid}, ${xr} ${mid}, ${xr} ${y2}"/>`;
+  }).join('');
+  const lost = marks.filter(m => m.type === 'connection_lost' && laneOf.has(m.attempt))
+    .map(m => `<line class="recon-lost" x1="${m.x}" x2="${m.x}" y1="${laneOf.get(m.attempt) * RECON_LANE + 3}" y2="${laneOf.get(m.attempt) * RECON_LANE + RECON_LANE - 3}"><title>Connection lost · ${text(ATTEMPT_LABEL[m.attempt] || m.attempt)}</title></line>`).join('');
+  const gaps = marks.filter(m => m.type === 'log_gap');
+  const bands = lanes.map((l, i) => `<rect class="recon-band${i % 2 ? ' alt' : ''}" x="0" y="${i * RECON_LANE}" width="${n}" height="${RECON_LANE}"/>`).join('');
+  const activeIndex = Number.isInteger(state.reconActive) && state.reconActive < writes.length ? state.reconActive : null;
+  const ring = activeIndex === null ? '' : (() => { const w = writes[activeIndex]; return `<rect class="recon-ring" x="${w.x + 0.04}" y="${top(w) - 3}" width="0.92" height="${RECON_LANE - 8}"/>`; })();
+  const laneRows = lanes.map(l => {
+    const count = writes.filter(w => w.attempt === l).length;
+    const notes = [count ? `${count} write${count === 1 ? '' : 's'}` : 'no commit records',
+      marks.some(m => m.type === 'connection_lost' && m.attempt === l) ? 'connection lost' : '',
+      gaps.some(m => m.attempt === l) ? 'log gap' : ''].filter(Boolean).join(' · ');
+    const short = l === 'web-checkout' ? 'Checkouts' : ATTEMPT_LABEL[l] || l;
+    return `<li title="${escape(`${ATTEMPT_LABEL[l] || l} · ${notes}`)}"><strong class="lane-long">${text(ATTEMPT_LABEL[l] || l)}</strong><strong class="lane-short">${text(short)}</strong><span>${text(notes)}</span></li>`;
+  }).join('');
+  const legend = pairs
+    ? `<span><i class="kept"></i>First write · stays</span><span><i class="repeat"></i>${recorded ? 'Repeat · cancelled in this recording' : 'Repeat · cancelled on the copy'}</span><span><i></i>Untouched</span>`
+    : '<span><i></i>Committed write</span>';
+  const lostKey = marks.some(m => m.type === 'connection_lost') ? '<span><i class="lost"></i>Connection lost</span>' : '';
+  const untouched = writes.length - repeat.size - kept.size;
+  const lostCount = marks.filter(m => m.type === 'connection_lost').length;
+  const summary = stopped ? `The script stopped instead of guessing: ${stopped} source events have no commit record${gaps.length ? ', where the log has a gap' : ''}.`
+    : pairs ? `${recorded ? 'This recording’s review cancels' : 'The proposal cancels'} ${repeat.size} repeated write${repeat.size === 1 ? '' : 's'} and keeps the first write of each source event. ${untouched} other write${untouched === 1 ? ' is' : 's are'} untouched.`
+    : `${writes.length} committed writes across ${lanes.length} ${lanes.length === 1 ? 'attempt' : 'attempts'}${lostCount ? `, with ${lostCount === 1 ? 'a lost connection' : `${lostCount} lost connections`}` : ''}${gaps.length ? ' and a gap in the commit log' : ''}. The investigation decides which writes repeat.`;
+  const described = `${summary} Use the arrow keys to move between writes${selectable ? ' and Enter to open one' : ''}.`;
+  return `<section class="recon" aria-labelledby="recon-title">${head}
+    <div class="recon-body"><ol class="recon-lanes" aria-hidden="true">${laneRows}</ol>
+      <svg class="recon-svg" data-count="${writes.length}" viewBox="0 0 ${n} ${height}" height="${height}" preserveAspectRatio="none" tabindex="0" role="group" aria-roledescription="timeline" aria-label="${escape(`Committed writes in commit order, ${lanes.length} lanes`)}" aria-describedby="recon-summary">${bands}${curves}${ticks}${lost}${ring}</svg></div>
+    <div class="recon-legend" aria-hidden="true">${legend}${lostKey}</div>
+    <p class="recon-summary" id="recon-summary">${text(summary)}<span class="sr-only"> ${text(described.slice(summary.length + 1))}</span></p>
+    <p class="sr-only" id="recon-live" aria-live="polite"></p></section>`;
+}
+
+// Keyboard: one tab stop; arrows move between writes; Enter opens the order (same as clicking a tick).
+function moveRecon(svg, key) {
+  const n = Number(svg.dataset.count);
+  if (!n) return false;
+  const moves = {ArrowRight: 1, ArrowLeft: -1, PageDown: 10, PageUp: -10};
+  const cur = Number.isInteger(state.reconActive) ? state.reconActive : -1;
+  if (key === 'Home') state.reconActive = 0;
+  else if (key === 'End') state.reconActive = n - 1;
+  else if (key in moves) state.reconActive = Math.max(0, Math.min(n - 1, cur < 0 && moves[key] < 0 ? 0 : cur + moves[key]));
+  else return false;
+  const tick = svg.querySelector(`[data-i="${state.reconActive}"]`);
+  let ring = svg.querySelector('.recon-ring');
+  if (tick) {
+    if (!ring) { ring = document.createElementNS('http://www.w3.org/2000/svg', 'rect'); ring.setAttribute('class', 'recon-ring'); svg.appendChild(ring); }
+    const x = Number(tick.getAttribute('x')) - 0.14, y = Number(tick.getAttribute('y')) - 3;
+    ring.setAttribute('x', String(x)); ring.setAttribute('y', String(y)); ring.setAttribute('width', '0.92'); ring.setAttribute('height', String(RECON_LANE - 8));
+    const live = $('#recon-live');
+    if (live) live.textContent = tick.querySelector('title')?.textContent || '';
+  }
+  return true;
+}
+
 function investigationView() {
   const {run} = state;
-  if (!run) return `${incidentOverview()}<p class="small muted">Choose Investigate incident at the top right. The offline script reads the evidence with read-only tools and calls no model.</p>${sourceRecords()}`;
+  if (!run) return `${incidentOverview()}${reconstructionView()}<p class="small muted">Choose Investigate incident at the top right. The offline script reads the evidence with read-only tools and calls no model.</p>${sourceRecords()}`;
   const stopped = run.status === 'stopped';
   const result = `<div class="section-heading"><h2>${stopped?'Evidence needed to continue':run.plan?'Proposed fix':'Investigation result'}</h2>${badge(stopped?'Stopped':'Offline script',stopped)}</div>
     <div class="callout ${stopped?'stop':''}"><strong>${stopped?'No repair exported.':'What the script found'}</strong><br>${text(run.summary)}</div>`;
@@ -618,7 +787,8 @@ function investigationView() {
   const stop = stopped ? `<h3>Next useful step</h3><p class="small">Recover the committed-write logs for the missing source events, then investigate again. The source has not been changed.</p>
     <div class="row-head" id="missing-events" tabindex="-1"><h4>${run.missing_event_ids.length} source events without commit evidence</h4><span class="caption">Select one to find it in the evidence</span></div>
     <div class="id-grid">${run.missing_event_ids.map(id=>`<button class="id-chip mono" data-key="event:${escape(id)}" aria-selected="false">${text(id)}</button>`).join('')}</div>` : '';
-  return `${result}${plan}${stop}${callsView(run.trace)}<details class="fold"><summary>Incident overview and source records</summary>${incidentOverview()}${sourceRecords()}</details>`;
+  const recon = reconstructionView(run.plan ? run.plan.cancellations : null, {stopped: stopped ? run.missing_event_ids.length : null});
+  return `${result}${recon}${plan}${stop}${callsView(run.trace)}<details class="fold"><summary>Incident overview and source records</summary>${incidentOverview()}${sourceRecords()}</details>`;
 }
 
 function orderTable(rows) {
@@ -681,11 +851,13 @@ async function loadRecording(id, {renderNow = true} = {}) {
   }
 }
 
-function setSource(source) {
-  if (source === state.source || !['script', 'recorded'].includes(source) || !state.incident) return;
+// pick: a recording to open (from the sidebar's attempt list); otherwise the newest, if none is open.
+function setSource(source, pick = null) {
+  if (!['script', 'recorded'].includes(source) || !state.incident) return;
+  if (source === state.source) { if (source === 'recorded' && pick && pick !== state.recId) loadRecording(pick); return; }
   Object.assign(state, {source, selection: null, sheet: false});
-  const newest = recordedList().list[0];
-  if (source === 'recorded' && !state.recId && newest) loadRecording(newest.id, {renderNow: false});
+  const target = pick || (!state.recId && recordedList().list[0]?.id);
+  if (source === 'recorded' && target) loadRecording(target, {renderNow: false});
   transition(() => render(), 'case');
 }
 
@@ -874,6 +1046,7 @@ function recordedInvestigationView() {
     <div class="section-heading"><h2>${heading}</h2>${badge(label, tone)}</div>
     <div class="callout ${tone === 'ok' ? 'success' : 'stop'}"><strong>Outcome</strong><br>${text(recordedConclusion(r, rejectedResults))}</div>
     ${compareView(r)}
+    ${recCitations(r) && r.review ? reconstructionView(r.review.changes.map(c => ({order_id: c.before.id, duplicate_of: c.duplicate_of})), {recorded: true}) : ''}
     <div class="metrics">${metric(r.tool_calls, 'tool results recorded')}${metric(Number.isFinite(r.elapsed_seconds) ? `${Math.round(r.elapsed_seconds)} s` : '—', 'elapsed, as reported')}${metric(rejected, 'rejected tool results')}</div>
     <div class="folds">
       <details class="fold"><summary>Usage${usage.available ? text(` · ${fmtNum(usage.total_tokens)} tokens, as reported`) : ' · not recorded'}</summary><p class="small muted">${usage.available ? text(`Input ${fmtNum(usage.input_tokens)} (cached ${fmtNum(usage.cached_input_tokens)}) · output ${fmtNum(usage.output_tokens)}, which already includes ${fmtNum(usage.reasoning_tokens)} reasoning · ${fmtNum(usage.response_count)} responses with usage. No cost is shown.`) : 'This recording did not include usage totals.'}</p></details>
@@ -1105,15 +1278,20 @@ function repairFlow(review, {run = null, recorded = false} = {}) {
   const pkg = recorded ? 'Read-only recording · no downloads'
     : run?.status === 'ready_for_review' ? 'Package for human review · freshness checked on download'
     : run?.status === 'blocked' ? 'Export blocked' : 'Export unavailable · checks failed';
+  const pkgTone = recorded ? '' : run?.status === 'ready_for_review' ? 'ok' : run?.status === 'blocked' ? 'warn' : 'danger';
   return `<section class="repair-outcome" aria-label="${recorded ? 'Recorded rehearsal outcome' : 'Rehearsal outcome'}">
     <div class="outcome-numbers"><div><span class="eyebrow">Active orders on the ${recorded ? 'recorded ' : ''}copy</span>
       <strong class="outcome-total">${text(review.before_active)} → ${text(review.after_active)}</strong>
       <p><strong>${text(changed)}</strong> duplicate orders cancelled. Order history retained.</p></div>
       <div class="outcome-preserved"><strong>${text(preserved)}</strong><span>untargeted orders unchanged</span><small>including ${text(`${review.checkout_preserved} / ${review.checkout_total}`)} later purchases intact</small></div></div>
     ${known ? `<figure class="impact" aria-label="${text(`${changed} cancelled orders and ${preserved} unchanged orders in the rehearsal review`)}">
-      <svg class="impact-track" viewBox="0 0 100 7" preserveAspectRatio="none" aria-hidden="true"><rect class="impact-changed" x="0" y="0" width="${portion}" height="7"/><rect class="impact-preserved" x="${portion}" y="0" width="${100 - portion}" height="7"/></svg>
-      <figcaption><span><i class="impact-dot changed"></i>${text(changed)} cancelled on copy</span><span><i class="impact-dot"></i>${text(preserved)} unchanged</span></figcaption></figure>` : ''}
-    <div class="outcome-foot"><span class="${review.passed ? 'ok' : 'danger'}">${icon(review.passed ? 'shield-check' : 'circle-x')}${passed} / ${total} checks passed ${recorded ? 'at recorded rehearsal' : 'at rehearsal'}</span><span>${icon('database')}${text(sourceNote)}</span><span>${text(pkg)}</span></div>
+      <svg class="impact-track" viewBox="0 0 100 7" preserveAspectRatio="none" aria-hidden="true"><rect class="impact-changed" x="0" y="0" width="${portion}" height="7"/><rect class="impact-preserved" x="${portion}" y="0" width="${100 - portion}" height="7"/></svg></figure>` : ''}
+    <ol class="outcome-path" aria-label="${recorded ? 'Recorded repair path' : 'Repair path'}">
+      <li class="path-step src">${icon('database')}<span><strong>Source database</strong><small>${text(sourceNote)}</small></span></li>
+      <li class="path-step copy">${icon('flask-conical')}<span><strong>${recorded ? 'Recorded rehearsal copy' : 'Disposable copy'}</strong><small>${recorded ? 'changes were made only here' : 'changes are made only here'}</small></span></li>
+      <li class="path-step ${review.passed ? 'ok' : 'danger'}">${icon(review.passed ? 'shield-check' : 'circle-x')}<span><strong>Independent checks</strong><small>${passed} / ${total} passed ${recorded ? 'at recorded rehearsal' : 'at rehearsal'}</small></span></li>
+      <li class="path-step pkg ${pkgTone}">${icon(recorded ? 'history' : 'package')}<span><strong>${recorded ? 'No repair package' : 'Repair package'}</strong><small>${text(pkg)}</small></span></li>
+    </ol>
   </section>`;
 }
 
@@ -1122,7 +1300,7 @@ function stockVisual(product, maximum) {
   const numeric = `<span class="stock-values"><span>${text(product.before)}</span><span aria-hidden="true">→</span><strong>${text(product.after)}</strong></span>`;
   if (![product.before, product.after, maximum].every(Number.isFinite) || Math.min(product.before, product.after) < 0 || maximum <= 0 || maximum < Math.max(product.before, product.after)) return numeric;
   const before = product.before / maximum * 100, after = product.after / maximum * 100;
-  return `<div class="stock-visual">${numeric}<svg class="stock-track" viewBox="0 0 100 7" preserveAspectRatio="none" aria-hidden="true"><rect class="stock-base" x="0" y="2" width="${Math.min(before, after)}" height="3"/><rect class="stock-delta ${after < before ? 'negative' : ''}" x="${Math.min(before, after)}" y="2" width="${Math.abs(after - before)}" height="3"/><line x1="${after}" x2="${after}" y1="0" y2="7"/></svg></div>`;
+  return `<div class="stock-visual">${numeric}<svg class="stock-track" viewBox="0 0 100 7" preserveAspectRatio="none" aria-hidden="true"><rect class="stock-base" x="0" y="0" width="${Math.min(before, after)}" height="7"/><rect class="stock-delta ${after < before ? 'negative' : ''}" x="${Math.min(before, after)}" y="0" width="${Math.abs(after - before)}" height="7"/><line x1="${after}" x2="${after}" y1="0" y2="7"/></svg></div>`;
 }
 
 function diffView(review) {
@@ -1658,6 +1836,35 @@ async function recheckExport() {
 const palette = {items: [], active: 0, ran: false, returnFocus: null};
 const paletteKeyLabel = () => (typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || '')) ? '⌘K' : 'Ctrl K';
 
+/* ---------- Sidebar rail ---------- */
+
+// Wide screens can fold the sidebar to a rail of progress rings. It folds by default at 1200px and
+// below; an explicit choice is remembered in this browser. Phones use the drawer instead.
+const RAIL_KEY = 'recovery-room.sidebar';
+function railPreference() {
+  try { return window.localStorage?.getItem(RAIL_KEY) || ''; } catch (_) { return ''; }
+}
+function applyRail() {
+  const app = $('.app');
+  if (!app?.classList) return;
+  const pref = state.railPref ?? railPreference();
+  const rail = !isNarrow() && (pref ? pref === 'rail' : typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 1200px)').matches);
+  app.classList.toggle('nav-rail', rail);
+  const button = $('.rail-toggle');
+  if (button) {
+    button.setAttribute('aria-label', rail ? 'Expand sidebar' : 'Collapse sidebar');
+    button.setAttribute('title', rail ? 'Expand sidebar · [' : 'Collapse sidebar · [');
+    button.innerHTML = icon(rail ? 'panel-left-open' : 'panel-left-close');
+  }
+  positionTabIndicator();
+}
+function toggleRail() {
+  if (isNarrow()) return;
+  state.railPref = $('.app').classList.contains('nav-rail') ? 'full' : 'rail';
+  try { window.localStorage?.setItem(RAIL_KEY, state.railPref); } catch (_) { /* this page only */ }
+  applyRail();
+}
+
 /* ---------- Phone case drawer ---------- */
 
 // On narrow screens the sidebar (cases and runs) is a drawer opened from the top bar.
@@ -1775,8 +1982,9 @@ document.addEventListener('click', event => {
   if (d.openGuide !== undefined) toggleGuide(el);
   if (d.dismissWelcome !== undefined) dismissWelcome();
   if (d.palette !== undefined) openPalette();
-  if (d.source) setSource(d.source);
-  if (d.recording && d.recording !== state.recId) task = loadRecording(d.recording);
+  if (d.source) setSource(d.source, d.recording || null);
+  else if (d.recording && d.recording !== state.recId) task = loadRecording(d.recording);
+  if (d.navRail !== undefined) toggleRail();
   if (d.stepFilter) { state.stepFilter = d.stepFilter; holdFocus(renderPanel); }
   if (d.expandSteps !== undefined) {
     const items = [...document.querySelectorAll('#content .timeline details')], open = items.some(x => !x.open);
@@ -1828,6 +2036,7 @@ document.addEventListener('keydown', event => {
   }
   if ($('#palette')?.open) return;
   if (key === 'Escape' && state.nav) { event.preventDefault(); closeNav(); return; }
+  if ((key === '[' || event.code === 'BracketLeft') && !event.shiftKey && !isTyping(t) && !event.ctrlKey && !event.metaKey && !event.altKey && !isNarrow()) { event.preventDefault(); toggleRail(); return; }
   if (t.getAttribute?.('role') === 'tab' && ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(key)) {
     event.preventDefault();
     const index = TABS.indexOf(state.tab);
@@ -1835,13 +2044,21 @@ document.addEventListener('keydown', event => {
     setTab(TABS[next], true);
     return;
   }
-  const list = t.closest?.('#cases, #run-card');
+  const list = t.closest?.('#cases');
   if (list && ['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(key)) {
     event.preventDefault();
-    const items = [...list.querySelectorAll('.case, .run-item')], index = items.indexOf(t.closest('.case, .run-item'));
+    const items = [...list.querySelectorAll('.case, .run-item')].filter(el => el.offsetParent !== null), index = items.indexOf(t.closest('.case, .run-item'));
     const next = key === 'Home' ? 0 : key === 'End' ? items.length - 1 : Math.min(items.length - 1, Math.max(0, index + (key === 'ArrowDown' ? 1 : -1)));
     items[next]?.focus();
     return;
+  }
+  if (t.classList?.contains('recon-svg')) {
+    if (moveRecon(t, key)) { event.preventDefault(); return; }
+    if ((key === 'Enter' || key === ' ') && Number.isInteger(state.reconActive)) {
+      const tick = t.querySelector(`[data-i="${state.reconActive}"]`);
+      if (tick?.dataset.key) { event.preventDefault(); select(tick.dataset.key, {keepFocus: true}); }
+      return;
+    }
   }
   if (t.id === 'ev-lines') {
     const moves = {ArrowDown: 1, ArrowUp: -1, PageDown: 15, PageUp: -15};
@@ -1891,15 +2108,18 @@ window.addEventListener('hashchange', () => {
 
 // The palette returns focus to where it was opened unless a command moved it on purpose.
 $('#palette').addEventListener('close', () => { if (!palette.ran && palette.returnFocus?.isConnected) palette.returnFocus.focus(); });
-window.addEventListener('resize', () => { positionTabIndicator(); if (state.nav && !isNarrow()) setNav(false); });
+window.addEventListener('resize', () => { positionTabIndicator(); applyRail(); if (state.nav && !isNarrow()) setNav(false); });
 
 api('/api/incidents').then(async data => {
   document.querySelectorAll('.palette-key').forEach(k => { k.textContent = paletteKeyLabel(); });
   state.cases = data.incidents;
   state.guide = !isNarrow() && guidePreferred();
+  applyRail();
   // Restore each case's last recorded status from this server session, and each case's recording list
   // (so the sidebar can describe recordings in recorded mode), before showing the sidebar.
-  await Promise.all(state.cases.flatMap(c => [refreshHistory(c.id).catch(() => null), refreshRecordings(c.id)]));
+  await Promise.all(state.cases.flatMap(c => [
+    refreshHistory(c.id).then(runs => runs[0] && !state.runs.has(c.id) ? api(`/api/runs/${encodeURIComponent(runs[0].id)}`).then(run => { state.runs.set(c.id, run); }) : null).catch(() => null),
+    refreshRecordings(c.id)]));
   const target = parseHash();
   await selectCase(target?.id || data.incidents[0].id, target?.tab || null);
 }).catch(error => notice(error.message));
