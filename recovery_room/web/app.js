@@ -12,7 +12,8 @@ const state = {
   incident: null, run: null, cases: [], runs: new Map(), history: new Map(), views: new Map(),
   tab: 'investigation', busy: false, switching: null, version: 0,
   files: new Map(), ev: {name: 'events.jsonl', query: '', citedOnly: false, activeRef: null},
-  selection: null, sheet: false, lastFocus: null, filter: '', changeQuery: '',
+  // sheet: the narrow-screen details sheet is open (a selection, or the guide). nav: the phone case drawer.
+  selection: null, sheet: false, lastFocus: null, filter: '', changeQuery: '', nav: false, guide: false,
   // rechecking: run IDs with an explicit export recheck in flight (one per run, never a global lock).
   runMeta: new Map(), exportChecks: new Map(), sql: new Map(), rechecking: new Set(),
   // Recorded model runs (read-only history). source is per case: 'script' (offline) or 'recorded'.
@@ -179,6 +180,10 @@ const isTyping = (el) => !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXT
 const isNarrow = () => typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 900px)').matches;
 const SUMMARY_FIELDS = ['id', 'incident_id', 'status', 'summary', 'mode', 'created_at'];
 const shortId = (id) => String(id).replace(/^run-/, '').slice(0, 8);
+// Recordings are historical, so they always show their date. recordedAt: full; recordedShort: list entries.
+const asDate = (iso) => { const d = iso ? new Date(iso) : null; return d && !Number.isNaN(d.getTime()) ? d : null; };
+const recordedAt = (iso) => { const d = asDate(iso); return d ? `${d.toLocaleDateString([], {month: 'short', day: 'numeric', year: 'numeric'})}, ${d.toLocaleTimeString([], {hour: 'numeric', minute: '2-digit', second: '2-digit', timeZoneName: 'short'})}` : ''; };
+const recordedShort = (iso) => { const d = asDate(iso); return d ? `${d.toLocaleDateString([], {month: 'short', day: 'numeric'})}, ${d.toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'})}` : 'time not recorded'; };
 const started = (iso) => { const d = iso ? new Date(iso) : null; return d && !Number.isNaN(d.getTime()) ? d.toLocaleTimeString([], {hour: 'numeric', minute: '2-digit', second: '2-digit', timeZoneName: 'short'}) : ''; };
 // Later purchases come from the server's review (checkout_order_ids); the UI applies no rule of its own.
 const laterIds = (review) => new Set(review?.checkout_order_ids || []);
@@ -210,9 +215,18 @@ const selAttrs = (key) => active().selectable ? `class="sel" tabindex="0" data-k
 
 /* ---------- Case navigation ---------- */
 
-// A case's sidebar status is its newest run's last recorded state (not a fresh export check).
+// A case's sidebar status describes the source on screen. Script mode: its newest script run's last
+// recorded state (not a fresh export check). Recorded mode: how many recorded model runs it has and the
+// newest one's outcome, so a script status never sits beside a recording as if they were one thing.
 function caseStatus(id) {
   if (state.switching === id) return ['Loading…', 'loading'];
+  if (state.source === 'recorded') {
+    const list = state.recordings.get(id);
+    if (list?.status !== 'ok') return ['Recorded runs', 'rec'];
+    if (!list.list.length) return ['No recorded runs', ''];
+    const latest = {repair: 'repair', stop: 'stopped', error: 'error', incomplete: 'incomplete'}[list.list[0].outcome] || String(list.list[0].outcome || 'unknown');
+    return [`${list.list.length} recorded · latest ${latest}`, 'rec'];
+  }
   return statusOf(state.history.get(id)?.[0] || state.runs.get(id));
 }
 
@@ -249,6 +263,11 @@ async function loadRun(runId) {
 
 function renderCases() {
   $('#case-count').textContent = String(state.cases.length).padStart(2, '0');
+  $('#cases-label').textContent = state.source === 'recorded' ? 'Incidents · recorded runs' : 'Incidents · script status';
+  const at = state.cases.findIndex(c => c.id === (state.switching || state.incident?.id));
+  const where = at >= 0 ? `Case ${pad(at + 1)} of ${pad(state.cases.length)}` : 'Cases';
+  $('#nav-toggle-label').textContent = where;
+  $('#nav-toggle').setAttribute('aria-label', `Cases · ${where}`); // the label text is hidden on the narrowest phones
   $('#cases').innerHTML = state.cases.map((c, i) => {
     const active = c.id === (state.switching || state.incident?.id);
     const [label, tone] = caseStatus(c.id);
@@ -264,7 +283,12 @@ function renderRuns() {
     card.innerHTML = `<div class="side-label">Recorded runs <span>${pad(list.list.length)}</span></div>
       ${list.status === 'loading' ? skeleton(3) : list.list.length ? `<ol class="run-list">${list.list.map(r => {
         const [label, tone] = recOutcome(r), current = r.id === state.recId;
-        return `<li><button class="run-item ${current?'current':''}" data-recording="${escape(r.id)}" aria-current="${current?'true':'false'}" title="${escape(`${r.model} · recorded ${r.recorded_at}`)}"><span class="case-status ${tone}">${text(label)}</span><span class="run-meta"><span class="mono">${text(`${r.tool_calls} results`)}</span><time datetime="${escape(r.recorded_at)}">${text(started(r.recorded_at))}</time></span>${r.fixture_matches === false ? '<span class="run-warn">Inputs differ from this case</span>' : ''}</button></li>`;
+        // Numbered in recorded order (#1 is the oldest), so attempts stay distinguishable at a glance.
+        const number = list.list.length - list.list.indexOf(r), secs = Number.isFinite(r.elapsed_seconds) ? ` · ${Math.round(r.elapsed_seconds)} s` : '';
+        return `<li><button class="run-item rec-item ${current?'current':''}" data-recording="${escape(r.id)}" aria-current="${current?'true':'false'}" title="${escape(`${r.model} · recorded ${recordedAt(r.recorded_at) || 'time not recorded'} · ${r.id}`)}">
+          <span class="run-line"><span class="case-status ${tone}">${text(label)}</span><span class="run-no mono">#${number}</span></span>
+          <span class="run-meta"><time datetime="${escape(r.recorded_at)}">${text(recordedShort(r.recorded_at))}</time><span>${text(`${r.tool_calls} results${secs}`)}</span></span>
+          ${r.fixture_matches === false ? '<span class="run-warn">Inputs differ from this case</span>' : ''}</button></li>`;
       }).join('')}</ol>` : '<p class="run-empty">No recorded runs for this case.</p>'}
       <p class="run-note">${text(REC_LABEL)} · newest first</p>`;
     return;
@@ -359,6 +383,7 @@ function holdFocus(update) {
 function render() {
   if (!state.incident) return;
   holdFocus(() => {
+    renderWelcome();
     renderCases();
     renderRuns();
     renderHeader();
@@ -383,20 +408,22 @@ function renderRecordedHeader() {
   $('#mode-indicator').classList.add('recorded');
   if (r) {
     const [label, tone] = recOutcome(r), p = r.provenance || {};
-    $('#incident-meta').innerHTML = `<span class="status ${tone}">${text(label)}</span><span class="chip mono">${text(p.model || 'model not recorded')}</span>
-      <span class="chip">${text(`Recorded ${started(p.recorded_at) || 'time not recorded'}`)}</span><span class="chip">${text(`${r.tool_calls} tool results`)}</span>
+    $('#title-status').innerHTML = `<span class="status ${tone}">${text(label)}</span>`;
+    $('#incident-meta').innerHTML = `<span class="chip mono">${text(p.model || 'model not recorded')}</span>
+      <span class="chip">${text(`Recorded ${recordedShort(p.recorded_at)}`)}</span><span class="chip">${text(`${r.tool_calls} tool results`)}</span>
       ${r.fixture_matches === false ? '<span class="chip warn-chip">Inputs differ from this case</span>' : ''}`;
     $('#run-details').hidden = false;
     $('#run-details-body').innerHTML = `<dl class="run-facts">
       <dt>Recording ID</dt><dd><span class="mono">${text(r.id)}</span> <button class="link" data-copy-value="${escape(r.id)}" data-copy-what="Recording ID">${icon('copy')}<span>Copy recording ID</span></button></dd>
       <dt>Label</dt><dd>${text(recordingLabel(r))}</dd>
       <dt>Model and mode</dt><dd class="mono">${text(`${p.model || 'not recorded'} · ${p.mode || 'not recorded'}`)}</dd>
-      <dt>Recorded</dt><dd>${text(started(p.recorded_at) || 'Not recorded')}${p.timestamp_source ? ` · ${text(TIMESTAMP_SOURCE[p.timestamp_source] || p.timestamp_source)}` : ''}</dd>
+      <dt>Recorded</dt><dd>${text(recordedAt(p.recorded_at) || 'Not recorded')}${p.timestamp_source ? ` · ${text(TIMESTAMP_SOURCE[p.timestamp_source] || p.timestamp_source)}` : ''}</dd>
       <dt>Inputs</dt><dd>${text(INPUT_PROVENANCE[p.input_provenance] || p.input_provenance || 'Not recorded')}${r.fixture_matches ? ' · match this case now' : ' · do not match this case'}</dd>
       <dt>Boundary</dt><dd>Read-only history. Nothing here calls a model, rehearses or exports.</dd>
     </dl>`;
   } else {
-    $('#incident-meta').innerHTML = `<span class="status">${text(list.status === 'ok' ? `${list.list.length} recorded runs` : 'Loading recorded runs…')}</span>`;
+    $('#title-status').innerHTML = `<span class="status">${text(list.status === 'ok' ? `${list.list.length} recorded runs` : 'Loading recorded runs…')}</span>`;
+    $('#incident-meta').innerHTML = '';
     $('#run-details').hidden = true;
     $('#run-details-body').innerHTML = '';
   }
@@ -414,8 +441,8 @@ function renderHeader() {
   const mode = run?.mode || incident.mode, info = modeInfo(mode);
   $('#mode-indicator').textContent = info.short;
   $('#mode-indicator').classList.toggle('unverified', !!info.unverified);
-  $('#incident-meta').innerHTML = `<span class="status ${tone}">${text(label)}</span>
-    <span class="chip">Source read-only · Rehearsal on a copy</span>${olderRunNote(run)}`;
+  $('#title-status').innerHTML = `<span class="status ${tone}">${text(label)}</span>${olderRunNote(run)}`;
+  $('#incident-meta').innerHTML = stepsView(run);
   $('#run-details').hidden = !run;
   $('#run-details-body').innerHTML = run ? `<dl class="run-facts">
       <dt>Run ID</dt><dd><span class="mono">${text(run.id)}</span> <button class="link" data-copy-value="${escape(run.id)}" data-copy-what="Run ID">${icon('copy')}<span>Copy run ID</span></button></dd>
@@ -430,7 +457,7 @@ function renderHeader() {
   let actions = '';
   if (!run) actions = investigate(true);
   else if (run.status === 'proposed') actions = `${investigate(false)}<button class="primary" data-action="rehearse" ${busy?'disabled aria-busy="true"':''}>${busy && state.busyAction === 'rehearse' ? working('Rehearsing on a copy…') : `${icon('flask-conical')}<span>Rehearse on a disposable copy</span>`}</button>`;
-  else if (run.status === 'ready_for_review') actions = `${investigate(false)}<button class="primary" data-review-repair>${icon('git-compare')}<span>Review repair</span></button>`;
+  else if (run.status === 'ready_for_review') actions = `${investigate(false)}<button class="primary" data-review-downloads>${icon('download')}<span>Export guarded SQL</span></button>`;
   else if (run.status === 'failed_checks') actions = `${investigate(false)}<button class="primary" data-tab="checks">${icon('shield-check')}<span>Review failed checks</span></button>`;
   // Blocked: recovery is a new investigation. Only a run that was rehearsed has a repair to review.
   else if (run.status === 'blocked') actions = `${run.review ? `<button class="secondary" data-review-repair>${icon('git-compare')}<span>Review blocked repair</span></button>` : ''}${investigate(true)}`;
@@ -442,6 +469,39 @@ function olderRunNote(run) {
   const newest = state.history.get(state.incident?.id)?.[0];
   if (!run || !newest || newest.id === run.id) return '';
   return `<span class="chip warn-chip">Older run</span><button class="link small" data-run="${escape(newest.id)}">Open newest run</button>`;
+}
+
+// The four steps of the offline repair, from the server's run status only. A step is "done" only when
+// the server reported it (a run exists; a rehearsal review exists), so nothing here claims that a person
+// reviewed or exported anything. Reachable steps open their tab; Export opens the guarded downloads.
+const STEP_SR = {done: 'done', current: 'current step', open: 'available', warn: 'needs attention', danger: 'failed', upcoming: 'not reached yet'};
+function stepsView(run) {
+  const s = run?.status, rehearsed = !!run?.review, working = state.busy ? state.busyAction : null;
+  const steps = [
+    {label: 'Investigate', sub: 'read-only', tab: 'investigation'},
+    {label: 'Rehearse', sub: 'on a copy', tab: rehearsed ? 'changes' : 'investigation'},
+    {label: 'Review', sub: 'changes and checks', tab: s === 'failed_checks' ? 'checks' : 'changes'},
+    {label: 'Export', sub: 'guarded SQL', tab: 'sql'},
+  ];
+  const plan = !run ? ['current', 'upcoming', 'upcoming', 'upcoming']
+    : s === 'proposed' ? ['done', 'current', 'upcoming', 'upcoming']
+    : s === 'stopped' ? ['warn', 'upcoming', 'upcoming', 'upcoming']
+    : s === 'ready_for_review' ? ['done', 'done', 'current', 'open']
+    : s === 'failed_checks' ? ['done', 'done', 'danger', 'upcoming']
+    : s === 'blocked' ? (rehearsed ? ['done', 'done', 'open', 'warn'] : ['done', 'warn', 'upcoming', 'upcoming'])
+    : ['done', 'upcoming', 'upcoming', 'upcoming'];
+  const subs = {0: s === 'stopped' ? 'evidence needed' : null, 1: s === 'blocked' && !rehearsed ? 'refused' : null,
+    2: s === 'failed_checks' ? 'checks failed' : null, 3: s === 'blocked' && rehearsed ? 'blocked' : null};
+  const items = steps.map((step, i) => {
+    const st = plan[i], spinning = (working === 'investigate' && i === 0) || (working === 'rehearse' && i === 1);
+    const dot = spinning ? icon('loader-circle', 'spin') : st === 'done' ? icon('check') : st === 'warn' ? '!' : st === 'danger' ? '×' : String(i + 1);
+    const sub = spinning ? (i === 0 ? 'reading evidence…' : 'rehearsing…') : subs[i] || step.sub;
+    const inner = `<span class="step-dot" aria-hidden="true">${dot}</span><span class="step-text"><span class="step-label">${step.label}</span><span class="step-sub">${text(sub)}</span></span><span class="sr-only"> · ${STEP_SR[st]}</span>`;
+    const attrs = `class="step ${st}"${st === 'current' ? ' aria-current="step"' : ''}`;
+    const target = st === 'upcoming' || (i === 0 && !run) ? '' : i === 3 && st === 'open' ? 'data-review-downloads' : `data-tab="${step.tab}"`;
+    return `<li class="${st}">${target ? `<button ${attrs} ${target}>${inner}</button>` : `<span ${attrs}>${inner}</span>`}</li>`;
+  });
+  return `<nav class="steps-nav" aria-label="Repair progress"><ol class="steps">${items.join('')}</ol></nav>`;
 }
 
 function renderTabs() {
@@ -469,6 +529,7 @@ function setTab(tab, focusTab = false) {
   transition(() => {
     state.tab = tab;
     renderTabs(); renderPanel(); updateHash();
+    if (!state.selection) renderContext(); // the guide's shortcut follows the tab
     if (focusTab) $(`#tab-${tab}`).focus();
   }, tab === state.tab ? 'swap' : direction);
 }
@@ -478,24 +539,24 @@ function renderPanel() {
   const views = recordedMode()
     ? {investigation: recordedInvestigationView, evidence: evidenceView, changes: recordedChangesView, checks: recordedChecksView, sql: recordedSqlView}
     : {investigation: investigationView, evidence: evidenceView, changes: changesView, checks: checksTab, sql: sqlView};
-  const reviewing = !recordedMode() && state.run?.review && ['changes', 'checks', 'sql'].includes(state.tab);
-  $('#content').innerHTML = `${reviewing ? reviewJump() : ''}${views[state.tab]()}`;
+  $('#content').innerHTML = views[state.tab]();
   if (state.tab === 'evidence') renderEvidence();
   if (state.tab === 'sql' && !recordedMode()) maybeLoadSql();
   markSelection();
   if (!recordedMode() && state.countUp && state.countUp === state.run?.id && state.tab === 'changes') { state.countUp = null; animateCounts(); }
 }
 
-// The tab bar already moves between Changes, Checks and SQL; this only adds the jump to the artifacts.
-function reviewJump() {
-  return `<div class="review-jump"><span class="caption">Review the changes, checks and SQL, then the artifacts.</span><button class="link small" data-review-downloads>${icon('arrow-down')}Jump to review artifacts</button></div>`;
-}
-
 function reviewRepair(downloads = false) {
+  const go = () => {
+    const target = downloads ? $('#repair-package') : $('#content');
+    target?.scrollIntoView({block: 'start'});
+    target?.focus({preventScroll: true});
+  };
+  if (state.tab === 'changes') { go(); return; }
   setTab('changes');
-  const target = downloads ? $('#repair-package') : $('#content');
-  target?.scrollIntoView({block: 'start'});
-  target?.focus({preventScroll: true});
+  // setTab applies inside a view transition (at most 250 ms later), so scroll once the new panel exists.
+  const ready = (tries) => { if (state.tab === 'changes' && $('#repair-package')) go(); else if (tries) setTimeout(() => ready(tries - 1), 50); };
+  ready(12);
 }
 
 const emptyState = (title, body, iconName = 'info') => `<div class="empty">${icon(iconName, 'empty-icon')}<h2>${text(title)}</h2><p>${text(body)}</p></div>`;
@@ -513,11 +574,17 @@ function noReview(run, what) {
 
 /* ---------- Investigation ---------- */
 
+const STORY_TITLE = {'multiple-retries': 'Two partial imports. Two retries.', 'split-evidence': 'A retry, with its evidence split across two files.'};
+// The case's own incident note, minus its instructions to the investigator.
+function caseStory() {
+  const sentences = (state.incident.note?.lines || []).map(l => l.text).join(' ').split(/(?<=\.)\s+/);
+  return sentences.filter(s => s && !/^(Investigate|Join|Do not|Only|Preserve|If |This fixture)/.test(s)).slice(0, 5).join(' ');
+}
+
 function incidentOverview() {
   const {incident} = state;
-  const multipleRetries = incident.scenario === 'multiple-retries';
-  return `<div class="section-heading"><h2>${multipleRetries?'Two partial imports. Two retries.':'A partial import. A full retry.'}</h2>${badge('Open incident',true)}</div>
-    <p class="lede">${multipleRetries?'Two attempts lost their connections after partial writes. A final retry completed, then customers made genuine purchases.':'The importer lost its connection after some writes. It retried the source file while customers continued buying.'} Similar-looking purchases may be legitimate.</p>
+  return `<div class="section-heading"><h2>${text(STORY_TITLE[incident.scenario] || 'A partial import. A full retry.')}</h2>${badge('Open incident',true)}</div>
+    <p class="lede">${text(caseStory() || 'An import was retried after a partial failure while customers kept buying.')} Similar-looking purchases may be legitimate.</p>
     <div class="metrics">${metric(incident.active_orders,'active order records')}${metric(incident.artifacts.length,'evidence files')}${metric(incident.products.length,'products affected')}</div>
     <div class="callout"><strong>The question to resolve</strong><br>Which records repeat the same source action, and which later purchases must stay? A stock correction also needs a compensating ledger entry.</div>`;
 }
@@ -542,12 +609,12 @@ function callsView(trace) {
 
 function investigationView() {
   const {run} = state;
-  if (!run) return `${incidentOverview()}<p class="small muted">Start the offline investigation from the header. It reads the evidence with bounded, read-only tools.</p>${sourceRecords()}`;
+  if (!run) return `${incidentOverview()}<p class="small muted">Start the offline investigation at the top right. The script reads the evidence with read-only tools and calls no model.</p>${sourceRecords()}`;
   const stopped = run.status === 'stopped';
-  const result = `<div class="section-heading"><h2>${stopped?'Evidence needed to continue':run.plan?'A bounded proposal':'Investigation result'}</h2>${badge(stopped?'Stopped':'Script observations',stopped)}</div>
-    <div class="callout ${stopped?'stop':''}"><strong>${stopped?'No repair exported.':'Investigation result'}</strong><br>${text(run.summary)}</div>`;
+  const result = `<div class="section-heading"><h2>${stopped?'Evidence needed to continue':run.plan?'Proposed fix':'Investigation result'}</h2>${badge(stopped?'Stopped':'Offline script',stopped)}</div>
+    <div class="callout ${stopped?'stop':''}"><strong>${stopped?'No repair exported.':'What the script found'}</strong><br>${text(run.summary)}</div>`;
   const plan = run.plan ? `<div class="row-head"><h3>Proposed cancellations</h3>${badge(`${run.plan.cancellations.length} targets`)}</div>
-    <p class="small muted">Keep the first recorded write for each source event. Each target cites both committed writes; select a row to inspect them.${run.status==='proposed'?' Next: rehearse on a disposable copy from the header.':''}</p>${planTable(run.plan)}` : '';
+    <p class="small muted">Keep the first recorded write for each source event. Each target cites both committed writes; select a row to inspect them.${run.status==='proposed'?' Next: rehearse on a disposable copy.':''}</p>${planTable(run.plan)}` : '';
   const stop = stopped ? `<h3>Next useful step</h3><p class="small">Recover the committed-write logs for the missing source events, then investigate again. The source has not been changed.</p>
     <div class="row-head"><h4>${run.missing_event_ids.length} source events without commit evidence</h4><span class="caption">Select one to find it in the evidence</span></div>
     <div class="id-grid">${run.missing_event_ids.map(id=>`<button class="id-chip mono" data-key="event:${escape(id)}" aria-selected="false">${text(id)}</button>`).join('')}</div>` : '';
@@ -633,7 +700,7 @@ function recordedPending() {
 
 function recBanner(r) {
   const p = r.provenance || {};
-  const when = started(p.recorded_at) || 'time not recorded';
+  const when = recordedAt(p.recorded_at) || 'time not recorded';
   const source = p.timestamp_source ? ` (${TIMESTAMP_SOURCE[p.timestamp_source] || p.timestamp_source.replaceAll('_', ' ')})` : '';
   return `<div class="rec-banner">${icon('history')}<div><strong>${text(recordingLabel(r))}</strong><span>${text(`${p.model || 'Model not recorded'} · recorded ${when}${source}`)}</span></div></div>
     ${r.fixture_matches === false || r.fixture_warning ? `<div class="callout stop rec-warning">${icon('triangle-alert')}<span>${text(r.fixture_warning || 'Recording inputs do not match the served case. Current-case citations are disabled.')}</span></div>` : ''}
@@ -655,15 +722,17 @@ function argSummary(call) {
   return JSON.stringify(a ?? null).slice(0, 96);
 }
 
-function argsView(call) {
-  const a = call.arguments;
+const argsTitle = (call) => call.name === 'rehearse_repair' && call.arguments?.plan ? 'Proposed plan' : call.name === 'query_database' && call.arguments?.sql ? 'Read-only SQL' : 'Arguments';
+
+function argsView(call, heading = true) {
+  const a = call.arguments, h = heading ? `<h4>${argsTitle(call)}</h4>` : '';
   if (call.name === 'rehearse_repair' && a?.plan) {
     const rows = a.plan.cancellations || [];
-    return `<h4>Proposed plan</h4>${a.plan.rationale ? `<p class="tl-text">${text(a.plan.rationale)}</p>` : ''}
+    return `${h}${a.plan.rationale ? `<p class="tl-text">${text(a.plan.rationale)}</p>` : ''}
       ${rows.length ? table(['Cancel', 'Keep', 'Cited evidence'], rows.map(c => [`<span class="mono cancelled">${text(c.order_id)}</span>`, `<span class="mono">${text(c.duplicate_of)}</span>`, refsView(c.evidence_refs, c.recorded_evidence_refs_text)])) : '<p class="caption">No cancellations in this plan.</p>'}`;
   }
-  if (call.name === 'query_database' && a?.sql) return `<h4>Read-only SQL</h4><pre class="tl-sql">${String(a.sql).split(/\r?\n/).map(sqlTint).join('\n')}</pre>`;
-  return `<h4>Arguments</h4><pre>${text(JSON.stringify(a ?? null, null, 2))}</pre>`;
+  if (call.name === 'query_database' && a?.sql) return `${h}<pre class="tl-sql">${String(a.sql).split(/\r?\n/).map(sqlTint).join('\n')}</pre>`;
+  return `${h}<pre>${text(JSON.stringify(a ?? null, null, 2))}</pre>`;
 }
 
 function resultView(call, res) {
@@ -687,13 +756,21 @@ function resultView(call, res) {
   return `<h4>Result</h4><pre>${text(JSON.stringify(v ?? null, null, 2))}</pre>`;
 }
 
+// Conclusions before detail: the runtime's rejection (or the rehearsal result) leads, and the proposed
+// arguments follow behind a disclosure. Other calls read naturally as arguments, then result.
+function callDetail(call, res, executed) {
+  if (!executed) return `${argsView(call)}<p class="caption">This call was recorded without an executed result, so it is not shown as completed.</p>`;
+  if (res.error || call.name === 'rehearse_repair') return `${resultView(call, res)}<details class="tl-args"><summary>${res.error ? `Rejected ${argsTitle(call).toLowerCase()}` : argsTitle(call)}</summary>${argsView(call, false)}</details>`;
+  return `${argsView(call)}${resultView(call, res)}`;
+}
+
 function callItem(call, res, n) {
   const executed = call.has_result !== false && !!res;
   const [status, tone] = !executed ? ['Requested · no result recorded', ''] : res.error ? ['Rejected', 'danger'] : ['Result recorded', 'ok'];
   const open = !!res?.error || call.name === 'rehearse_repair';
   return `<li class="tl-item tl-call${res?.error ? ' rejected' : ''}${executed ? '' : ' pending'}"><span class="tl-dot">${icon(res?.error ? 'circle-x' : 'wrench')}</span>
     <details class="tl-card"${open ? ' open' : ''}><summary class="tl-head"><span class="tl-no">${pad(n)}</span><span class="tool mono">${text(call.name)}</span><span class="tl-arg mono">${text(argSummary(call))}</span>${call.truncated || res?.truncated ? badge('Truncated preview') : ''}${badge(status, tone)}</summary>
-      <div class="tl-detail">${argsView(call)}${executed ? resultView(call, res) : '<p class="caption">This call was recorded without an executed result, so it is not shown as completed.</p>'}</div></details></li>`;
+      <div class="tl-detail">${callDetail(call, res, executed)}</div></details></li>`;
 }
 
 function assistantItem(step, n) {
@@ -720,6 +797,63 @@ function timelineItems(r) {
   return out.join('') || '<li class="tl-empty">No steps match this filter.</li>';
 }
 
+// Agreement between a recording and this session's offline script run for the same case: which orders
+// each would cancel, and which original each keeps. Shown only while the recording's inputs match the
+// case now, so its order IDs refer to the same records. It is kept apart from the historical review,
+// adds nothing to it, and does not rank either method.
+function compareView(r) {
+  const run = state.run;
+  const box = (body, tone = '') => `<section class="compare ${tone}" aria-labelledby="compare-title"><div class="compare-head">${icon('git-compare')}<h3 id="compare-title">Compared with the offline script</h3></div>${body}</section>`;
+  if (r.incident_id !== state.incident?.id) return box('<p class="small muted">Not compared. This recording belongs to another case.</p>');
+  if (!recCitations(r)) return box('<p class="small muted">Not compared. This recording’s inputs differ from the case now, so its order IDs may not refer to the same records.</p>');
+  if (!run || run.incident_id !== r.incident_id) return box(`<p class="small muted">Run the offline script on this case to compare which orders each one would cancel.</p><button class="secondary" data-source="script">${icon('play')}<span>Go to the script run</span></button>`);
+  const source = `<p class="caption">Compares order IDs with script run ${text(shortId(run.id))} from this server session (${text(statusOf(run)[0].toLowerCase())}). It checks agreement only, not which is better.</p>`;
+  const model = r.review?.changes || null, plan = run.plan;
+  if (!plan) {
+    if (run.status !== 'stopped') return box(`<p class="small muted">Script run ${text(shortId(run.id))} has no proposal to compare.</p>`);
+    return box(`<p class="compare-verdict ${r.outcome === 'stop' ? 'ok' : 'differ'}">${icon(r.outcome === 'stop' ? 'circle-check' : 'triangle-alert')}<span>${r.outcome === 'stop'
+      ? 'Same outcome: the offline script also stopped without proposing a repair.'
+      : text(`Different outcome: the offline script stopped without proposing a repair${model ? `, while this recording cancelled ${model.length} orders` : ''}.`)}</span></p>${source}`, '');
+  }
+  const ended = {stop: 'stopped', error: 'ended with an error', incomplete: 'did not finish'}[r.outcome] || `ended as ${r.outcome}`;
+  if (!model) return box(`<p class="compare-verdict differ">${icon('triangle-alert')}<span>${text(`Different outcome: this recording ${ended} and has no verified repair. The offline script proposed ${plan.cancellations.length} cancellations.`)}</span></p>${source}`);
+  const byScript = new Map(plan.cancellations.map(c => [c.order_id, c.duplicate_of]));
+  const byModel = new Map(model.map(c => [c.before.id, c.duplicate_of]));
+  const both = [...byModel.keys()].filter(id => byScript.has(id));
+  const onlyModel = [...byModel.keys()].filter(id => !byScript.has(id)), onlyScript = [...byScript.keys()].filter(id => !byModel.has(id));
+  const keepDiffers = both.filter(id => byScript.get(id) !== byModel.get(id));
+  if (!onlyModel.length && !onlyScript.length && !keepDiffers.length) {
+    return box(`<p class="compare-verdict ok">${icon('circle-check')}<span>${text(`Same ${both.length} cancellations as the offline script, keeping the same original orders.`)}</span></p>${source}`);
+  }
+  const ids = (list) => `<span class="compare-ids">${list.map(id => `<span class="mono">${text(compactId(id))}</span>`).join('')}</span>`;
+  return box(`<p class="compare-verdict differ">${icon('triangle-alert')}<span>The recording and the offline script disagree on some orders.</span></p>
+    <div class="metrics">${metric(both.length, 'cancelled by both')}${metric(onlyModel.length, 'only in this recording')}${metric(onlyScript.length, 'only in the script run')}</div>
+    ${keepDiffers.length ? `<p class="small">${text(keepDiffers.length === 1 ? '1 shared cancellation keeps a different original order.' : `${keepDiffers.length} shared cancellations keep a different original order.`)}</p>` : ''}
+    ${onlyModel.length ? `<details class="fold"><summary>Only in this recording · ${onlyModel.length}</summary>${ids(onlyModel)}</details>` : ''}
+    ${onlyScript.length ? `<details class="fold"><summary>Only in the script run · ${onlyScript.length}</summary>${ids(onlyScript)}</details>` : ''}
+    ${source}`);
+}
+
+// The runtime's own error text for a rejected step (never the model's wording).
+const rejectionText = (res) => { const v = res?.result; return v && typeof v === 'object' && 'error' in v ? String(v.error) : JSON.stringify(v ?? null); };
+
+// A short conclusion built only from validated data: the server's outcome, the recorded rehearsal review
+// and the runtime's rejection messages. It never paraphrases the model's summary.
+function recordedConclusion(r, rejected) {
+  const review = r.review, last = rejected[rejected.length - 1];
+  const along = rejected.length ? ` The local runtime rejected ${rejected.length} tool call${rejected.length === 1 ? '' : 's'} along the way.` : '';
+  const reason = last ? ` Last rejection: “${rejectionText(last)}”` : '';
+  if (r.outcome === 'repair' && review) {
+    const passed = review.checks.filter(c => c.passed).length;
+    return `Rehearsal on a disposable copy ${review.passed ? 'passed' : 'did not pass'} ${passed} of ${review.checks.length} checks: ${review.cancellations} orders cancelled, active orders ${review.before_active} → ${review.after_active}, ${review.checkout_preserved} of ${review.checkout_total} later purchases unchanged.${along}`;
+  }
+  if (r.outcome === 'repair') return `The recording reports a repair, but no verified rehearsal review was recorded.${along}`;
+  if (r.outcome === 'stop') return `The model stopped without proposing a repair, so nothing was rehearsed.${reason}`;
+  if (r.outcome === 'error') return `The attempt ended with an error after ${r.tool_calls} tool results. No verified repair was recorded.${reason}`;
+  if (r.outcome === 'incomplete') return `The attempt did not finish after ${r.tool_calls} tool results. No verified repair was recorded.${reason}`;
+  return `Outcome recorded as ${r.outcome}.`;
+}
+
 function recordedInvestigationView() {
   const r = state.recording;
   if (!r) return recordedPending();
@@ -728,6 +862,7 @@ function recordedInvestigationView() {
   const calls = r.steps.filter(s => s.kind === 'tool_call');
   const rejected = calls.filter(c => results.get(c.call_id)?.error).length + r.steps.filter(s => s.kind === 'tool_result' && s.error && !calls.some(c => c.call_id === s.call_id)).length;
   const messages = r.steps.filter(s => s.kind === 'assistant').length;
+  const rejectedResults = r.steps.filter(s => s.kind === 'tool_result' && s.error);
   const heading = {repair: 'A recorded repair', stop: 'The model stopped', error: 'The attempt ended with an error', incomplete: 'The attempt did not finish'}[r.outcome] || 'Recorded attempt';
   // Counts match the list below, where each result is shown inside its call.
   const callIds = new Set(calls.map(c => c.call_id));
@@ -735,10 +870,12 @@ function recordedInvestigationView() {
   const filters = [['all', `All · ${shown}`], ['tools', `Tool calls · ${shown - messages}`], ['messages', `Model messages · ${messages}`], ['rejected', `Rejected · ${rejected}`]];
   return `${recBanner(r)}
     <div class="section-heading"><h2>${heading}</h2>${badge(label, tone)}</div>
-    <div class="callout ${tone === 'ok' ? 'success' : 'stop'}"><strong>Recorded final summary</strong><br>${text(r.final?.summary || r.summary || 'No summary recorded.')}</div>
+    <div class="callout ${tone === 'ok' ? 'success' : 'stop'}"><strong>Outcome</strong><br>${text(recordedConclusion(r, rejectedResults))}</div>
+    ${compareView(r)}
     <div class="metrics four">${metric(r.tool_calls, 'tool results recorded')}${metric(Number.isFinite(r.elapsed_seconds) ? `${Math.round(r.elapsed_seconds)} s` : '—', 'elapsed, as reported')}${metric(usage.available ? fmtNum(usage.total_tokens) : '—', usage.available ? 'tokens, as reported' : 'usage unavailable')}${metric(rejected, 'rejected tool results')}</div>
     <p class="small muted">${usage.available ? text(`Input ${fmtNum(usage.input_tokens)} (cached ${fmtNum(usage.cached_input_tokens)}) · output ${fmtNum(usage.output_tokens)}, which already includes ${fmtNum(usage.reasoning_tokens)} reasoning · ${fmtNum(usage.response_count)} responses with usage. No cost is shown.`) : 'This recording did not include usage totals.'}
       The steps below are the recorded tool calls, results and model messages, in order. Nothing here runs again.</p>
+    <details class="fold model-summary"><summary>Model’s final summary · verbatim</summary><p class="tl-text">${text(r.final?.summary || r.summary || 'No summary recorded.')}</p></details>
     <div class="tl-tools"><div class="segmented" role="group" aria-label="Filter steps">${filters.map(([key, name]) => `<button data-step-filter="${key}" aria-pressed="${state.stepFilter === key}">${text(name)}</button>`).join('')}</div><button class="link small" data-expand-steps>Expand all</button></div>
     <ol class="timeline">${timelineItems(r)}</ol>`;
 }
@@ -949,14 +1086,14 @@ function reviewSummary(run, review) {
   const passed = review.checks.filter(c => c.passed).length;
   const source = review.checks.find(c => c.name === 'source_snapshot_unchanged');
   const failed = review.checks.filter(c => !c.passed);
-  return `<div class="section-heading"><h2>${ready?'Rehearsed. Ready for your review.':'Export unavailable'}</h2>${badge(ready?'Rehearsal snapshot':statusOf(run)[0],!ready)}</div>
-    <div class="callout ${ready?'success':'stop'}">${text(run.summary)}</div>
+  return `<div class="section-heading"><h2>${ready?'Rehearsal result':'Export unavailable'}</h2>${badge(ready?'Rehearsal snapshot':statusOf(run)[0],!ready)}</div>
+    ${ready?'':`<div class="callout stop">${text(run.summary)}</div>`}
     <div class="metrics four">${metric(`${review.before_active} → ${review.after_active}`,'active records',{from:review.before_active,to:review.after_active,prefix:`${review.before_active} → `})}${metric(review.cancellations,'duplicate orders cancelled',{from:0,to:review.cancellations})}${metric(`${review.checkout_preserved} / ${review.checkout_total}`,'later checkout purchases intact',{from:0,to:review.checkout_preserved,suffix:` / ${review.checkout_total}`})}${metric(`${passed} / ${review.checks.length}`,'independent checks passed',{from:0,to:passed,suffix:` / ${review.checks.length}`})}</div>
     <ul class="assurance" aria-label="Rehearsal observations">
       ${run.status==='blocked'?'<li class="fail">Export is blocked; see the reason above</li>':source?`<li class="${source.passed?'':'fail'}">${source.passed?'At rehearsal: source matched the snapshot':'At rehearsal: source differed from the snapshot'}</li>`:''}
       <li>At rehearsal: ${text(review.untargeted_preserved)} untargeted records matched the source</li>
     </ul>
-    <p class="small muted">Counts, changes and checks describe the rehearsal snapshot. Export status is shown above and rechecked on every download.</p>
+    <p class="small muted">Counts, changes and checks describe the rehearsal snapshot. Export is rechecked on every download.</p>
     ${failed.length?`<div class="failed"><h3>Failed checks at rehearsal</h3><ul>${failed.map(c=>`<li><span class="group">${text(groupOf(c.name))}</span><strong>${text(c.name.replaceAll('_',' '))}</strong><div class="check-detail">${text(c.detail)}</div></li>`).join('')}</ul></div>`:''}`;
 }
 
@@ -1004,7 +1141,7 @@ function changesTable(changes) {
 
 function artifactsView(run) {
   const check = state.exportChecks.get(run.id);
-  return `<section class="artifacts" id="repair-package" tabindex="-1"><h3>Review artifacts</h3>
+  return `<section class="artifacts" id="repair-package" tabindex="-1"><h3>Export for review</h3>
     <p class="small muted">Each download rechecks source, evidence and candidate freshness. Guarded SQL also rejects changed table state when applied. Human review is required.${check?` Last check: ${check.ok?'passed':'refused'} at ${time(check.at)}.`:''}</p>
     <div class="download-row">${run.downloads.map(name=>`<button class="download" data-download="${escape(name)}">${icon('download')}<span class="download-text"><strong>${text(name)}</strong><span>${text(DOWNLOAD_NOTES[name]||'')}</span></span></button>`).join('')||'<span class="caption">No artifacts available for export.</span>'}</div>
     <p class="caption">Source database untouched.</p></section>`;
@@ -1148,12 +1285,54 @@ function productContext(sku) {
     ${changes.length?`<h3>From ${changes.length} cancellations</h3><div class="id-grid">${changes.map(c=>`<button class="id-chip mono" data-key="order:${escape(c.before.id)}">${text(c.before.id)} · +${text(c.before.quantity)}</button>`).join('')}</div>`:''}`;
 }
 
+// "Show me" for a check: the related records from the same rehearsal review (current or recorded). The
+// server reports each check as pass/fail with one sentence, so these rows are derived in the browser from
+// the review's before/after records and say so; they are not the check's own computation.
+function checkEvidence(name, review) {
+  const derived = '<p class="caption">Derived from the rehearsal review’s before/after records, not from the check’s own computation.</p>';
+  const link = (key, label) => active().selectable ? `<button class="link small" data-key="${escape(key)}">${text(label)}</button>` : text(label);
+  const signed = (n) => `${n > 0 ? '+' : ''}${n}`;
+  if (name === 'stock_matches_movement_ledger' || name === 'stock_matches_active_orders') {
+    const returned = new Map();
+    for (const c of review.changes) returned.set(c.before.sku, (returned.get(c.before.sku) || 0) + c.before.quantity);
+    let differs = 0;
+    const rows = review.stock.map(p => {
+      const observed = p.after - p.before, expected = returned.get(p.sku) || 0;
+      if (observed !== expected) differs += 1;
+      return [link(`product:${p.sku}`, p.name), `<span class="num">${text(p.before)} → ${text(p.after)}</span>`,
+        `<span class="num">${signed(expected)}</span>`, `<span class="num${observed === expected ? '' : ' cancelled'}">${signed(observed)}</span>`];
+    });
+    return `<h3>Stock on the rehearsal copy</h3>${table(['Product', 'on_hand', 'Returned by cancellations', 'Observed change'], rows)}
+      <p class="small">${differs ? text(`${differs} product${differs === 1 ? '' : 's'} changed by a different amount than ${differs === 1 ? 'its' : 'their'} cancelled orders returned.`) : 'Each product changed by exactly the units its cancelled orders returned.'}</p>${derived}`;
+  }
+  if (name === 'unaffected_orders_preserved') {
+    return `<h3>Preserved records</h3><dl class="run-facts"><dt>Untargeted records unchanged</dt><dd>${text(review.untargeted_preserved)}</dd>
+      <dt>Later purchases unchanged</dt><dd>${text(`${review.checkout_preserved} of ${review.checkout_total}`)}</dd></dl>
+      <button class="secondary" data-tab="changes">${icon('git-compare')}<span>Show preserved work</span></button>${derived}`;
+  }
+  if (name === 'order_history_preserved') {
+    const other = review.changes.filter(c => Object.keys(c.before).some(k => k !== 'status' && c.before[k] !== c.after[k]));
+    return `<h3>Cancelled orders</h3><p class="small">${text(other.length
+      ? `${other.length} of ${review.changes.length} cancelled orders changed more than their status.`
+      : `Only the status changed on all ${review.changes.length} cancelled orders; IDs, customers, products and quantities are unchanged.`)}</p>
+      ${other.length ? `<div class="id-grid">${other.map(c => link(`order:${c.before.id}`, c.before.id)).join('')}</div>` : ''}${derived}`;
+  }
+  if (name === 'source_evidence_complete' || name === 'source_events_applied_once') {
+    const refs = review.changes.flatMap(c => c.evidence_refs || []);
+    if (!refs.length) return '';
+    return `<h3>Cited evidence</h3><p class="small">${text(`${review.changes.length} cancellations make ${refs.length} citations to ${new Set(refs).size} distinct committed-write lines.`)}</p>
+      <button class="secondary" data-tab="evidence">${icon('file-text')}<span>Open Evidence</span></button>${derived}`;
+  }
+  return '';
+}
+
 function checkContext(name) {
   const source = active(), check = source.review?.checks.find(c => c.name === name);
   if (!check) return `<p class="muted">This check is not in the current review.</p>`;
   return `<h2 class="ctx-title">${text(name.replaceAll('_', ' '))}</h2>
     <div class="ctx-status">${badge(check.passed ? 'Passed' : 'Failed', check.passed ? 'ok' : 'danger')}<span class="caption">${text(groupOf(name))} · ${source.recorded ? 'recorded at rehearsal' : 'observed at rehearsal'}</span></div>
     <p class="small">${text(check.detail)}</p><p class="caption mono">${text(name)}</p>
+    ${checkEvidence(name, source.review)}
     <p class="small muted">${source.recorded ? text(state.recording?.review_observation || 'Recorded at rehearsal; not a current export check.') : 'Checks run on the rehearsal snapshot and cannot be edited by the plan. Export status is rechecked separately on every download.'}</p>`;
 }
 
@@ -1179,15 +1358,128 @@ function eventContext(id) {
     <button class="secondary" data-search-event="${escape(id)}">${icon('file-search')}<span>Search events.jsonl for this event</span></button>`;
 }
 
+/* ---------- Guide (the details column when nothing is selected) ---------- */
+
+// The next step for the case on screen, from the server's run status. [eyebrow, title, body, cta, tone]
+function nextStep(run) {
+  const review = run?.review, total = review?.checks.length, passed = review?.checks.filter(c => c.passed).length;
+  if (state.busy) return ['Working', state.busyAction === 'rehearse' ? 'Rehearsing on a copy…' : 'Reading the evidence…',
+    state.busyAction === 'rehearse' ? 'The proposal is applied to a disposable copy and checked. The source database is not touched.' : 'The offline script reads the evidence files and order records with read-only tools.', null];
+  if (!run) return ['Next step', 'Start the offline investigation', `The script reads the ${state.incident.artifacts.length} evidence files and the order records with read-only tools, then proposes which repeated orders to cancel. It calls no model.`, 'investigate'];
+  switch (run.status) {
+    case 'proposed': return ['Next step', 'Rehearse on a disposable copy', `The script proposes ${run.plan.cancellations.length} cancellations, each citing its evidence. Rehearsal applies them to a copy and runs independent checks.`, 'rehearse'];
+    case 'stopped': return ['Stopped', 'Evidence is missing', `${run.missing_event_ids?.length ?? 'Some'} source events have no commit record, so the script stopped instead of guessing. Nothing was changed.`, null, 'warn'];
+    case 'ready_for_review': return ['Next step', 'Review, then export', `Check the ${review.cancellations} cancellations in Changes and the ${passed} / ${total} checks in Checks. Each download rechecks that the source and evidence are unchanged.`, 'review'];
+    case 'failed_checks': return ['Checks failed', 'Nothing can be exported', `${total - passed} of ${total} checks failed at rehearsal. Open Checks to see which.`, 'checks', 'warn'];
+    case 'blocked': return ['Export blocked', 'Start a new investigation', run.summary, 'investigate', 'warn'];
+    default: return ['Status', statusOf(run)[0], run.summary || '', null];
+  }
+}
+
+// Actions stay in the header (one primary button); the guide only adds shortcuts to the right tab.
+const GUIDE_CTA = {
+  review: () => state.tab === 'changes' ? `<button class="secondary" data-tab="checks">${icon('shield-check')}<span>Open Checks</span></button>`
+    : `<button class="secondary" data-tab="changes">${icon('git-compare')}<span>Open Changes</span></button>`,
+  checks: () => `<button class="secondary" data-tab="checks">${icon('shield-check')}<span>Open Checks</span></button>`,
+};
+
+const guideItem = (iconName, body) => `<li>${icon(iconName)}<span>${body}</span></li>`;
+
+function guideView() {
+  const close = `<button class="icon-button" data-close-context aria-label="Close guide">${icon('x')}</button>`;
+  const head = `<div class="ctx-head"><span class="eyebrow">${icon('book-open')}Guide</span>${close}</div>`;
+  const keys = `<h3>Shortcuts</h3><dl class="guide-keys"><dt><kbd>${paletteKeyLabel()}</kbd></dt><dd>Jump to a case, tab, order or evidence line</dd><dt><kbd>/</kbd></dt><dd>Search the evidence or changes</dd><dt><kbd>Esc</kbd></dt><dd>Close details</dd></dl>`;
+  if (recordedMode()) {
+    const r = state.recording, matched = recCitations(r);
+    return `${head}<div class="guide">
+      <div class="guide-next rec"><span class="eyebrow">Read-only history</span><h2>${text(r ? recordingLabel(r) : 'Recorded model runs')}</h2>
+        <p>${r ? text(`A saved run of ${r.provenance?.model || 'a model'} on this case, recorded from the command line. Nothing here calls the model again.`) : 'Choose a recording from the list to see its steps.'}</p></div>
+      <h3>How to read it</h3><ul class="guide-list">
+        ${guideItem('bot', 'Investigation lists the recorded model messages and tool calls in order. Rejected steps show where the local runtime refused a call.')}
+        ${guideItem('git-compare', 'The comparison on Investigation shows whether the model cancelled the same orders as the offline script. It checks agreement, not which is better.')}
+        ${guideItem('shield-check', 'Changes and Checks show the review recorded at rehearsal, not a current export check.')}
+        ${guideItem('file-text', r && !matched ? 'This recording’s inputs differ from the case now, so links into the evidence are off.' : 'Evidence links work only while the recording’s inputs match this case.')}
+      </ul>
+      <p class="guide-note">Recordings cannot be rehearsed, exported or downloaded. Exports come only from a current offline rehearsal.</p>
+      ${keys}</div>`;
+  }
+  const [eyebrow, title, body, cta, tone = ''] = nextStep(state.run), recs = recordedList().list;
+  return `${head}<div class="guide">
+    <div class="guide-next ${tone}"><span class="eyebrow">${text(eyebrow)}</span><h2>${text(title)}</h2><p>${text(body)}</p>${cta && GUIDE_CTA[cta] && !state.busy ? GUIDE_CTA[cta]() : ''}</div>
+    <p class="caption guide-hint">Select any record, evidence line or check to see its exact values here.</p>
+    <h3>What keeps this safe</h3><ul class="guide-list">
+      ${guideItem('database', 'The source database is only read. Nothing here writes to it.')}
+      ${guideItem('flask-conical', 'Every fix is rehearsed on a disposable copy and checked independently.')}
+      ${guideItem('shield-check', 'Each download rechecks the source and evidence. The SQL rolls back if the tables changed.')}
+      ${guideItem('circle-check', 'A person reviews the SQL before anyone applies it. This workbench never applies it.')}
+    </ul>
+    ${recs.length ? `<h3>Recorded model runs</h3><p class="small muted">${text(`${recs.length} saved Meta model runs exist for this case. They are read-only history; open one to compare it with this script run.`)}</p><button class="link small" data-source="recorded">${icon('history')}<span>Show recorded model runs</span></button>` : ''}
+    ${keys}
+    <p class="guide-note">Synthetic cases with no real people or transactions. The offline script calls no model.</p></div>`;
+}
+
+/* ---------- First-visit introduction ---------- */
+
+// Shown until dismissed. Remembered in this browser only; if storage is unavailable it simply shows again.
+const WELCOME_KEY = 'recovery-room.welcome-dismissed';
+function welcomeDismissed() {
+  try { return window.localStorage?.getItem(WELCOME_KEY) === '1'; } catch (_) { return false; }
+}
+
+function renderWelcome() {
+  const box = $('#welcome');
+  if (state.welcomeHidden || welcomeDismissed() || !state.cases.length) { box.hidden = true; box.innerHTML = ''; return; }
+  const first = state.cases[0];
+  const cta = state.incident && state.incident.id !== first.id ? `<button class="secondary" data-case="${escape(first.id)}">${icon('folder-open')}<span>Go to case 1</span></button>` : '';
+  box.hidden = false;
+  box.innerHTML = `<div class="welcome-text"><strong>Recovery Room investigates a retried data import.</strong>
+    <p>It finds orders the retry wrote twice, proposes which to cancel with cited evidence, rehearses the fix on a disposable copy, and exports guarded SQL for a person to review. The four cases are synthetic. The offline script calls no model; recorded Meta model runs are read-only history.</p></div>
+    <div class="welcome-actions">${cta}<button class="icon-button" data-dismiss-welcome aria-label="Dismiss introduction">${icon('x')}</button></div>`;
+}
+
+function dismissWelcome() {
+  state.welcomeHidden = true;
+  try { window.localStorage?.setItem(WELCOME_KEY, '1'); } catch (_) { /* storage unavailable: hide for this page only */ }
+  const box = $('#welcome');
+  box.hidden = true; box.innerHTML = '';
+}
+
+// Wide screens remember whether the guide was left open; it starts closed so the workspace is wide.
+const GUIDE_KEY = 'recovery-room.guide-open';
+function guidePreferred() {
+  try { return window.localStorage?.getItem(GUIDE_KEY) === '1'; } catch (_) { return false; }
+}
+function rememberGuide(open) {
+  if (isNarrow()) return;
+  try { if (open) window.localStorage?.setItem(GUIDE_KEY, '1'); else window.localStorage?.removeItem(GUIDE_KEY); } catch (_) { /* per-page only */ }
+}
+const guideShowing = () => !!state.incident && !state.selection && state.guide && (!isNarrow() || state.sheet);
+
+// The Guide button opens the guide (replacing any selected details) or, if it is showing, closes it.
+function toggleGuide(trigger = null) {
+  if (guideShowing()) { closeContext(); return; }
+  state.lastFocus = trigger || document.activeElement; // closing returns focus to the Guide button
+  Object.assign(state, {selection: null, sheet: true, guide: true});
+  rememberGuide(true);
+  renderContext(); markSelection();
+  if (state.tab === 'evidence') renderEvidence();
+  $('#context').focus();
+}
+
 function renderContext() {
   const box = $('#context'), sel = state.selection;
-  // Wide screens keep a fixed details column, so selecting or closing never reflows the tables.
-  // Narrow screens show it as a sliding sheet that opens only on an explicit selection.
-  box.classList.toggle('open', !!sel && !!state.incident && state.sheet);
+  // Wide screens show the details column only while something is selected or the guide is open, so the
+  // workspace is full width otherwise. Narrow screens show it as a sheet opened by a selection or the
+  // Guide button.
+  box.classList.toggle('open', !!state.incident && state.sheet);
+  const workspace = $('.workspace'), wasClosed = workspace.classList.contains('ctx-closed');
+  workspace.classList.toggle('ctx-closed', !state.incident || (!sel && !state.guide));
+  $('[data-open-guide]').setAttribute('aria-expanded', String(guideShowing()));
+  // Opening the column narrows the tables; keep the selected row in view.
+  if (wasClosed && sel && !isNarrow()) requestAnimationFrame(() => $('#content .selected')?.scrollIntoView({block: 'nearest'}));
   if (!sel || !state.incident) {
     state.ctxKey = null;
-    box.innerHTML = `<div class="ctx-head"><span class="eyebrow">Details</span></div><div class="ctx-empty">${icon('info', 'empty-icon')}<h2>Nothing selected</h2>
-      <p class="small muted">Select a record, evidence line, check or citation to see exact values here. Press <kbd>${paletteKeyLabel()}</kbd> to jump anywhere.</p></div>`;
+    box.innerHTML = state.incident ? guideView() : `<div class="ctx-head"><span class="eyebrow">Details</span></div>`;
     return;
   }
   const kinds = {order: ['hash', 'Record', orderContext], product: ['package', 'Product', productContext], check: ['shield-check', 'Check', checkContext], line: ['file-text', 'Evidence line', lineContext], event: ['file-search', 'Missing evidence', eventContext]};
@@ -1210,7 +1502,10 @@ function select(key, {focusRef = null, keepFocus = false} = {}) {
 }
 
 function closeContext() {
-  state.selection = null; state.sheet = false;
+  // Closing details returns to the guide if it was open; closing the guide closes the column.
+  if (state.selection) state.selection = null;
+  else { state.guide = false; rememberGuide(false); }
+  state.sheet = false;
   renderContext(); markSelection();
   if (state.tab === 'evidence') renderEvidence();
   if (state.lastFocus?.isConnected) state.lastFocus.focus();
@@ -1338,6 +1633,25 @@ async function recheckExport() {
 const palette = {items: [], active: 0, ran: false, returnFocus: null};
 const paletteKeyLabel = () => (typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || '')) ? '⌘K' : 'Ctrl K';
 
+/* ---------- Phone case drawer ---------- */
+
+// On narrow screens the sidebar (cases and runs) is a drawer opened from the top bar.
+function setNav(open) {
+  const app = $('.app'), scrim = $('.scrim');
+  if (!app?.classList) return;
+  state.nav = !!open && isNarrow();
+  app.classList.toggle('nav-open', state.nav);
+  $('#nav-toggle').setAttribute('aria-expanded', String(state.nav));
+  scrim.hidden = !state.nav;
+  if (state.nav) ($('#cases .case.active') || $('#cases .case'))?.focus({preventScroll: true});
+}
+
+function closeNav() {
+  if (!state.nav) return;
+  setNav(false);
+  $('#nav-toggle').focus();
+}
+
 function goToCase(id) {
   if (id !== (state.switching || state.incident?.id)) location.hash = `case=${id}`;
 }
@@ -1358,7 +1672,7 @@ function paletteCommands(query) {
     const recs = recordedList().list;
     if (recordedMode()) add('Actions', 'Show script run', 'Offline script · no model', 'play', () => setSource('script'), 'script offline');
     else if (recs.length) add('Actions', 'Show recorded model runs', `${recs.length} recorded · not live`, 'history', () => setSource('recorded'), 'recorded model meta');
-    for (const r of recs) add('Recorded runs', `${recOutcome(r)[0]} · ${started(r.recorded_at)}`, `${r.model} · ${r.tool_calls} tool results`, 'history',
+    for (const r of recs) add('Recorded runs', `${recOutcome(r)[0]} · ${recordedShort(r.recorded_at)}`, `${r.model} · ${r.tool_calls} tool results`, 'history',
       () => { if (!recordedMode()) setSource('recorded'); return loadRecording(r.id); }, `recording ${r.outcome}`);
   }
   // Offline actions exist only in script mode; recordings are never rehearsed, exported or rechecked.
@@ -1423,12 +1737,18 @@ function runPaletteItem(index) {
 
 document.addEventListener('click', event => {
   if (event.target.id === 'palette') { event.target.close(); return; } // backdrop click
+  if (event.target.closest?.('[data-close-nav]')) { closeNav(); return; } // drawer backdrop
   const option = event.target.closest?.('[data-palette-index]');
   if (option) { runPaletteItem(Number(option.dataset.paletteIndex)); return; }
   const el = event.target.closest('button, [data-key]');
   if (!el || el.disabled) return;
   const d = el.dataset;
   let task;
+  if (d.navToggle !== undefined) { if (state.nav) closeNav(); else setNav(true); return; }
+  // Choosing a case, run or recording in the phone drawer closes it.
+  if (state.nav && (d.case || d.run || d.recording)) setNav(false);
+  if (d.openGuide !== undefined) toggleGuide(el);
+  if (d.dismissWelcome !== undefined) dismissWelcome();
   if (d.palette !== undefined) openPalette();
   if (d.source) setSource(d.source);
   if (d.recording && d.recording !== state.recId) task = loadRecording(d.recording);
@@ -1481,6 +1801,7 @@ document.addEventListener('keydown', event => {
     return; // Escape is handled by the native <dialog>
   }
   if ($('#palette')?.open) return;
+  if (key === 'Escape' && state.nav) { event.preventDefault(); closeNav(); return; }
   if (t.getAttribute?.('role') === 'tab' && ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(key)) {
     event.preventDefault();
     const index = TABS.indexOf(state.tab);
@@ -1517,7 +1838,7 @@ document.addEventListener('keydown', event => {
     if (search) { event.preventDefault(); search.focus(); search.select(); }
     return;
   }
-  if (key === 'Escape' && state.selection && !isTyping(t)) { event.preventDefault(); closeContext(); }
+  if (key === 'Escape' && (state.selection || state.sheet || guideShowing()) && !isTyping(t)) { event.preventDefault(); closeContext(); }
 });
 
 document.addEventListener('input', event => {
@@ -1544,13 +1865,15 @@ window.addEventListener('hashchange', () => {
 
 // The palette returns focus to where it was opened unless a command moved it on purpose.
 $('#palette').addEventListener('close', () => { if (!palette.ran && palette.returnFocus?.isConnected) palette.returnFocus.focus(); });
-window.addEventListener('resize', positionTabIndicator);
+window.addEventListener('resize', () => { positionTabIndicator(); if (state.nav && !isNarrow()) setNav(false); });
 
 api('/api/incidents').then(async data => {
   $('#palette-key').textContent = paletteKeyLabel();
   state.cases = data.incidents;
-  // Restore each case's last recorded status from this server session before showing the sidebar.
-  await Promise.all(state.cases.map(c => refreshHistory(c.id).catch(() => null)));
+  state.guide = !isNarrow() && guidePreferred();
+  // Restore each case's last recorded status from this server session, and each case's recording list
+  // (so the sidebar can describe recordings in recorded mode), before showing the sidebar.
+  await Promise.all(state.cases.flatMap(c => [refreshHistory(c.id).catch(() => null), refreshRecordings(c.id)]));
   const target = parseHash();
   await selectCase(target?.id || data.incidents[0].id, target?.tab || null);
 }).catch(error => notice(error.message));
