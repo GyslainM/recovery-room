@@ -21,8 +21,8 @@ function harness(handler) {
     setTimeout, clearTimeout, URL, renderCalls: 0,
   };
   vm.createContext(context);
-  vm.runInContext(source + '\nrender = () => { globalThis.renderCalls++; };\nrenderPanel = () => {};\nglobalThis.subject = {state, download, reviewView, exportStatus, recheckExport, act, changesView, checksTab, sqlView, modeInfo};', context);
-  return {context, ...context.subject};
+  vm.runInContext(source + '\nrender = () => { globalThis.renderCalls++; };\nrenderPanel = () => {};\nglobalThis.subject = {state, download, reviewView, exportStatus, recheckExport, act, changesView, checksTab, sqlView, modeInfo, repairFlow, stockVisual, transition};', context);
+  return {context, nodes, ...context.subject};
 }
 
 function deferred() {
@@ -115,7 +115,7 @@ test('a current review preserves observed counts and qualifies its earlier sourc
   assert.match(rendered, /80 → 60/);
   assert.match(rendered, /20<\/strong>/);
   assert.match(rendered, /10 \/ 10/);
-  assert.match(rendered, /At rehearsal/);
+  assert.match(rendered, /Source unchanged at rehearsal/);
 });
 
 test('an unknown failed check remains visible rather than being dropped by grouping', () => {
@@ -256,4 +256,71 @@ test('an unrecognised mode is shown as reported and never labelled offline or no
   assert.equal(other.unverified, true);
   assert.match(other.short, /live meta agent/);
   for (const value of [other.short, other.long, other.method]) assert.doesNotMatch(value, /offline demo|without model|no model\b(?!-)/i);
+});
+
+test('repair proportions use observed counts and work under the existing style policy', () => {
+  const app = harness(), review = reviewRun('ready_for_review').review;
+  for (const [cancelled, preserved, width] of [[20, 60, 25], [40, 60, 40], [0, 60, 0]]) {
+    const rendered = app.repairFlow({...review, cancellations: cancelled, untargeted_preserved: preserved});
+    const changed = Number(rendered.match(/class="impact-changed"[^>]+width="([^"]+)"/)[1]);
+    const unchanged = Number(rendered.match(/class="impact-preserved"[^>]+width="([^"]+)"/)[1]);
+    assert.equal(changed, width);
+    assert.equal(changed + unchanged, 100);
+    assert.match(rendered, new RegExp(`${cancelled} cancelled orders and ${preserved} unchanged orders`));
+    assert.doesNotMatch(rendered, /\bstyle=|data-count/);
+  }
+});
+
+test('missing or invalid counts never become an invented repair proportion', () => {
+  const app = harness(), review = reviewRun('ready_for_review').review;
+  for (const [cancellations, untargeted_preserved] of [[null, 60], [20, undefined], [-1, 60], [0, 0], [NaN, 60]]) {
+    assert.doesNotMatch(app.repairFlow({...review, cancellations, untargeted_preserved}), /class="impact"/);
+  }
+});
+
+test('a recorded outcome cannot imply a currently exportable package', () => {
+  const app = harness();
+  const rendered = app.repairFlow(reviewRun('ready_for_review').review,
+    {recorded: true, run: reviewRun('ready_for_review')});
+  assert.match(rendered, /at recorded rehearsal/);
+  assert.match(rendered, /Read-only recording · no downloads/);
+  assert.doesNotMatch(rendered, /Package for human review|freshness checked on download/);
+});
+
+test('stock marks share a zero baseline and show the direction of observed changes', () => {
+  const app = harness();
+  const gain = app.stockVisual({before: 40, after: 60}, 100);
+  assert.match(gain, /class="stock-base"[^>]+x="0"[^>]+width="40"/);
+  assert.match(gain, /class="stock-delta "[^>]+x="40"[^>]+width="20"/);
+  assert.match(gain, /<line x1="60" x2="60"/);
+  const loss = app.stockVisual({before: 60, after: 40}, 100);
+  assert.match(loss, /class="stock-delta negative"[^>]+x="40"[^>]+width="20"/);
+  assert.match(loss, /<line x1="40" x2="40"/);
+  const zero = app.stockVisual({before: 0, after: 10}, 100);
+  assert.match(zero, /class="stock-base"[^>]+width="0"/);
+  assert.doesNotMatch(gain + loss + zero, /\bstyle=/);
+});
+
+test('stock values remain readable when a meaningful shared scale is unavailable', () => {
+  const app = harness();
+  for (const [before, after, maximum] of [[-2, 4, 10], [0, 0, 0], [4, 8, 5], [4, 8, NaN]]) {
+    const rendered = app.stockVisual({before, after}, maximum);
+    assert.match(rendered, new RegExp(`>${before}</span>`));
+    assert.match(rendered, new RegExp(`>${after}</strong>`));
+    assert.doesNotMatch(rendered, /<svg/);
+  }
+});
+
+test('navigation commits synchronously and cancels a previous entrance animation', () => {
+  const app = harness(), events = [];
+  app.context.document.querySelector('#content');
+  const panel = app.nodes.get('#content');
+  panel.getAnimations = () => [{cancel: () => events.push('cancel')}];
+  panel.animate = () => events.push('animate');
+  app.transition(() => events.push('update'), 'case');
+  assert.deepEqual(events, ['update', 'cancel', 'animate']);
+  app.context.window.matchMedia = () => ({matches: true});
+  app.transition(() => events.push('reduced-motion update'), 'case');
+  assert.equal(events.at(-1), 'reduced-motion update');
+  assert.equal(events.length, 4);
 });

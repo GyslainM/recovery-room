@@ -23,12 +23,7 @@ const state = {
 const escape = (value) => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const text = (value) => escape(value);
 const badge = (value, tone = '') => `<span class="pill ${tone === true ? 'warn' : tone || ''}">${text(value)}</span>`;
-// count: optional {from, to, prefix, suffix} for a one-time count-up after a fresh rehearsal.
-// The rendered text is always the final value, so the page is correct even without animation.
-const metric = (value, label, count = null) => {
-  const attrs = count ? ` data-count-from="${count.from}" data-count-to="${count.to}" data-count-prefix="${escape(count.prefix || '')}" data-count-suffix="${escape(count.suffix || '')}"` : '';
-  return `<div class="metric"><strong${attrs}>${text(value)}</strong><span>${text(label)}</span></div>`;
-};
+const metric = (value, label) => `<div class="metric"><strong>${text(value)}</strong><span>${text(label)}</span></div>`;
 // Lucide icons from the inline sprite in index.html (lucide-static 1.55.0, ISC; notice kept there).
 const icon = (name, cls = '') => `<svg class="icon ${cls}" aria-hidden="true" focusable="false"><use href="#i-${name}"></use></svg>`;
 const skeleton = (lines = 6) => `<div class="skeleton-stack" aria-hidden="true">${'<span class="skeleton"></span>'.repeat(lines)}</div><span class="sr-only">Loading</span>`;
@@ -113,38 +108,16 @@ function dismissToast(el) {
 /* ---------- Motion ---------- */
 
 const prefersReducedMotion = () => typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-// Runs a DOM update inside a same-document view transition where supported (Chromium); otherwise immediately.
-// kind selects the CSS choreography: 'forward' / 'back' for tabs, 'case' for case and run switches.
-// Motion must never block state: if the browser is not producing frames (background tab, hidden window),
-// the update is applied after a short timeout and the transition's own call becomes a no-op.
+// Commit immediately; a short, cancellable entrance is presentation only.
 function transition(update, kind = 'swap') {
-  if (typeof document.startViewTransition !== 'function' || prefersReducedMotion() || document.visibilityState === 'hidden') { update(); return; }
-  let applied = false;
-  const once = () => { if (!applied) { applied = true; update(); } };
-  const root = document.documentElement;
-  root.dataset.vt = kind;
-  try {
-    const vt = document.startViewTransition(once);
-    // A transition is skipped when another starts first; the update still runs, so ignore the rejection.
-    vt.ready.catch(() => {});
-    vt.finished.catch(() => {}).finally(() => { if (root.dataset.vt === kind) delete root.dataset.vt; });
-  } catch (_) { once(); delete root.dataset.vt; }
-  setTimeout(once, 250);
-}
-
-// One-time count-up for metrics rendered with data-count-* after a fresh rehearsal.
-function animateCounts() {
-  if (prefersReducedMotion()) return;
-  document.querySelectorAll('#content [data-count-to]').forEach(el => {
-    const from = Number(el.dataset.countFrom), to = Number(el.dataset.countTo), final = el.textContent;
-    const {countPrefix: prefix = '', countSuffix: suffix = ''} = el.dataset, start = performance.now(), duration = 650;
-    const step = (now) => {
-      const p = Math.min(1, (now - start) / duration), eased = 1 - Math.pow(1 - p, 3);
-      el.textContent = p < 1 ? `${prefix}${Math.round(from + (to - from) * eased)}${suffix}` : final;
-      if (p < 1 && el.isConnected) requestAnimationFrame(step);
-    };
-    requestAnimationFrame(step);
-  });
+  // Commit state immediately. A short entrance belongs to the new content only;
+  // old and new tables must never overlap or delay a keyboard action.
+  update();
+  const panel = $('#content');
+  if (kind === 'swap' || prefersReducedMotion() || typeof panel?.animate !== 'function') return;
+  panel.getAnimations().forEach(animation => animation.cancel());
+  panel.animate([{opacity: .7, transform: 'translateY(3px)'}, {opacity: 1, transform: 'none'}],
+    {duration: 140, easing: 'ease-out'});
 }
 
 function positionTabIndicator() {
@@ -541,12 +514,12 @@ function renderTabs() {
 
 function setTab(tab, focusTab = false) {
   if (!TABS.includes(tab)) return;
+  const changed = tab !== state.tab;
   const direction = TABS.indexOf(tab) >= TABS.indexOf(state.tab) ? 'forward' : 'back';
   transition(() => {
-    const workspace = $('.workspace'), top = workspace.getBoundingClientRect().top + window.scrollY - $('.tabs').offsetHeight;
     state.tab = tab;
     renderTabs(); renderPanel(); renderActions(); updateHash();
-    if (window.scrollY > top) window.scrollTo({top});
+    if (changed) $('#content').scrollTop = 0;
     if (!state.selection) renderContext(); // the guide's shortcut follows the tab
     if (focusTab) $(`#tab-${tab}`).focus();
   }, tab === state.tab ? 'swap' : direction);
@@ -561,7 +534,6 @@ function renderPanel() {
   if (state.tab === 'evidence') renderEvidence();
   if (state.tab === 'sql' && !recordedMode()) maybeLoadSql();
   markSelection();
-  if (!recordedMode() && state.countUp && state.countUp === state.run?.id && state.tab === 'changes') { state.countUp = null; animateCounts(); }
 }
 
 function viewMissing() {
@@ -609,17 +581,19 @@ function caseStory() {
 
 function incidentOverview() {
   const {incident} = state;
-  return `<div class="section-heading"><h2>${text(STORY_TITLE[incident.scenario] || 'A partial import. A full retry.')}</h2>${badge('Open incident',true)}</div>
+  return `<section class="incident-brief"><span class="eyebrow">The incident</span>
+    <h2>${text(STORY_TITLE[incident.scenario] || 'A partial import. A full retry.')}</h2>
     <p class="lede">${text(caseStory() || 'An import was retried after a partial failure while customers kept buying.')} Similar-looking purchases may be legitimate.</p>
-    <div class="metrics">${metric(incident.active_orders,'active order records')}${metric(incident.artifacts.length,'evidence files')}${metric(incident.products.length,'products affected')}</div>
-    <div class="callout"><strong>The question to resolve</strong><br>Which records repeat the same source action, and which later purchases must stay? A stock correction also needs a compensating ledger entry.</div>`;
+    <div class="incident-facts"><span><strong>${text(incident.active_orders)}</strong> active orders</span><span><strong>${text(incident.artifacts.length)}</strong> evidence files</span><span><strong>${text(incident.products.length)}</strong> products</span></div>
+    <p class="incident-question">Find the repeated writes. Keep the legitimate purchases.</p></section>`;
 }
 
 function sourceRecords() {
   const {incident} = state;
-  return `<h3>Current inventory · source database</h3>${table(['Product','Available stock'],incident.products.map(p=>[text(p.name),`<span class="num">${text(p.on_hand)}</span>`]))}
-    <details class="fold"><summary>Incident note and supported schema</summary><p class="small">${text(incident.note.lines.map(l=>l.text).join('\n'))}</p><pre>${text(incident.schema.map(s=>s.sql).join('\n\n'))}</pre></details>
-    <div class="row-head"><h3>Order records</h3><span class="caption">${incident.orders.length} observed records · select one for details</span></div>
+  return `<details class="fold"><summary>Source inventory, incident note and schema</summary>
+      <h3>Current inventory · source database</h3>${table(['Product','Available stock'],incident.products.map(p=>[text(p.name),`<span class="num">${text(p.on_hand)}</span>`]))}
+      <p class="small">${text(incident.note.lines.map(l=>l.text).join('\n'))}</p><pre>${text(incident.schema.map(s=>s.sql).join('\n\n'))}</pre></details>
+    <div class="row-head"><h3>Source orders</h3><span class="caption">${incident.orders.length} records · select an order to inspect it</span></div>
     ${orderTable(incident.orders)}`;
 }
 
@@ -920,7 +894,6 @@ function recordedChangesView() {
   return `${recBanner(r, true, true)}
     <div class="section-heading"><h2>Recorded repair review</h2>${badge('Recorded at rehearsal')}</div>
     ${repairFlow(review, {recorded: true})}
-    <ul class="assurance" aria-label="Recording boundaries"><li>Historical review data</li><li>No rehearsal, SQL or downloads from recordings</li></ul>
     ${diffView(review)}
     <p class="caption">Read-only history. To produce exportable SQL, run the offline script and rehearse it on a disposable copy.</p>`;
 }
@@ -1112,44 +1085,44 @@ function reviewView() {
 
 function reviewSummary(run, review) {
   const ready = run.status === 'ready_for_review';
-  const passed = review.checks.filter(c => c.passed).length;
-  const source = review.checks.find(c => c.name === 'source_snapshot_unchanged');
   const failed = review.checks.filter(c => !c.passed);
   return `<div class="section-heading"><h2>${ready?'Rehearsal result':'Export unavailable'}</h2>${badge(ready?'Rehearsal snapshot':statusOf(run)[0],!ready)}</div>
     ${ready?'':`<div class="callout stop">${text(run.summary)}</div>`}
     ${repairFlow(review, {run})}
-    <ul class="assurance" aria-label="Rehearsal observations">
-      ${run.status==='blocked'?'<li class="fail">Export is blocked; see the reason above</li>':source?`<li class="${source.passed?'':'fail'}">${source.passed?'At rehearsal: source matched the snapshot':'At rehearsal: source differed from the snapshot'}</li>`:''}
-      <li>At rehearsal: ${text(review.untargeted_preserved)} untargeted records matched the source</li>
-    </ul>
-    <p class="caption">Describes the rehearsal snapshot. Export is rechecked on every download; nothing here applies the package to the source.</p>
+    ${run.status==='blocked'?'<p class="caption">Export is blocked. Counts describe the earlier rehearsal snapshot; see the server’s reason above.</p>':''}
     ${failed.length?`<div class="failed"><h3>Failed checks at rehearsal</h3><ul>${failed.map(c=>`<li><span class="group">${text(groupOf(c.name))}</span><strong>${text(c.name.replaceAll('_',' '))}</strong><div class="check-detail">${text(c.detail)}</div></li>`).join('')}</ul></div>`:''}`;
 }
 
-// Source → copy → checks → package, with the rehearsal's own numbers. The source node states only what
-// the rehearsal observed (its snapshot check); the package node reflects the server's export state.
+// A quiet outcome graphic, built from the selected rehearsal's observations.
+// The bar counts changed and preserved records, not deleted orders or a live source.
 function repairFlow(review, {run = null, recorded = false} = {}) {
   const passed = review.checks.filter(c => c.passed).length, total = review.checks.length;
   const sourceCheck = review.checks.find(c => c.name === 'source_snapshot_unchanged');
-  const sourceNote = sourceCheck ? (sourceCheck.passed ? 'unchanged at rehearsal' : 'differed at rehearsal') : 'read-only here';
-  const count = (attrs) => recorded ? '' : ` data-count-from="${attrs.from}" data-count-to="${attrs.to}" data-count-prefix="${escape(attrs.prefix || '')}" data-count-suffix="${escape(attrs.suffix || '')}"`;
-  const pkg = recorded ? ['No repair package', '—', 'recordings have no downloads', '']
-    : run?.status === 'ready_for_review' ? ['Repair package', `${run.downloads.length} files`, 'for human review · rechecked on download', 'ok']
-    : run?.status === 'blocked' ? ['Repair package', 'Blocked', 'export refused', 'warn']
-    : ['Repair package', 'Unavailable', 'checks failed at rehearsal', 'danger'];
-  const node = (cls, label, big, sub, attrs = '') => `<li class="flow-node ${cls}"><span class="flow-label">${text(label)}</span><strong${attrs}>${text(big)}</strong><span class="flow-sub">${sub}</span></li>`;
-  return `<figure class="flow" aria-label="${recorded ? 'Recorded repair path' : 'Repair path'}"><ol>
-      ${node('source', 'Source database', `${review.before_active} active`, text(sourceNote))}
-      <li class="flow-link labelled" aria-hidden="true"><span>copy snapshot</span></li>
-      ${node('copy', recorded ? 'Rehearsal copy · recorded' : 'Disposable rehearsal copy', `${review.before_active} → ${review.after_active}`,
-        `<strong>${text(review.cancellations)}</strong> cancelled · ${text(`${review.checkout_preserved} / ${review.checkout_total}`)} later purchases intact`,
-        count({from: review.before_active, to: review.after_active, prefix: `${review.before_active} → `}))}
-      <li class="flow-link" aria-hidden="true"></li>
-      ${node(review.passed ? 'ok' : 'danger', 'Independent checks', `${passed} / ${total}`, recorded ? 'passed at recorded rehearsal' : 'passed at rehearsal',
-        count({from: 0, to: passed, suffix: ` / ${total}`}))}
-      <li class="flow-link" aria-hidden="true"></li>
-      ${node(`pkg ${pkg[3]}`, pkg[0], pkg[1], text(pkg[2]))}
-    </ol></figure>`;
+  const sourceNote = sourceCheck ? (sourceCheck.passed ? 'Source unchanged at rehearsal' : 'Source differed at rehearsal') : 'Source opened read-only';
+  const changed = review.cancellations, preserved = review.untargeted_preserved;
+  const known = [changed, preserved].every(n => Number.isSafeInteger(n) && n >= 0) && changed + preserved > 0;
+  const portion = known ? changed / (changed + preserved) * 100 : 0;
+  const pkg = recorded ? 'Read-only recording · no downloads'
+    : run?.status === 'ready_for_review' ? 'Package for human review · freshness checked on download'
+    : run?.status === 'blocked' ? 'Export blocked' : 'Export unavailable · checks failed';
+  return `<section class="repair-outcome" aria-label="${recorded ? 'Recorded rehearsal outcome' : 'Rehearsal outcome'}">
+    <div class="outcome-numbers"><div><span class="eyebrow">Active orders on the ${recorded ? 'recorded ' : ''}copy</span>
+      <strong class="outcome-total">${text(review.before_active)} → ${text(review.after_active)}</strong>
+      <p><strong>${text(changed)}</strong> duplicate orders cancelled. Order history retained.</p></div>
+      <div class="outcome-preserved"><strong>${text(preserved)}</strong><span>untargeted orders unchanged</span><small>including ${text(`${review.checkout_preserved} / ${review.checkout_total}`)} later purchases intact</small></div></div>
+    ${known ? `<figure class="impact" aria-label="${text(`${changed} cancelled orders and ${preserved} unchanged orders in the rehearsal review`)}">
+      <svg class="impact-track" viewBox="0 0 100 7" preserveAspectRatio="none" aria-hidden="true"><rect class="impact-changed" x="0" y="0" width="${portion}" height="7"/><rect class="impact-preserved" x="${portion}" y="0" width="${100 - portion}" height="7"/></svg>
+      <figcaption><span><i class="impact-dot changed"></i>${text(changed)} cancelled on copy</span><span><i class="impact-dot"></i>${text(preserved)} unchanged</span></figcaption></figure>` : ''}
+    <div class="outcome-foot"><span class="${review.passed ? 'ok' : 'danger'}">${icon(review.passed ? 'shield-check' : 'circle-x')}${passed} / ${total} checks passed ${recorded ? 'at recorded rehearsal' : 'at rehearsal'}</span><span>${icon('database')}${text(sourceNote)}</span><span>${text(pkg)}</span></div>
+  </section>`;
+}
+
+// Zero-based stock marks are an alternative view of the displayed before/after values.
+function stockVisual(product, maximum) {
+  const numeric = `<span class="stock-values"><span>${text(product.before)}</span><span aria-hidden="true">→</span><strong>${text(product.after)}</strong></span>`;
+  if (![product.before, product.after, maximum].every(Number.isFinite) || Math.min(product.before, product.after) < 0 || maximum <= 0 || maximum < Math.max(product.before, product.after)) return numeric;
+  const before = product.before / maximum * 100, after = product.after / maximum * 100;
+  return `<div class="stock-visual">${numeric}<svg class="stock-track" viewBox="0 0 100 7" preserveAspectRatio="none" aria-hidden="true"><rect class="stock-base" x="0" y="2" width="${Math.min(before, after)}" height="3"/><rect class="stock-delta ${after < before ? 'negative' : ''}" x="${Math.min(before, after)}" y="2" width="${Math.abs(after - before)}" height="3"/><line x1="${after}" x2="${after}" y1="0" y2="7"/></svg></div>`;
 }
 
 function diffView(review) {
@@ -1164,18 +1137,18 @@ function diffView(review) {
     byProduct.set(change.before.sku, entry);
   }
   return `<section class="diff" aria-labelledby="diff-title">
-    <div class="diff-head"><h3 id="diff-title">Changes on the disposable copy</h3></div>
+    <div class="diff-head"><h3 id="diff-title">Order changes</h3><span class="caption">On the disposable copy</span></div>
     <div class="diff-tools">
-      <div class="diff-counts"><span class="mod">~${review.changes.length} orders</span><span class="mod">~${stockChanged.length} products</span><span class="same">=${review.preserved_orders.length} orders unchanged</span></div>
+      <div class="diff-counts"><span>${review.changes.length} orders</span><span>${stockChanged.length} stock rows</span><span>${review.preserved_orders.length} preserved</span></div>
       <label class="search">${icon('search')}<span class="sr-only">Search changed records</span><input id="change-search" type="search" placeholder="Search order, customer or product" value="${escape(state.changeQuery)}" autocomplete="off" spellcheck="false"><kbd aria-hidden="true">/</kbd></label>
       <label class="filter">Product <select id="change-filter"><option value="">All (${review.changes.length})</option>${skus.map(sku=>`<option value="${escape(sku)}" ${sku===state.filter?'selected':''}>${text(sku)} (${review.changes.filter(c=>c.before.sku===sku).length})</option>`).join('')}</select></label>
     </div>
-    <div class="group-head"><h4>orders</h4><span class="caption">Only <span class="mono">status</span> changes. Original rows and sale movements are kept; cancellations add compensating stock entries.</span></div>
+    <p class="table-note">The original purchase stays. Only the retry is cancelled; stock is returned with a compensating entry.</p>
     <div id="change-table">${changesTable(review.changes)}</div>
-    <div class="group-head"><h4>products</h4><span class="caption"><span class="mono">on_hand</span> before and after rehearsal</span></div>
-    ${table(['','Product','on_hand','Change','From cancellations'],review.stock.map(p=>{
+    <div class="group-head"><h4>Stock reconciliation</h4><span class="caption">Before → after rehearsal · bars start at zero</span></div>
+    ${table(['','Product','Stock on hand','Change','From cancellations'],review.stock.map(p=>{
       const delta = p.after - p.before, entry = byProduct.get(p.sku);
-      return [`<span class="sym ${delta?'mod':'same'}">${delta?'~':'='}</span>`,`${text(p.name)} <span class="mono faint">${text(p.sku)}</span>`,`<span class="before num">${text(p.before)}</span> → <span class="after num">${text(p.after)}</span>`,`<span class="${delta>0?'positive':delta<0?'cancelled':''} num">${delta>0?'+':''}${text(delta)}</span>`,entry?`${entry.orders} orders · +${entry.units} units`:'—'];
+      return [`<span class="sym ${delta?'mod':'same'}">${delta?'~':'='}</span>`,`${text(p.name)} <span class="mono faint">${text(p.sku)}</span>`,stockVisual(p, Math.max(0, ...review.stock.flatMap(row => [row.before, row.after]))),`<span class="${delta>0?'positive':delta<0?'cancelled':''} num">${delta>0?'+':''}${text(delta)}</span>`,entry?`${entry.orders} orders · +${entry.units} units`:'—'];
     }),review.stock.map(p=>selAttrs(`product:${p.sku}`)))}
     <div class="group-head"><h4>preserved work</h4><span class="caption">Later purchases in this synthetic case. At rehearsal, ${text(review.checkout_preserved)} of ${text(review.checkout_total)} remained unchanged.</span></div>
     ${orderTable(checkout)}
@@ -1483,13 +1456,11 @@ function welcomeDismissed() {
 
 function renderWelcome() {
   const box = $('#welcome');
-  if (state.welcomeHidden || welcomeDismissed() || !state.cases.length) { box.hidden = true; box.innerHTML = ''; return; }
-  const first = state.cases[0];
-  const cta = state.incident && state.incident.id !== first.id ? `<button class="secondary" data-case="${escape(first.id)}">${icon('folder-open')}<span>Go to case 1</span></button>` : '';
+  if (state.welcomeHidden || welcomeDismissed() || !state.cases.length || state.run || recordedMode()) { box.hidden = true; box.innerHTML = ''; return; }
   box.hidden = false;
-  box.innerHTML = `<div class="welcome-text"><p><strong>Recovery Room investigates retried imports.</strong> <span>Synthetic cases · offline script, no model · recordings are read-only.</span></p>
+  box.innerHTML = `<div class="welcome-text"><p><strong>Sample workspace.</strong> <span>${state.cases.length} synthetic incidents. Repairs are tested on disposable copies.</span></p>
     <details><summary>How it works</summary><p>It finds orders the retry wrote twice, proposes which to cancel with cited evidence, tests the fix on a disposable copy, and exports guarded SQL for a person to review. The source database is never changed.</p></details></div>
-    <div class="welcome-actions">${cta}<button class="icon-button" data-dismiss-welcome aria-label="Dismiss introduction">${icon('x')}</button></div>`;
+    <div class="welcome-actions"><button class="icon-button" data-dismiss-welcome aria-label="Dismiss introduction">${icon('x')}</button></div>`;
 }
 
 function dismissWelcome() {
@@ -1589,7 +1560,6 @@ async function act(action) {
     if (action === 'rehearse') {
       state.runMeta.set(run.id, {rehearsedAt: new Date()});
       state.exportChecks.delete(run.id); state.sql.delete(run.id);
-      if (run.review) state.countUp = run.id;
     }
     if (state.incident.id === id) {
       Object.assign(state, {run, filter: '', changeQuery: ''});
