@@ -427,15 +427,14 @@ function renderRecordedHeader() {
     $('#run-details').hidden = true;
     $('#run-details-body').innerHTML = '';
   }
-  $('#header-actions').innerHTML = `<button class="secondary" data-source="script">${icon('play')}<span>Back to script run</span></button>`;
 }
 
 function renderHeader() {
   const {incident, run, busy} = state;
   const [label, tone] = statusOf(run);
   $('#title').textContent = incident.title;
-  $('#crumb-case').textContent = incident.title;
   renderSourceSwitch();
+  renderActions();
   if (recordedMode()) { renderRecordedHeader(); return; }
   $('#mode-indicator').classList.remove('recorded');
   const mode = run?.mode || incident.mode, info = modeInfo(mode);
@@ -450,19 +449,36 @@ function renderHeader() {
       <dt>Method</dt><dd>${text(info.long)}. ${text(info.method)}</dd>
       <dt>Review boundary</dt><dd>The source stays unchanged. Rehearsal uses a disposable copy. Human review is required before using exported SQL.</dd>
     </dl>` : '';
-  // A new investigation is always one click away: the server's refusal messages tell the user to start one.
-  // Busy buttons keep their place and show a spinner with the work in progress.
+
+}
+
+// One obvious primary action for the state on screen, beside the mode label; "New offline investigation"
+// stays secondary. It follows the tab where the next step depends on it (review, then download), so
+// setTab re-renders only these buttons. Busy buttons keep their place and show the work in progress.
+function renderActions() {
+  if (!state.incident) return;
+  const {run, busy, tab} = state;
+  const button = (cls, attrs, iconName, label) => `<button class="${cls}" ${attrs}>${icon(iconName)}<span>${text(label)}</span></button>`;
+  if (recordedMode()) {
+    // Recordings lead to their historical review; there is no rehearse, SQL or download action.
+    const review = state.recording?.review && tab !== 'changes' ? button('primary', 'data-tab="changes"', 'git-compare', 'View recorded changes') : '';
+    $('#header-actions').innerHTML = `${button('secondary', 'data-source="script"', 'play', 'Back to script run')}${review}`;
+    return;
+  }
   const working = (label) => `${icon('loader-circle', 'spin')}<span>${label}</span>`;
-  const investigate = (primary) => `<button class="${primary?'primary':'secondary'}" data-action="investigate" ${busy?'disabled aria-busy="true"':''}>${busy && state.busyAction === 'investigate' ? working('Reading local evidence…') : `${icon(run?'refresh-cw':'play')}<span>${run?'New offline investigation':'Start offline investigation'}</span>`}</button>`;
-  let actions = '';
-  if (!run) actions = investigate(true);
-  else if (run.status === 'proposed') actions = `${investigate(false)}<button class="primary" data-action="rehearse" ${busy?'disabled aria-busy="true"':''}>${busy && state.busyAction === 'rehearse' ? working('Rehearsing on a copy…') : `${icon('flask-conical')}<span>Rehearse on a disposable copy</span>`}</button>`;
-  else if (run.status === 'ready_for_review') actions = `${investigate(false)}<button class="primary" data-review-downloads>${icon('download')}<span>Export guarded SQL</span></button>`;
-  else if (run.status === 'failed_checks') actions = `${investigate(false)}<button class="primary" data-tab="checks">${icon('shield-check')}<span>Review failed checks</span></button>`;
+  const hold = busy ? 'disabled aria-busy="true"' : '';
+  const investigate = (primary) => `<button class="${primary ? 'primary' : 'secondary'}" data-action="investigate" ${run && !primary ? 'title="New offline investigation"' : ''} ${hold}>${busy && state.busyAction === 'investigate' ? working('Reading local evidence…') : `${icon(run ? 'refresh-cw' : 'play')}<span>${run ? 'New offline investigation' : 'Investigate incident'}</span>`}</button>`;
+  let primary = '', secondary = run ? investigate(false) : '';
+  if (!run) primary = investigate(true);
+  else if (run.status === 'proposed') primary = `<button class="primary" data-action="rehearse" ${hold}>${busy && state.busyAction === 'rehearse' ? working('Testing on a copy…') : `${icon('flask-conical')}<span>Test repair on a copy</span>`}</button>`;
+  else if (run.status === 'stopped') primary = button('primary', 'data-view-missing', 'file-search', 'View missing evidence');
+  else if (run.status === 'ready_for_review') primary = ['changes', 'checks', 'sql'].includes(tab)
+    ? button('primary', 'data-download="repair.sql"', 'download', 'Download repair SQL')
+    : button('primary', 'data-review-repair', 'git-compare', 'Review repair');
+  else if (run.status === 'failed_checks') primary = tab === 'checks' ? '' : button('primary', 'data-tab="checks"', 'shield-check', 'Review failed checks');
   // Blocked: recovery is a new investigation. Only a run that was rehearsed has a repair to review.
-  else if (run.status === 'blocked') actions = `${run.review ? `<button class="secondary" data-review-repair>${icon('git-compare')}<span>Review blocked repair</span></button>` : ''}${investigate(true)}`;
-  else actions = investigate(false);
-  $('#header-actions').innerHTML = actions;
+  else if (run.status === 'blocked') { primary = investigate(true); secondary = run.review ? button('secondary', 'data-review-repair', 'git-compare', 'Review blocked repair') : ''; }
+  $('#header-actions').innerHTML = `${secondary}${primary}`;
 }
 
 function olderRunNote(run) {
@@ -479,7 +495,7 @@ function stepsView(run) {
   const s = run?.status, rehearsed = !!run?.review, working = state.busy ? state.busyAction : null;
   const steps = [
     {label: 'Investigate', sub: 'read-only', tab: 'investigation'},
-    {label: 'Rehearse', sub: 'on a copy', tab: rehearsed ? 'changes' : 'investigation'},
+    {label: 'Rehearse', sub: 'test on a copy', tab: rehearsed ? 'changes' : 'investigation'},
     {label: 'Review', sub: 'changes and checks', tab: s === 'failed_checks' ? 'checks' : 'changes'},
     {label: 'Export', sub: 'guarded SQL', tab: 'sql'},
   ];
@@ -495,7 +511,7 @@ function stepsView(run) {
   const items = steps.map((step, i) => {
     const st = plan[i], spinning = (working === 'investigate' && i === 0) || (working === 'rehearse' && i === 1);
     const dot = spinning ? icon('loader-circle', 'spin') : st === 'done' ? icon('check') : st === 'warn' ? '!' : st === 'danger' ? '×' : String(i + 1);
-    const sub = spinning ? (i === 0 ? 'reading evidence…' : 'rehearsing…') : subs[i] || step.sub;
+    const sub = spinning ? (i === 0 ? 'reading evidence…' : 'testing on a copy…') : subs[i] || step.sub;
     const inner = `<span class="step-dot" aria-hidden="true">${dot}</span><span class="step-text"><span class="step-label">${step.label}</span><span class="step-sub">${text(sub)}</span></span><span class="sr-only"> · ${STEP_SR[st]}</span>`;
     const attrs = `class="step ${st}"${st === 'current' ? ' aria-current="step"' : ''}`;
     const target = st === 'upcoming' || (i === 0 && !run) ? '' : i === 3 && st === 'open' ? 'data-review-downloads' : `data-tab="${step.tab}"`;
@@ -527,8 +543,10 @@ function setTab(tab, focusTab = false) {
   if (!TABS.includes(tab)) return;
   const direction = TABS.indexOf(tab) >= TABS.indexOf(state.tab) ? 'forward' : 'back';
   transition(() => {
+    const workspace = $('.workspace'), top = workspace.getBoundingClientRect().top + window.scrollY - $('.tabs').offsetHeight;
     state.tab = tab;
-    renderTabs(); renderPanel(); updateHash();
+    renderTabs(); renderPanel(); renderActions(); updateHash();
+    if (window.scrollY > top) window.scrollTo({top});
     if (!state.selection) renderContext(); // the guide's shortcut follows the tab
     if (focusTab) $(`#tab-${tab}`).focus();
   }, tab === state.tab ? 'swap' : direction);
@@ -544,6 +562,14 @@ function renderPanel() {
   if (state.tab === 'sql' && !recordedMode()) maybeLoadSql();
   markSelection();
   if (!recordedMode() && state.countUp && state.countUp === state.run?.id && state.tab === 'changes') { state.countUp = null; animateCounts(); }
+}
+
+function viewMissing() {
+  const go = () => { const target = $('#missing-events'); target?.scrollIntoView({block: 'center'}); target?.focus({preventScroll: true}); };
+  if (state.tab === 'investigation') { go(); return; }
+  setTab('investigation');
+  const ready = (tries) => { if (state.tab === 'investigation' && $('#missing-events')) go(); else if (tries) setTimeout(() => ready(tries - 1), 50); };
+  ready(12);
 }
 
 function reviewRepair(downloads = false) {
@@ -609,14 +635,14 @@ function callsView(trace) {
 
 function investigationView() {
   const {run} = state;
-  if (!run) return `${incidentOverview()}<p class="small muted">Start the offline investigation at the top right. The script reads the evidence with read-only tools and calls no model.</p>${sourceRecords()}`;
+  if (!run) return `${incidentOverview()}<p class="small muted">Choose Investigate incident at the top right. The offline script reads the evidence with read-only tools and calls no model.</p>${sourceRecords()}`;
   const stopped = run.status === 'stopped';
   const result = `<div class="section-heading"><h2>${stopped?'Evidence needed to continue':run.plan?'Proposed fix':'Investigation result'}</h2>${badge(stopped?'Stopped':'Offline script',stopped)}</div>
     <div class="callout ${stopped?'stop':''}"><strong>${stopped?'No repair exported.':'What the script found'}</strong><br>${text(run.summary)}</div>`;
   const plan = run.plan ? `<div class="row-head"><h3>Proposed cancellations</h3>${badge(`${run.plan.cancellations.length} targets`)}</div>
     <p class="small muted">Keep the first recorded write for each source event. Each target cites both committed writes; select a row to inspect them.${run.status==='proposed'?' Next: rehearse on a disposable copy.':''}</p>${planTable(run.plan)}` : '';
   const stop = stopped ? `<h3>Next useful step</h3><p class="small">Recover the committed-write logs for the missing source events, then investigate again. The source has not been changed.</p>
-    <div class="row-head"><h4>${run.missing_event_ids.length} source events without commit evidence</h4><span class="caption">Select one to find it in the evidence</span></div>
+    <div class="row-head" id="missing-events" tabindex="-1"><h4>${run.missing_event_ids.length} source events without commit evidence</h4><span class="caption">Select one to find it in the evidence</span></div>
     <div class="id-grid">${run.missing_event_ids.map(id=>`<button class="id-chip mono" data-key="event:${escape(id)}" aria-selected="false">${text(id)}</button>`).join('')}</div>` : '';
   return `${result}${plan}${stop}${callsView(run.trace)}<details class="fold"><summary>Incident overview and source records</summary>${incidentOverview()}${sourceRecords()}</details>`;
 }
@@ -698,11 +724,14 @@ function recordedPending() {
   return `<div class="rec-loading">${skeleton(10)}</div>`;
 }
 
-function recBanner(r) {
+function recBanner(r, compact = false, observation = false) {
   const p = r.provenance || {};
   const when = recordedAt(p.recorded_at) || 'time not recorded';
   const source = p.timestamp_source ? ` (${TIMESTAMP_SOURCE[p.timestamp_source] || p.timestamp_source.replaceAll('_', ' ')})` : '';
-  return `<div class="rec-banner">${icon('history')}<div><strong>${text(recordingLabel(r))}</strong><span>${text(`${p.model || 'Model not recorded'} · recorded ${when}${source}`)}</span></div></div>
+  const line = compact
+    ? `<span>${text(`${p.model || 'Model not recorded'} · recorded ${recordedShort(p.recorded_at)}`)}</span>${observation ? `<span>${text(r.review_observation || 'Recorded at rehearsal; not a current export check.')}</span>` : ''}`
+    : `<span>${text(`${p.model || 'Model not recorded'} · recorded ${when}${source}`)}</span>`;
+  return `<div class="rec-banner${compact ? ' compact' : ''}">${icon('history')}<div><strong>${text(recordingLabel(r))}</strong>${line}</div></div>
     ${r.fixture_matches === false || r.fixture_warning ? `<div class="callout stop rec-warning">${icon('triangle-alert')}<span>${text(r.fixture_warning || 'Recording inputs do not match the served case. Current-case citations are disabled.')}</span></div>` : ''}
     ${r.incident_id !== state.incident?.id ? `<div class="callout stop rec-warning">${icon('triangle-alert')}<span>${text(`This recording belongs to another case (${r.incident_id}). Links into the current case are disabled.`)}</span></div>` : ''}`;
 }
@@ -803,31 +832,30 @@ function timelineItems(r) {
 // adds nothing to it, and does not rank either method.
 function compareView(r) {
   const run = state.run;
-  const box = (body, tone = '') => `<section class="compare ${tone}" aria-labelledby="compare-title"><div class="compare-head">${icon('git-compare')}<h3 id="compare-title">Compared with the offline script</h3></div>${body}</section>`;
-  if (r.incident_id !== state.incident?.id) return box('<p class="small muted">Not compared. This recording belongs to another case.</p>');
-  if (!recCitations(r)) return box('<p class="small muted">Not compared. This recording’s inputs differ from the case now, so its order IDs may not refer to the same records.</p>');
-  if (!run || run.incident_id !== r.incident_id) return box(`<p class="small muted">Run the offline script on this case to compare which orders each one would cancel.</p><button class="secondary" data-source="script">${icon('play')}<span>Go to the script run</span></button>`);
+  const box = (tone, verdict, body) => `<details class="compare"><summary><span class="compare-verdict ${tone}">${icon(tone === 'ok' ? 'circle-check' : tone === 'differ' ? 'triangle-alert' : 'git-compare')}<span><span class="compare-label">Compared with the offline script · </span>${verdict}</span></span></summary><div class="compare-body">${body}</div></details>`;
+  if (r.incident_id !== state.incident?.id) return box('', 'not compared', '<p class="small muted">This recording belongs to another case.</p>');
+  if (!recCitations(r)) return box('', 'not compared', '<p class="small muted">This recording’s inputs differ from the case now, so its order IDs may not refer to the same records.</p>');
+  if (!run || run.incident_id !== r.incident_id) return box('', 'no script run yet', `<p class="small muted">Run the offline script on this case to compare which orders each one would cancel.</p><button class="secondary" data-source="script">${icon('play')}<span>Go to the script run</span></button>`);
   const source = `<p class="caption">Compares order IDs with script run ${text(shortId(run.id))} from this server session (${text(statusOf(run)[0].toLowerCase())}). It checks agreement only, not which is better.</p>`;
   const model = r.review?.changes || null, plan = run.plan;
   if (!plan) {
-    if (run.status !== 'stopped') return box(`<p class="small muted">Script run ${text(shortId(run.id))} has no proposal to compare.</p>`);
-    return box(`<p class="compare-verdict ${r.outcome === 'stop' ? 'ok' : 'differ'}">${icon(r.outcome === 'stop' ? 'circle-check' : 'triangle-alert')}<span>${r.outcome === 'stop'
-      ? 'Same outcome: the offline script also stopped without proposing a repair.'
-      : text(`Different outcome: the offline script stopped without proposing a repair${model ? `, while this recording cancelled ${model.length} orders` : ''}.`)}</span></p>${source}`, '');
+    if (run.status !== 'stopped') return box('', 'nothing to compare', `<p class="small muted">Script run ${text(shortId(run.id))} has no proposal to compare.</p>`);
+    return r.outcome === 'stop'
+      ? box('ok', 'same outcome: the script also stopped without proposing a repair', source)
+      : box('differ', text(`different outcome: the script stopped without proposing a repair${model ? `, while this recording cancelled ${model.length} orders` : ''}`), source);
   }
   const ended = {stop: 'stopped', error: 'ended with an error', incomplete: 'did not finish'}[r.outcome] || `ended as ${r.outcome}`;
-  if (!model) return box(`<p class="compare-verdict differ">${icon('triangle-alert')}<span>${text(`Different outcome: this recording ${ended} and has no verified repair. The offline script proposed ${plan.cancellations.length} cancellations.`)}</span></p>${source}`);
+  if (!model) return box('differ', text(`different outcome: this recording ${ended} with no verified repair; the script proposed ${plan.cancellations.length} cancellations`), source);
   const byScript = new Map(plan.cancellations.map(c => [c.order_id, c.duplicate_of]));
   const byModel = new Map(model.map(c => [c.before.id, c.duplicate_of]));
   const both = [...byModel.keys()].filter(id => byScript.has(id));
   const onlyModel = [...byModel.keys()].filter(id => !byScript.has(id)), onlyScript = [...byScript.keys()].filter(id => !byModel.has(id));
   const keepDiffers = both.filter(id => byScript.get(id) !== byModel.get(id));
   if (!onlyModel.length && !onlyScript.length && !keepDiffers.length) {
-    return box(`<p class="compare-verdict ok">${icon('circle-check')}<span>${text(`Same ${both.length} cancellations as the offline script, keeping the same original orders.`)}</span></p>${source}`);
+    return box('ok', text(`same ${both.length} cancellations, keeping the same original orders`), source);
   }
   const ids = (list) => `<span class="compare-ids">${list.map(id => `<span class="mono">${text(compactId(id))}</span>`).join('')}</span>`;
-  return box(`<p class="compare-verdict differ">${icon('triangle-alert')}<span>The recording and the offline script disagree on some orders.</span></p>
-    <div class="metrics">${metric(both.length, 'cancelled by both')}${metric(onlyModel.length, 'only in this recording')}${metric(onlyScript.length, 'only in the script run')}</div>
+  return box('differ', 'disagrees on some orders', `<div class="metrics">${metric(both.length, 'cancelled by both')}${metric(onlyModel.length, 'only in this recording')}${metric(onlyScript.length, 'only in the script run')}</div>
     ${keepDiffers.length ? `<p class="small">${text(keepDiffers.length === 1 ? '1 shared cancellation keeps a different original order.' : `${keepDiffers.length} shared cancellations keep a different original order.`)}</p>` : ''}
     ${onlyModel.length ? `<details class="fold"><summary>Only in this recording · ${onlyModel.length}</summary>${ids(onlyModel)}</details>` : ''}
     ${onlyScript.length ? `<details class="fold"><summary>Only in the script run · ${onlyScript.length}</summary>${ids(onlyScript)}</details>` : ''}
@@ -872,10 +900,12 @@ function recordedInvestigationView() {
     <div class="section-heading"><h2>${heading}</h2>${badge(label, tone)}</div>
     <div class="callout ${tone === 'ok' ? 'success' : 'stop'}"><strong>Outcome</strong><br>${text(recordedConclusion(r, rejectedResults))}</div>
     ${compareView(r)}
-    <div class="metrics four">${metric(r.tool_calls, 'tool results recorded')}${metric(Number.isFinite(r.elapsed_seconds) ? `${Math.round(r.elapsed_seconds)} s` : '—', 'elapsed, as reported')}${metric(usage.available ? fmtNum(usage.total_tokens) : '—', usage.available ? 'tokens, as reported' : 'usage unavailable')}${metric(rejected, 'rejected tool results')}</div>
-    <p class="small muted">${usage.available ? text(`Input ${fmtNum(usage.input_tokens)} (cached ${fmtNum(usage.cached_input_tokens)}) · output ${fmtNum(usage.output_tokens)}, which already includes ${fmtNum(usage.reasoning_tokens)} reasoning · ${fmtNum(usage.response_count)} responses with usage. No cost is shown.`) : 'This recording did not include usage totals.'}
-      The steps below are the recorded tool calls, results and model messages, in order. Nothing here runs again.</p>
-    <details class="fold model-summary"><summary>Model’s final summary · verbatim</summary><p class="tl-text">${text(r.final?.summary || r.summary || 'No summary recorded.')}</p></details>
+    <div class="metrics">${metric(r.tool_calls, 'tool results recorded')}${metric(Number.isFinite(r.elapsed_seconds) ? `${Math.round(r.elapsed_seconds)} s` : '—', 'elapsed, as reported')}${metric(rejected, 'rejected tool results')}</div>
+    <div class="folds">
+      <details class="fold"><summary>Usage${usage.available ? text(` · ${fmtNum(usage.total_tokens)} tokens, as reported`) : ' · not recorded'}</summary><p class="small muted">${usage.available ? text(`Input ${fmtNum(usage.input_tokens)} (cached ${fmtNum(usage.cached_input_tokens)}) · output ${fmtNum(usage.output_tokens)}, which already includes ${fmtNum(usage.reasoning_tokens)} reasoning · ${fmtNum(usage.response_count)} responses with usage. No cost is shown.`) : 'This recording did not include usage totals.'}</p></details>
+      <details class="fold model-summary"><summary>Model’s final summary · verbatim</summary><p class="tl-text">${text(r.final?.summary || r.summary || 'No summary recorded.')}</p></details>
+    </div>
+    <h3 class="tl-title">Recorded steps <span class="caption">in order · nothing here runs again</span></h3>
     <div class="tl-tools"><div class="segmented" role="group" aria-label="Filter steps">${filters.map(([key, name]) => `<button data-step-filter="${key}" aria-pressed="${state.stepFilter === key}">${text(name)}</button>`).join('')}</div><button class="link small" data-expand-steps>Expand all</button></div>
     <ol class="timeline">${timelineItems(r)}</ol>`;
 }
@@ -883,15 +913,14 @@ function recordedInvestigationView() {
 function recordedChangesView() {
   const r = state.recording;
   if (!r) return recordedPending();
-  if (!r.review) return `${recBanner(r)}${r.outcome === 'stop'
+  if (!r.review) return `${recBanner(r, true)}${r.outcome === 'stop'
     ? emptyState('No repair was recorded', 'The model stopped instead of proposing a repair, so this recording has no rehearsal review.', 'ban')
     : emptyState('No verified repair in this recording', `This attempt ended as ${r.outcome}; no verified rehearsal review was recorded.`, 'circle-x')}`;
-  const review = r.review, passed = review.checks.filter(c => c.passed).length;
-  return `${recBanner(r)}
+  const review = r.review;
+  return `${recBanner(r, true, true)}
     <div class="section-heading"><h2>Recorded repair review</h2>${badge('Recorded at rehearsal')}</div>
-    <div class="callout">${text(r.review_observation || 'Recorded at rehearsal; not a current export check.')}</div>
-    <div class="metrics four">${metric(`${review.before_active} → ${review.after_active}`,'active records')}${metric(review.cancellations,'duplicate orders cancelled')}${metric(`${review.checkout_preserved} / ${review.checkout_total}`,'later checkout purchases intact')}${metric(`${passed} / ${review.checks.length}`,'checks passed at recorded rehearsal')}</div>
-    <ul class="assurance" aria-label="Recording boundaries"><li>${text(recordingLabel(r))}</li><li>Historical review data</li><li>No rehearsal, SQL or downloads from recordings</li></ul>
+    ${repairFlow(review, {recorded: true})}
+    <ul class="assurance" aria-label="Recording boundaries"><li>Historical review data</li><li>No rehearsal, SQL or downloads from recordings</li></ul>
     ${diffView(review)}
     <p class="caption">Read-only history. To produce exportable SQL, run the offline script and rehearse it on a disposable copy.</p>`;
 }
@@ -899,9 +928,9 @@ function recordedChangesView() {
 function recordedChecksView() {
   const r = state.recording;
   if (!r) return recordedPending();
-  if (!r.review) return `${recBanner(r)}${emptyState('No checks in this recording', 'Checks run only when a rehearsal is recorded. This attempt did not record one.', 'shield-check')}`;
+  if (!r.review) return `${recBanner(r, true)}${emptyState('No checks in this recording', 'Checks run only when a rehearsal is recorded. This attempt did not record one.', 'shield-check')}`;
   const review = r.review, passed = review.checks.filter(c => c.passed).length;
-  return `${recBanner(r)}
+  return `${recBanner(r, true, true)}
     <div class="section-heading"><h2>Recorded operational checks</h2>${badge(`${passed} / ${review.checks.length} passed`, !review.passed)}</div>
     <div class="status-cards">
       <div class="status-card ${review.passed ? 'ok' : 'danger'}"><span class="eyebrow">At recorded rehearsal</span><strong>${passed} / ${review.checks.length} checks passed</strong><span class="caption">${text(r.review_observation || '')}</span></div>
@@ -911,7 +940,7 @@ function recordedChecksView() {
 }
 
 function recordedSqlView() {
-  return `${state.recording ? recBanner(state.recording) : ''}${emptyState('No SQL for recorded runs', 'Recordings are read-only history with no downloads. Guarded SQL comes only from a current offline rehearsal, which rechecks freshness first.', 'database')}`;
+  return `${state.recording ? recBanner(state.recording, true) : ''}${emptyState('No SQL for recorded runs', 'Recordings are read-only history with no downloads. Guarded SQL comes only from a current offline rehearsal, which rechecks freshness first.', 'database')}`;
 }
 
 /* ---------- Evidence ---------- */
@@ -1088,13 +1117,39 @@ function reviewSummary(run, review) {
   const failed = review.checks.filter(c => !c.passed);
   return `<div class="section-heading"><h2>${ready?'Rehearsal result':'Export unavailable'}</h2>${badge(ready?'Rehearsal snapshot':statusOf(run)[0],!ready)}</div>
     ${ready?'':`<div class="callout stop">${text(run.summary)}</div>`}
-    <div class="metrics four">${metric(`${review.before_active} → ${review.after_active}`,'active records',{from:review.before_active,to:review.after_active,prefix:`${review.before_active} → `})}${metric(review.cancellations,'duplicate orders cancelled',{from:0,to:review.cancellations})}${metric(`${review.checkout_preserved} / ${review.checkout_total}`,'later checkout purchases intact',{from:0,to:review.checkout_preserved,suffix:` / ${review.checkout_total}`})}${metric(`${passed} / ${review.checks.length}`,'independent checks passed',{from:0,to:passed,suffix:` / ${review.checks.length}`})}</div>
+    ${repairFlow(review, {run})}
     <ul class="assurance" aria-label="Rehearsal observations">
       ${run.status==='blocked'?'<li class="fail">Export is blocked; see the reason above</li>':source?`<li class="${source.passed?'':'fail'}">${source.passed?'At rehearsal: source matched the snapshot':'At rehearsal: source differed from the snapshot'}</li>`:''}
       <li>At rehearsal: ${text(review.untargeted_preserved)} untargeted records matched the source</li>
     </ul>
-    <p class="small muted">Counts, changes and checks describe the rehearsal snapshot. Export is rechecked on every download.</p>
+    <p class="caption">Describes the rehearsal snapshot. Export is rechecked on every download; nothing here applies the package to the source.</p>
     ${failed.length?`<div class="failed"><h3>Failed checks at rehearsal</h3><ul>${failed.map(c=>`<li><span class="group">${text(groupOf(c.name))}</span><strong>${text(c.name.replaceAll('_',' '))}</strong><div class="check-detail">${text(c.detail)}</div></li>`).join('')}</ul></div>`:''}`;
+}
+
+// Source → copy → checks → package, with the rehearsal's own numbers. The source node states only what
+// the rehearsal observed (its snapshot check); the package node reflects the server's export state.
+function repairFlow(review, {run = null, recorded = false} = {}) {
+  const passed = review.checks.filter(c => c.passed).length, total = review.checks.length;
+  const sourceCheck = review.checks.find(c => c.name === 'source_snapshot_unchanged');
+  const sourceNote = sourceCheck ? (sourceCheck.passed ? 'unchanged at rehearsal' : 'differed at rehearsal') : 'read-only here';
+  const count = (attrs) => recorded ? '' : ` data-count-from="${attrs.from}" data-count-to="${attrs.to}" data-count-prefix="${escape(attrs.prefix || '')}" data-count-suffix="${escape(attrs.suffix || '')}"`;
+  const pkg = recorded ? ['No repair package', '—', 'recordings have no downloads', '']
+    : run?.status === 'ready_for_review' ? ['Repair package', `${run.downloads.length} files`, 'for human review · rechecked on download', 'ok']
+    : run?.status === 'blocked' ? ['Repair package', 'Blocked', 'export refused', 'warn']
+    : ['Repair package', 'Unavailable', 'checks failed at rehearsal', 'danger'];
+  const node = (cls, label, big, sub, attrs = '') => `<li class="flow-node ${cls}"><span class="flow-label">${text(label)}</span><strong${attrs}>${text(big)}</strong><span class="flow-sub">${sub}</span></li>`;
+  return `<figure class="flow" aria-label="${recorded ? 'Recorded repair path' : 'Repair path'}"><ol>
+      ${node('source', 'Source database', `${review.before_active} active`, text(sourceNote))}
+      <li class="flow-link labelled" aria-hidden="true"><span>copy snapshot</span></li>
+      ${node('copy', recorded ? 'Rehearsal copy · recorded' : 'Disposable rehearsal copy', `${review.before_active} → ${review.after_active}`,
+        `<strong>${text(review.cancellations)}</strong> cancelled · ${text(`${review.checkout_preserved} / ${review.checkout_total}`)} later purchases intact`,
+        count({from: review.before_active, to: review.after_active, prefix: `${review.before_active} → `}))}
+      <li class="flow-link" aria-hidden="true"></li>
+      ${node(review.passed ? 'ok' : 'danger', 'Independent checks', `${passed} / ${total}`, recorded ? 'passed at recorded rehearsal' : 'passed at rehearsal',
+        count({from: 0, to: passed, suffix: ` / ${total}`}))}
+      <li class="flow-link" aria-hidden="true"></li>
+      ${node(`pkg ${pkg[3]}`, pkg[0], pkg[1], text(pkg[2]))}
+    </ol></figure>`;
 }
 
 function diffView(review) {
@@ -1109,9 +1164,9 @@ function diffView(review) {
     byProduct.set(change.before.sku, entry);
   }
   return `<section class="diff" aria-labelledby="diff-title">
-    <div class="diff-head"><div><span class="eyebrow">Rehearsal diff</span><h3 id="diff-title">Source snapshot → disposable copy</h3></div>
-      <div class="diff-counts"><span class="mod">~${review.changes.length} orders</span><span class="mod">~${stockChanged.length} products</span><span class="same">=${review.preserved_orders.length} orders unchanged</span></div></div>
+    <div class="diff-head"><h3 id="diff-title">Changes on the disposable copy</h3></div>
     <div class="diff-tools">
+      <div class="diff-counts"><span class="mod">~${review.changes.length} orders</span><span class="mod">~${stockChanged.length} products</span><span class="same">=${review.preserved_orders.length} orders unchanged</span></div>
       <label class="search">${icon('search')}<span class="sr-only">Search changed records</span><input id="change-search" type="search" placeholder="Search order, customer or product" value="${escape(state.changeQuery)}" autocomplete="off" spellcheck="false"><kbd aria-hidden="true">/</kbd></label>
       <label class="filter">Product <select id="change-filter"><option value="">All (${review.changes.length})</option>${skus.map(sku=>`<option value="${escape(sku)}" ${sku===state.filter?'selected':''}>${text(sku)} (${review.changes.filter(c=>c.before.sku===sku).length})</option>`).join('')}</select></label>
     </div>
@@ -1363,11 +1418,11 @@ function eventContext(id) {
 // The next step for the case on screen, from the server's run status. [eyebrow, title, body, cta, tone]
 function nextStep(run) {
   const review = run?.review, total = review?.checks.length, passed = review?.checks.filter(c => c.passed).length;
-  if (state.busy) return ['Working', state.busyAction === 'rehearse' ? 'Rehearsing on a copy…' : 'Reading the evidence…',
+  if (state.busy) return ['Working', state.busyAction === 'rehearse' ? 'Testing the repair on a copy…' : 'Reading the evidence…',
     state.busyAction === 'rehearse' ? 'The proposal is applied to a disposable copy and checked. The source database is not touched.' : 'The offline script reads the evidence files and order records with read-only tools.', null];
-  if (!run) return ['Next step', 'Start the offline investigation', `The script reads the ${state.incident.artifacts.length} evidence files and the order records with read-only tools, then proposes which repeated orders to cancel. It calls no model.`, 'investigate'];
+  if (!run) return ['Next step', 'Investigate the incident', `The script reads the ${state.incident.artifacts.length} evidence files and the order records with read-only tools, then proposes which repeated orders to cancel. It calls no model.`, 'investigate'];
   switch (run.status) {
-    case 'proposed': return ['Next step', 'Rehearse on a disposable copy', `The script proposes ${run.plan.cancellations.length} cancellations, each citing its evidence. Rehearsal applies them to a copy and runs independent checks.`, 'rehearse'];
+    case 'proposed': return ['Next step', 'Test the repair on a copy', `The script proposes ${run.plan.cancellations.length} cancellations, each citing its evidence. Rehearsal applies them to a copy and runs independent checks.`, 'rehearse'];
     case 'stopped': return ['Stopped', 'Evidence is missing', `${run.missing_event_ids?.length ?? 'Some'} source events have no commit record, so the script stopped instead of guessing. Nothing was changed.`, null, 'warn'];
     case 'ready_for_review': return ['Next step', 'Review, then export', `Check the ${review.cancellations} cancellations in Changes and the ${passed} / ${total} checks in Checks. Each download rechecks that the source and evidence are unchanged.`, 'review'];
     case 'failed_checks': return ['Checks failed', 'Nothing can be exported', `${total - passed} of ${total} checks failed at rehearsal. Open Checks to see which.`, 'checks', 'warn'];
@@ -1432,8 +1487,8 @@ function renderWelcome() {
   const first = state.cases[0];
   const cta = state.incident && state.incident.id !== first.id ? `<button class="secondary" data-case="${escape(first.id)}">${icon('folder-open')}<span>Go to case 1</span></button>` : '';
   box.hidden = false;
-  box.innerHTML = `<div class="welcome-text"><strong>Recovery Room investigates a retried data import.</strong>
-    <p>It finds orders the retry wrote twice, proposes which to cancel with cited evidence, rehearses the fix on a disposable copy, and exports guarded SQL for a person to review. The four cases are synthetic. The offline script calls no model; recorded Meta model runs are read-only history.</p></div>
+  box.innerHTML = `<div class="welcome-text"><p><strong>Recovery Room investigates retried imports.</strong> <span>Synthetic cases · offline script, no model · recordings are read-only.</span></p>
+    <details><summary>How it works</summary><p>It finds orders the retry wrote twice, proposes which to cancel with cited evidence, tests the fix on a disposable copy, and exports guarded SQL for a person to review. The source database is never changed.</p></details></div>
     <div class="welcome-actions">${cta}<button class="icon-button" data-dismiss-welcome aria-label="Dismiss introduction">${icon('x')}</button></div>`;
 }
 
@@ -1578,8 +1633,8 @@ async function fetchArtifact(name) {
   return response;
 }
 
-async function download(name) {
-  const runId = state.run.id, button = $(`[data-download="${name}"]`);
+async function download(name, button = $(`[data-download="${name}"]`)) {
+  const runId = state.run.id;
   button?.setAttribute?.('aria-busy', 'true');
   try {
     const response = await fetchArtifact(name);
@@ -1678,7 +1733,7 @@ function paletteCommands(query) {
   // Offline actions exist only in script mode; recordings are never rehearsed, exported or rechecked.
   if (state.incident && !state.busy && !recordedMode()) {
     add('Actions', run ? 'New offline investigation' : 'Start offline investigation', 'Offline script · no model', run ? 'refresh-cw' : 'play', () => act('investigate'), 'investigate run start');
-    if (run?.status === 'proposed') add('Actions', 'Rehearse on a disposable copy', 'Copy only', 'flask-conical', () => act('rehearse'), 'rehearse');
+    if (run?.status === 'proposed') add('Actions', 'Test repair on a copy', 'Rehearsal · copy only', 'flask-conical', () => act('rehearse'), 'rehearse test');
     if (run?.status === 'ready_for_review') {
       add('Actions', 'Recheck for export', 'Freshness check', 'refresh-cw', () => { setTab('checks'); return recheckExport(); }, 'recheck freshness');
       for (const name of run.downloads) add('Actions', `Download ${name}`, 'Rechecks freshness first', 'download', () => download(name), 'export artifact');
@@ -1768,9 +1823,10 @@ document.addEventListener('click', event => {
   if (d.run && d.run !== state.run?.id && !state.busy) task = loadRun(d.run);
   if (d.tab) setTab(d.tab);
   if (d.reviewRepair !== undefined) reviewRepair();
+  if (d.viewMissing !== undefined) viewMissing();
   if (d.reviewDownloads !== undefined) reviewRepair(true);
   if (d.action) task = act(d.action);
-  if (d.download) task = download(d.download);
+  if (d.download) task = download(d.download, el);
   if (d.file) { Object.assign(state.ev, {name: d.file, activeRef: null}); renderPanel(); }
   if (d.citedOnly !== undefined) { state.ev.citedOnly = !state.ev.citedOnly; el.setAttribute('aria-pressed', String(state.ev.citedOnly)); renderEvidence(); }
   if (d.openRef) openInEvidence(d.openRef);
@@ -1868,7 +1924,7 @@ $('#palette').addEventListener('close', () => { if (!palette.ran && palette.retu
 window.addEventListener('resize', () => { positionTabIndicator(); if (state.nav && !isNarrow()) setNav(false); });
 
 api('/api/incidents').then(async data => {
-  $('#palette-key').textContent = paletteKeyLabel();
+  document.querySelectorAll('.palette-key').forEach(k => { k.textContent = paletteKeyLabel(); });
   state.cases = data.incidents;
   state.guide = !isNarrow() && guidePreferred();
   // Restore each case's last recorded status from this server session, and each case's recording list

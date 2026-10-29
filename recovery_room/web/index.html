@@ -63,6 +63,7 @@ SOFTWARE.
   <div class="app">
     <aside id="sidebar" class="sidebar" aria-label="Incidents">
       <a class="brand" href="/" aria-label="Recovery Room home"><span class="brand-mark" aria-hidden="true">rr</span><span>Recovery Room</span></a>
+      <button class="palette-trigger side-search" data-palette aria-haspopup="dialog" aria-controls="palette" aria-label="Search or jump to"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-search"></use></svg><span>Search or jump to…</span><kbd class="palette-key">Ctrl K</kbd></button>
       <div class="side-label"><span id="cases-label">Incidents</span> <span id="case-count">…</span></div>
       <nav id="cases" aria-label="Synthetic incidents"></nav>
       <div id="run-card" class="run-card" hidden></div>
@@ -74,9 +75,7 @@ SOFTWARE.
     <div class="main">
       <header class="topbar">
         <button id="nav-toggle" class="nav-toggle" data-nav-toggle aria-controls="sidebar" aria-expanded="false"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-menu"></use></svg><span id="nav-toggle-label">Cases</span></button>
-        <span class="crumbs">Synthetic incidents <span class="slash">/</span> <span id="crumb-case">Loading…</span></span>
-        <button class="palette-trigger" data-palette aria-haspopup="dialog" aria-controls="palette" aria-label="Search or jump to"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-search"></use></svg><span>Search or jump to…</span><kbd id="palette-key">Ctrl K</kbd></button>
-        <span class="mode" id="mode-indicator">Offline demo · No model</span>
+        <button class="palette-trigger" data-palette aria-haspopup="dialog" aria-controls="palette" aria-label="Search or jump to"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-search"></use></svg><span>Search or jump to…</span><kbd class="palette-key">Ctrl K</kbd></button>
       </header>
 
       <div id="welcome" class="welcome" hidden></div>
@@ -88,7 +87,10 @@ SOFTWARE.
           <button class="link small guide-toggle" data-open-guide aria-controls="context" aria-expanded="false"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-book-open"></use></svg><span>Guide</span></button>
           <details id="run-details" class="run-details" hidden><summary>Run details</summary><div id="run-details-body"></div></details>
         </div>
-        <div id="header-actions" class="head-actions"></div>
+        <div class="head-side">
+          <span class="mode" id="mode-indicator">Offline demo · No model</span>
+          <div id="header-actions" class="head-actions"></div>
+        </div>
         <div class="flow-row">
           <div id="incident-meta" class="meta"></div>
           <div id="source-switch" class="source-switch" role="group" aria-label="Run source"></div>
@@ -106,7 +108,7 @@ SOFTWARE.
         <span class="tab-ind" aria-hidden="true"></span>
       </nav>
 
-      <div class="workspace">
+      <div class="workspace ctx-closed">
         <main id="content" class="panel" role="tabpanel" tabindex="-1" aria-labelledby="tab-investigation" aria-live="polite">
           <div class="skeleton-stack" aria-hidden="true"><span class="skeleton"></span><span class="skeleton"></span><span class="skeleton"></span><span class="skeleton"></span><span class="skeleton"></span><span class="skeleton"></span></div>
           <p class="sr-only">Reading the supplied local fixture…</p>
