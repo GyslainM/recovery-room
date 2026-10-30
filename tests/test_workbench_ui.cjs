@@ -124,7 +124,7 @@ test('an unknown failed check remains visible rather than being dropped by group
   app.state.run.review.checks.push({name: 'additional_business_rule', passed: false, detail: 'Observed failure'});
   const rendered = app.reviewView();
   assert.match(rendered, /Other checks/);
-  assert.match(rendered, /additional business rule/);
+  assert.match(rendered, /Additional business rule/);
   assert.match(rendered, /Observed failure/);
 });
 

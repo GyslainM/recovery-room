@@ -299,9 +299,9 @@ pre{max-height:280px;overflow:auto;margin:8px 0;padding:10px 12px;border-radius:
 /* Tables */
 .scroll-table{position:relative;max-height:none;overflow:auto;border:0;border-top:1px solid var(--line);border-bottom:1px solid var(--line);border-radius:0;background:transparent}
 table{width:100%;border-collapse:collapse;font-size:13px}
-th,td{padding:9px 10px;text-align:left;border-bottom:1px solid var(--line);vertical-align:middle}
+th,td{padding:8px 10px;text-align:left;border-bottom:1px solid var(--line);vertical-align:middle}
 th{position:sticky;top:0;z-index:1;background:var(--surface);font-size:12px;font-weight:500;color:var(--muted)}
-.purchase-cell{display:flex;flex-direction:column;gap:3px;min-width:150px}
+.purchase-cell{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 8px;min-width:150px}
 .purchase-cell strong{font-weight:500;color:var(--ink)}
 .purchase-cell>span{font-size:12px;color:var(--muted);white-space:nowrap}
 .id-link{cursor:pointer;color:var(--accent-ink);padding:2px 0;white-space:nowrap;text-decoration:underline;text-decoration-color:var(--accent-line);text-underline-offset:3px}
@@ -319,7 +319,7 @@ tr.selected td{background:var(--accent-soft)}
 .after{color:var(--accent-ink)}
 .cancelled{color:var(--warn-ink)}
 .positive{color:var(--accent-ink);font-weight:600}
-.citations{display:inline-flex;flex-direction:column;gap:5px;align-items:flex-start;white-space:nowrap}
+.citations{display:inline-flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline;white-space:nowrap}
 .citation{padding:0;color:var(--accent-ink);font:12px var(--mono);text-decoration:underline;text-decoration-color:var(--accent-line);text-underline-offset:3px}
 .citation:hover{text-decoration-color:var(--accent)}
 
@@ -449,6 +449,11 @@ mark{background:var(--warn-soft);color:var(--warn-ink);border-radius:2px;box-sha
 .check-icon{color:var(--accent-ink);font-weight:600}
 .check-icon.cancelled{color:var(--danger-ink)}
 .check-detail{margin-top:2px;font-size:12.5px;color:var(--faint)}
+@media(min-width:901px){
+  .checks li{grid-template-columns:16px minmax(180px,250px) minmax(0,1fr);align-items:baseline;padding:7px 8px}
+  .checks li>div{display:contents}
+  .checks li .check-detail{margin-top:0}
+}
 
 /* SQL */
 .sql-head{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-end;gap:10px;margin-bottom:6px}
@@ -487,6 +492,12 @@ table.fields td.after{background:var(--accent-soft);color:var(--accent-ink)}
 .rec-banner.compact{align-items:center;padding:6px 12px}
 .rec-banner.compact>div{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 10px}
 .rec-banner.compact strong,.rec-banner.compact span{display:inline}
+/* Wide screens: the header already shows the recording label, model and date on every tab. */
+@media(min-width:901px){ .rec-banner{display:none} }
+.rec-observation{display:flex;align-items:center;gap:7px;margin:-4px 0 14px;font-size:12.5px;color:var(--muted)}
+.rec-observation .icon{flex:none;width:14px;height:14px;color:var(--rec)}
+.run-numbers{margin:14px 0 18px}
+.fold-note{margin:8px 0}
 .rec-warning{display:flex;align-items:flex-start;gap:8px}
 .rec-warning .icon{flex:none;margin-top:2px;color:var(--warn-ink)}
 .rec-loading{padding:8px 0}
@@ -663,6 +674,15 @@ details.tl-card>.tl-head:hover{background:var(--hover)}
 .impact-dot{width:6px;height:6px;background:var(--chart-preserved);display:inline-block}
 .impact-dot.changed{background:var(--warn)}
 .outcome-path{display:flex;flex-wrap:wrap;margin:4px 0 0;padding:0;list-style:none}
+/* The content column adapts to its own width (the details column and the sidebar both narrow it). */
+#content{container:panel / inline-size}
+@container panel (max-width:760px){
+  .outcome-path{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 16px}
+  .path-step,.path-step+.path-step{min-width:0;padding-left:0}
+  .path-step+.path-step:before{display:none}
+  .status-cards{grid-template-columns:minmax(0,1fr)}
+  .outcome-numbers{gap:16px}
+}
 .path-step{position:relative;flex:1 1 0;min-width:150px;display:flex;align-items:flex-start;gap:8px;padding:8px 12px 8px 0}
 .path-step+.path-step{padding-left:24px}
 .path-step+.path-step:before{content:'';position:absolute;left:6px;top:15px;width:7px;height:7px;border-top:1.5px solid var(--line-2);border-right:1.5px solid var(--line-2);transform:rotate(45deg)}

@@ -29,6 +29,7 @@ const icon = (name, cls = '') => `<svg class="icon ${cls}" aria-hidden="true" fo
 const skeleton = (lines = 6) => `<div class="skeleton-stack" aria-hidden="true">${'<span class="skeleton"></span>'.repeat(lines)}</div><span class="sr-only">Loading</span>`;
 const table = (headers, rows, rowAttrs = []) => `<div class="scroll-table"><table><thead><tr>${headers.map(h=>`<th scope="col">${h}</th>`).join('')}</tr></thead><tbody>${rows.map((row,i)=>`<tr ${rowAttrs[i]||''}>${row.map(c=>`<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
 const pad = (n) => String(n).padStart(2, '0');
+const fmtBytes = (n) => !Number.isFinite(n) ? '' : n < 1024 ? `${n} B` : `${(n / 1024).toFixed(n < 10240 ? 1 : 0)} KB`;
 const time = (d) => d ? d.toLocaleTimeString() : '';
 
 // Labels for run states reported by the server; unknown states are shown as-is.
@@ -133,6 +134,8 @@ const modeInfo = (mode) => MODE_INFO[mode] || {
   method: 'Reported by the server. This page makes no offline or no-model claim for this mode.', unverified: true,
 };
 const modeLabel = (mode) => modeInfo(mode).long;
+// Check names read as sentences: database_integrity → Database integrity.
+const checkName = (name) => { const words = String(name).replaceAll('_', ' '); return words.charAt(0).toUpperCase() + words.slice(1); };
 const groupOf = (name) => (CHECK_GROUPS.find(([, names]) => names.includes(name)) || ['Other checks'])[0];
 const lineOf = (ref) => Number(String(ref).split(':L')[1]);
 const fileOf = (ref) => String(ref).split(':L')[0];
@@ -583,7 +586,7 @@ const emptyState = (title, body, iconName = 'info') => `<div class="empty">${ico
 function noReview(run, what) {
   if (!run) return emptyState(`No ${what} yet`, 'Start the offline investigation, then rehearse its proposal on a disposable copy.', 'play');
   if (run.status === 'stopped') return emptyState('No repair was proposed', 'The investigation stopped because evidence is missing. Nothing was changed.', 'ban');
-  if (run.status === 'blocked') return `<div class="section-heading"><h2>Rehearsal refused</h2>${badge('Export blocked', true)}</div>
+  if (run.status === 'blocked') return `<div class="section-heading"><h2>Rehearsal refused</h2></div>
     <div class="callout stop">${text(run.summary)}</div>
     <p class="small muted">Nothing was rehearsed or changed. Start a new offline investigation from the header to work from the current source and evidence.</p>`;
   return emptyState('Not rehearsed yet', `Rehearse the proposal on a disposable copy to see ${what}.`, 'flask-conical');
@@ -612,13 +615,11 @@ function sourceRecords() {
   return `<details class="fold"><summary>Source inventory, incident note and schema</summary>
       <h3>Current inventory · source database</h3>${table(['Product','Available stock'],incident.products.map(p=>[text(p.name),`<span class="num">${text(p.on_hand)}</span>`]))}
       <p class="small">${text(incident.note.lines.map(l=>l.text).join('\n'))}</p><pre>${text(incident.schema.map(s=>s.sql).join('\n\n'))}</pre></details>
-    <div class="row-head"><h3>Source orders</h3><span class="caption">${incident.orders.length} records · select an order to inspect it</span></div>
-    ${orderTable(incident.orders)}`;
+    <details class="fold"><summary>Source orders · ${incident.orders.length} records</summary><p class="caption fold-note">Select an order to inspect it.</p>${orderTable(incident.orders)}</details>`;
 }
 
 function callsView(trace) {
-  return `<div class="row-head"><h3>${trace.length} local function calls · deterministic script</h3><span class="caption">Actual calls, in order</span></div>
-    <p class="small muted">The steps below are actual local function calls made by the deterministic script. They are not model reasoning or a replay of a model run.</p>
+  return `<div class="row-head"><h3>Script trace</h3><span class="caption">${trace.length} local function calls, in order · not model reasoning or a replay of a model run</span></div>
     <ol class="calls">${trace.map((step,i)=>{
       const a = step.arguments || {};
       const arg = a.name ? `${a.name}${a.start_line ? ` · from L${a.start_line}` : ''}` : step.tool === 'query_database' ? (a.sql || '') : 'no arguments';
@@ -778,10 +779,10 @@ function moveRecon(svg, key) {
 
 function investigationView() {
   const {run} = state;
-  if (!run) return `${incidentOverview()}${reconstructionView()}<p class="small muted">Choose Investigate incident at the top right. The offline script reads the evidence with read-only tools and calls no model.</p>${sourceRecords()}`;
+  if (!run) return `${incidentOverview()}${reconstructionView()}${sourceRecords()}`;
   const stopped = run.status === 'stopped';
-  const result = `<div class="section-heading"><h2>${stopped?'Evidence needed to continue':run.plan?'Proposed fix':'Investigation result'}</h2>${badge(stopped?'Stopped':'Offline script',stopped)}</div>
-    <div class="callout ${stopped?'stop':''}"><strong>${stopped?'No repair exported.':'What the script found'}</strong><br>${text(run.summary)}</div>`;
+  const result = `<div class="section-heading"><h2>${stopped?'Evidence needed to continue':run.plan?'Proposed fix':'Investigation result'}</h2></div>
+    ${stopped || !run.plan ? `<div class="callout ${stopped?'stop':''}"><strong>${stopped?'No repair exported.':'What the script found'}</strong><br>${text(run.summary)}</div>` : ''}`;
   const plan = run.plan ? `<div class="row-head"><h3>Proposed cancellations</h3>${badge(`${run.plan.cancellations.length} targets`)}</div>
     <p class="small muted">Keep the first recorded write for each source event. Each target cites both committed writes; select a row to inspect them.${run.status==='proposed'?' Next: rehearse on a disposable copy.':''}</p>${planTable(run.plan)}` : '';
   const stop = stopped ? `<h3>Next useful step</h3><p class="small">Recover the committed-write logs for the missing source events, then investigate again. The source has not been changed.</p>
@@ -875,9 +876,10 @@ function recBanner(r, compact = false, observation = false) {
   const when = recordedAt(p.recorded_at) || 'time not recorded';
   const source = p.timestamp_source ? ` (${TIMESTAMP_SOURCE[p.timestamp_source] || p.timestamp_source.replaceAll('_', ' ')})` : '';
   const line = compact
-    ? `<span>${text(`${p.model || 'Model not recorded'} · recorded ${recordedShort(p.recorded_at)}`)}</span>${observation ? `<span>${text(r.review_observation || 'Recorded at rehearsal; not a current export check.')}</span>` : ''}`
+    ? `<span>${text(`${p.model || 'Model not recorded'} · recorded ${recordedShort(p.recorded_at)}`)}</span>`
     : `<span>${text(`${p.model || 'Model not recorded'} · recorded ${when}${source}`)}</span>`;
   return `<div class="rec-banner${compact ? ' compact' : ''}">${icon('history')}<div><strong>${text(recordingLabel(r))}</strong>${line}</div></div>
+    ${observation ? `<p class="rec-observation">${icon('history')}<span>${text(r.review_observation || 'Recorded at rehearsal; not a current export check.')}</span></p>` : ''}
     ${r.fixture_matches === false || r.fixture_warning ? `<div class="callout stop rec-warning">${icon('triangle-alert')}<span>${text(r.fixture_warning || 'Recording inputs do not match the served case. Current-case citations are disabled.')}</span></div>` : ''}
     ${r.incident_id !== state.incident?.id ? `<div class="callout stop rec-warning">${icon('triangle-alert')}<span>${text(`This recording belongs to another case (${r.incident_id}). Links into the current case are disabled.`)}</span></div>` : ''}`;
 }
@@ -916,7 +918,7 @@ function resultView(call, res) {
   if (call.name === 'rehearse_repair' && v && Array.isArray(v.checks)) {
     const ok = v.checks.filter(c => c.passed).length;
     return `<h4>Rehearsal result</h4><p class="small">${v.passed ? 'Passed' : 'Did not pass'} · ${ok}/${v.checks.length} checks${v.status ? ` · ${text(v.status)}` : ''}</p>
-      <ul class="tl-checks">${v.checks.map(c => `<li class="${c.passed ? '' : 'fail'}">${icon(c.passed ? 'check' : 'x')}<span>${text(c.name.replaceAll('_', ' '))}</span></li>`).join('')}</ul>`;
+      <ul class="tl-checks">${v.checks.map(c => `<li class="${c.passed ? '' : 'fail'}">${icon(c.passed ? 'check' : 'x')}<span>${text(checkName(c.name))}</span></li>`).join('')}</ul>`;
   }
   if (call.name === 'read_artifact' && v && Array.isArray(v.lines)) {
     const shown = v.lines.slice(0, 12);
@@ -1043,11 +1045,11 @@ function recordedInvestigationView() {
   const shown = r.steps.filter(s => !(s.kind === 'tool_result' && callIds.has(s.call_id))).length;
   const filters = [['all', `All · ${shown}`], ['tools', `Tool calls · ${shown - messages}`], ['messages', `Model messages · ${messages}`], ['rejected', `Rejected · ${rejected}`]];
   return `${recBanner(r)}
-    <div class="section-heading"><h2>${heading}</h2>${badge(label, tone)}</div>
+    <div class="section-heading"><h2>${heading}</h2></div>
     <div class="callout ${tone === 'ok' ? 'success' : 'stop'}"><strong>Outcome</strong><br>${text(recordedConclusion(r, rejectedResults))}</div>
     ${compareView(r)}
     ${recCitations(r) && r.review ? reconstructionView(r.review.changes.map(c => ({order_id: c.before.id, duplicate_of: c.duplicate_of})), {recorded: true}) : ''}
-    <div class="metrics">${metric(r.tool_calls, 'tool results recorded')}${metric(Number.isFinite(r.elapsed_seconds) ? `${Math.round(r.elapsed_seconds)} s` : '—', 'elapsed, as reported')}${metric(rejected, 'rejected tool results')}</div>
+    <div class="incident-facts run-numbers"><span><strong>${text(Number.isFinite(r.elapsed_seconds) ? `${Math.round(r.elapsed_seconds)} s` : '—')}</strong> elapsed, as reported</span><span><strong>${text(rejected)}</strong> rejected tool ${rejected === 1 ? 'result' : 'results'}</span><span><strong>${text(messages)}</strong> model ${messages === 1 ? 'message' : 'messages'}</span></div>
     <div class="folds">
       <details class="fold"><summary>Usage${usage.available ? text(` · ${fmtNum(usage.total_tokens)} tokens, as reported`) : ' · not recorded'}</summary><p class="small muted">${usage.available ? text(`Input ${fmtNum(usage.input_tokens)} (cached ${fmtNum(usage.cached_input_tokens)}) · output ${fmtNum(usage.output_tokens)}, which already includes ${fmtNum(usage.reasoning_tokens)} reasoning · ${fmtNum(usage.response_count)} responses with usage. No cost is shown.`) : 'This recording did not include usage totals.'}</p></details>
       <details class="fold model-summary"><summary>Model’s final summary · verbatim</summary><p class="tl-text">${text(r.final?.summary || r.summary || 'No summary recorded.')}</p></details>
@@ -1065,7 +1067,7 @@ function recordedChangesView() {
     : emptyState('No verified repair in this recording', `This attempt ended as ${r.outcome}; no verified rehearsal review was recorded.`, 'circle-x')}`;
   const review = r.review;
   return `${recBanner(r, true, true)}
-    <div class="section-heading"><h2>Recorded repair review</h2>${badge('Recorded at rehearsal')}</div>
+    <div class="section-heading"><h2>Recorded repair review</h2></div>
     ${repairFlow(review, {recorded: true})}
     ${diffView(review)}
     <p class="caption">Read-only history. To produce exportable SQL, run the offline script and rehearse it on a disposable copy.</p>`;
@@ -1077,7 +1079,7 @@ function recordedChecksView() {
   if (!r.review) return `${recBanner(r, true)}${emptyState('No checks in this recording', 'Checks run only when a rehearsal is recorded. This attempt did not record one.', 'shield-check')}`;
   const review = r.review, passed = review.checks.filter(c => c.passed).length;
   return `${recBanner(r, true, true)}
-    <div class="section-heading"><h2>Recorded operational checks</h2>${badge(`${passed} / ${review.checks.length} passed`, !review.passed)}</div>
+    <div class="section-heading"><h2>Recorded operational checks</h2></div>
     <div class="status-cards">
       <div class="status-card ${review.passed ? 'ok' : 'danger'}"><span class="eyebrow">At recorded rehearsal</span><strong>${passed} / ${review.checks.length} checks passed</strong><span class="caption">${text(r.review_observation || '')}</span></div>
       <div class="status-card"><span class="eyebrow">Export</span><strong>Not available for recordings</strong><span class="caption">Recordings have no downloads. Exports come only from a current offline rehearsal, which rechecks freshness.</span></div>
@@ -1166,7 +1168,7 @@ const lineLabel = (raw, cancel, keep) => cancel && raw.includes(cancel) ? 'cance
 function evidenceView() {
   const {ev, incident} = state, cited = citedRefs();
   return `<div class="log-head">
-      <div class="segmented" role="group" aria-label="Evidence file">${incident.artifacts.map(a=>`<button data-file="${escape(a.name)}" aria-pressed="${a.name===ev.name}">${text(a.name)}<span class="count">${text(a.bytes)} B</span></button>`).join('')}</div>
+      <div class="segmented" role="group" aria-label="Evidence file">${incident.artifacts.map(a=>`<button data-file="${escape(a.name)}" aria-pressed="${a.name===ev.name}">${text(a.name)}<span class="count" title="${escape(`${a.bytes} bytes`)}">${text(fmtBytes(a.bytes))}</span></button>`).join('')}</div>
     </div>
     <div class="log-tools">
       <label class="search">${icon('search')}<span class="sr-only">Search lines</span><input id="ev-search" type="search" placeholder="Search lines" value="${escape(ev.query)}" autocomplete="off" spellcheck="false"><kbd aria-hidden="true">/</kbd></label>
@@ -1260,11 +1262,11 @@ function reviewView() {
 function reviewSummary(run, review) {
   const ready = run.status === 'ready_for_review';
   const failed = review.checks.filter(c => !c.passed);
-  return `<div class="section-heading"><h2>${ready?'Rehearsal result':'Export unavailable'}</h2>${badge(ready?'Rehearsal snapshot':statusOf(run)[0],!ready)}</div>
+  return `<div class="section-heading"><h2>${ready?'Rehearsal result':'Export unavailable'}</h2></div>
     ${ready?'':`<div class="callout stop">${text(run.summary)}</div>`}
     ${repairFlow(review, {run})}
     ${run.status==='blocked'?'<p class="caption">Export is blocked. Counts describe the earlier rehearsal snapshot; see the server’s reason above.</p>':''}
-    ${failed.length?`<div class="failed"><h3>Failed checks at rehearsal</h3><ul>${failed.map(c=>`<li><span class="group">${text(groupOf(c.name))}</span><strong>${text(c.name.replaceAll('_',' '))}</strong><div class="check-detail">${text(c.detail)}</div></li>`).join('')}</ul></div>`:''}`;
+    ${failed.length?`<div class="failed"><h3>Failed checks at rehearsal</h3><ul>${failed.map(c=>`<li><span class="group">${text(groupOf(c.name))}</span><strong>${text(checkName(c.name))}</strong><div class="check-detail">${text(c.detail)}</div></li>`).join('')}</ul></div>`:''}`;
 }
 
 // A quiet outcome graphic, built from the selected rehearsal's observations.
@@ -1398,12 +1400,11 @@ function checksTab() {
   const run = state.run, review = run?.review;
   if (!review) return noReview(run, 'independent checks');
   const passed = review.checks.filter(c => c.passed).length, meta = state.runMeta.get(run.id) || {}, exp = exportStatus(run);
-  return `<div class="section-heading"><h2>Independent operational checks</h2>${badge(`${passed} / ${review.checks.length} passed`,!review.passed)}</div>
+  return `<div class="section-heading"><h2>Independent operational checks</h2></div>
     <div class="status-cards">
       <div class="status-card ${review.passed?'ok':'danger'}"><span class="eyebrow">At rehearsal</span><strong>${passed} / ${review.checks.length} checks passed</strong><span class="caption">Observed on the rehearsal snapshot${meta.rehearsedAt?` · result received ${time(meta.rehearsedAt)} on this page`:''}</span></div>
       <div class="status-card ${exp.tone}"><span class="eyebrow">Export freshness</span><strong>${text(exp.label)}</strong><span class="caption">${text(exp.detail)}</span>${run.status==='ready_for_review'?`<button class="secondary" data-recheck-export ${state.rechecking.has(run.id)?'disabled aria-busy="true"':''}>${state.rechecking.has(run.id)?`${icon('loader-circle','spin')}<span>Rechecking…</span>`:`${icon('refresh-cw')}<span>Recheck for export</span>`}</button>`:''}</div>
     </div>
-    <p class="small muted">These checks describe the rehearsal snapshot. Export status is shown above and rechecked on every download.</p>
     ${checksView(review.checks)}`;
 }
 
@@ -1414,7 +1415,7 @@ function checksView(checks) {
   return `<div class="check-groups">${groups.map(([label, list]) => {
     const ok = list.filter(c => c.passed).length;
     return `<div class="check-group ${ok<list.length?'has-fail':''}"><div class="check-group-head"><h4>${text(label)}</h4><span class="caption">${ok} / ${list.length} passed</span></div>
-      <ul class="checks">${list.map(c=>`<li class="sel ${c.passed?'':'fail'}" tabindex="0" data-key="check:${escape(c.name)}" aria-selected="false"><span class="check-icon ${c.passed?'':'cancelled'}" aria-hidden="true">${c.passed?'✓':'×'}</span><div><strong>${text(c.name.replaceAll('_',' '))}</strong><span class="sr-only"> ${c.passed?'passed':'failed'}</span><div class="check-detail">${text(c.detail)}</div></div></li>`).join('')}</ul></div>`;
+      <ul class="checks">${list.map(c=>`<li class="sel ${c.passed?'':'fail'}" tabindex="0" data-key="check:${escape(c.name)}" aria-selected="false"><span class="check-icon ${c.passed?'':'cancelled'}" aria-hidden="true">${c.passed?'✓':'×'}</span><div><strong>${text(checkName(c.name))}</strong><span class="sr-only"> ${c.passed?'passed':'failed'}</span><div class="check-detail">${text(c.detail)}</div></div></li>`).join('')}</ul></div>`;
   }).join('')}</div>`;
 }
 
@@ -1436,7 +1437,7 @@ function sqlView() {
     ? `<div class="code" role="region" aria-label="repair.sql, read-only" tabindex="0">${entry.text.replace(/\r?\n$/, '').split(/\r?\n/).map((l,i)=>`<div class="code-line"><span class="ln">${i+1}</span><span class="lt">${sqlTint(l)}</span></div>`).join('')}</div>`
     : entry.status === 'error' ? `<div class="callout stop">${text(entry.message)}</div>` : `<div class="code code-loading"><p class="caption">${icon('loader-circle','spin')} Rechecking freshness and loading repair.sql…</p>${skeleton(12)}</div>`;
   return `<div class="sql-head"><div><span class="eyebrow">repair.sql · read-only</span><h2>Guarded repair script</h2></div>
-      <div class="sql-actions"><button class="secondary" data-copy-sql ${entry.status!=='ok'?'disabled':''}>${icon('copy')}<span>Copy</span></button><button class="secondary" data-reload-sql>${icon('refresh-cw')}<span>Recheck and reload</span></button><button class="secondary" data-download="repair.sql">${icon('download')}<span>Download</span></button></div></div>
+      <div class="sql-actions"><button class="secondary" data-copy-sql ${entry.status!=='ok'?'disabled':''}>${icon('copy')}<span>Copy</span></button><button class="secondary" data-reload-sql>${icon('refresh-cw')}<span>Recheck and reload</span></button></div></div>
     <p class="small muted">Not applied by this workbench. Loaded through the freshness-gated download route${entry.at?` at ${time(entry.at)}`:''}. The script uses <span class="mono">BEGIN IMMEDIATE</span> and rolls back if table state differs from the rehearsal. Human review is required.</p>
     ${body}`;
 }
@@ -1561,7 +1562,7 @@ function checkEvidence(name, review) {
 function checkContext(name) {
   const source = active(), check = source.review?.checks.find(c => c.name === name);
   if (!check) return `<p class="muted">This check is not in the current review.</p>`;
-  return `<h2 class="ctx-title">${text(name.replaceAll('_', ' '))}</h2>
+  return `<h2 class="ctx-title">${text(checkName(name))}</h2>
     <div class="ctx-status">${badge(check.passed ? 'Passed' : 'Failed', check.passed ? 'ok' : 'danger')}<span class="caption">${text(groupOf(name))} · ${source.recorded ? 'recorded at rehearsal' : 'observed at rehearsal'}</span></div>
     <p class="small">${text(check.detail)}</p><p class="caption mono">${text(name)}</p>
     ${checkEvidence(name, source.review)}
