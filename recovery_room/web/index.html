@@ -86,21 +86,21 @@ SOFTWARE.
         <div class="title-row">
           <h1 id="title">Loading local incident…</h1>
           <span id="title-status" class="title-status"></span>
-          <button class="link small guide-toggle" data-open-guide aria-controls="context" aria-expanded="false"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-book-open"></use></svg><span>Guide</span></button>
-          <details id="run-details" class="run-details" hidden><summary>Run details</summary><div id="run-details-body"></div></details>
         </div>
-        <div class="head-side">
-          <span class="mode" id="mode-indicator">Offline demo · No model</span>
-          <div id="header-actions" class="head-actions"></div>
-        </div>
+        <div id="header-actions" class="head-actions"></div>
         <div class="flow-row">
+          <span class="mode" id="mode-indicator">Offline demo · No model</span>
           <div id="incident-meta" class="meta"></div>
-          <div id="source-switch" class="source-switch" role="group" aria-label="Run source"></div>
+          <div class="flow-links">
+            <button class="link small guide-toggle" data-open-guide aria-controls="context" aria-expanded="false"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-book-open"></use></svg><span>Guide</span></button>
+            <details id="run-details" class="run-details" hidden><summary>Run details</summary><div id="run-details-body"></div></details>
+          </div>
         </div>
       </section>
 
       <div id="notice" role="alert" hidden></div>
 
+      <div class="tabbar">
       <nav class="tabs" role="tablist" aria-label="Workspace">
         <button role="tab" id="tab-investigation" data-tab="investigation" aria-controls="content">Investigation</button>
         <button role="tab" id="tab-evidence" data-tab="evidence" aria-controls="content">Evidence</button>
@@ -109,6 +109,8 @@ SOFTWARE.
         <button role="tab" id="tab-sql" data-tab="sql" aria-controls="content">SQL</button>
         <span class="tab-ind" aria-hidden="true"></span>
       </nav>
+      <div id="source-switch" class="source-switch" role="group" aria-label="Run source"></div>
+      </div>
 
       <div class="workspace ctx-closed">
         <main id="content" class="panel" role="tabpanel" tabindex="-1" aria-labelledby="tab-investigation" aria-live="polite">

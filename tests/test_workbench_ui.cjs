@@ -21,7 +21,7 @@ function harness(handler) {
     setTimeout, clearTimeout, URL, renderCalls: 0,
   };
   vm.createContext(context);
-  vm.runInContext(source + '\nrender = () => { globalThis.renderCalls++; };\nrenderPanel = () => {};\nglobalThis.subject = {state, download, reviewView, exportStatus, recheckExport, act, changesView, checksTab, sqlView, modeInfo, repairFlow, stockVisual, transition};', context);
+  vm.runInContext(source + '\nrender = () => { globalThis.renderCalls++; };\nrenderPanel = () => {};\nglobalThis.subject = {state, download, reviewView, exportStatus, recheckExport, act, changesView, checksTab, sqlView, modeInfo, repairFlow, stockVisual, transition, packageView, lineContext, evidenceWrites, reconstructionView};', context);
   return {context, nodes, ...context.subject};
 }
 
@@ -323,4 +323,155 @@ test('navigation commits synchronously and cancels a previous entrance animation
   app.transition(() => events.push('reduced-motion update'), 'case');
   assert.equal(events.at(-1), 'reduced-motion update');
   assert.equal(events.length, 4);
+});
+
+// ---------- Repair package ----------
+
+function packageRun(status) {
+  const current = reviewRun(status);
+  Object.assign(current, {
+    source_fingerprint: 'f00d97029ad379dc0552277062a761534e4393b6aceb8fbab1eef9b0a5a23d50',
+    evidence_fingerprint: 'dfab8cd5b0ddbf5375e36e73cf8c4f9bdd48617dd1fdb16ae739d8715ab311ff',
+    downloads: status === 'ready_for_review' ? ['repair.sql', 'plan.json', 'report.json', 'report.html'] : [],
+  });
+  current.review.changes = [
+    {before: {id: 'ord_b', sku: 'MUG'}, after: {id: 'ord_b', sku: 'MUG'}, duplicate_of: 'ord_a', evidence_refs: ['events.jsonl:L2', 'events.jsonl:L5']},
+    {before: {id: 'ord_d', sku: 'MUG'}, after: {id: 'ord_d', sku: 'MUG'}, duplicate_of: 'ord_c', evidence_refs: ['events.jsonl:L3', 'events.jsonl:L6']},
+  ];
+  current.review.stock = [{sku: 'MUG', before: 4, after: 7}, {sku: 'CAP', before: 2, after: 2}];
+  return current;
+}
+
+test('the repair package describes its files from the run and shows the pinned fingerprints', () => {
+  const app = harness();
+  const current = packageRun('ready_for_review');
+  app.state.run = current;
+  const card = app.packageView(current);
+  for (const name of current.downloads) assert.match(card, new RegExp(`data-download="${name.replace('.', '\\.')}"`));
+  assert.match(card, /Cancels 20 orders and returns stock on 1 product\./);
+  assert.match(card, /2 cancellations, citing 4 evidence lines\./);
+  assert.match(card, /1 \/ 1 checks · active orders 80 → 60\./);
+  assert.match(card, />f00d97029ad3</);
+  assert.match(card, />dfab8cd5b0dd</);
+  assert.match(card, /title="f00d97029ad379dc/);
+  assert.match(card, /Passed at rehearsal · Recheck required/);
+  assert.match(card, /data-recheck-export/);
+  assert.doesNotMatch(card, /\bstyle=/);
+});
+
+test('a refused or failed package offers no downloads and keeps the server reason', () => {
+  const app = harness();
+  const blocked = packageRun('blocked');
+  blocked.downloads = ['repair.sql']; // even a stale list must not become a download control
+  app.state.run = blocked;
+  const refused = app.packageView(blocked);
+  assert.doesNotMatch(refused, /data-download|data-recheck-export/);
+  assert.match(refused, /Refused/);
+  assert.match(refused, /Source changed since rehearsal\./);
+  assert.match(refused, /Nothing is served for this run\./);
+
+  const failed = packageRun('failed_checks');
+  app.state.run = failed;
+  const unavailable = app.packageView(failed);
+  assert.doesNotMatch(unavailable, /data-download|data-recheck-export/);
+  assert.match(unavailable, /Unavailable/);
+  assert.match(unavailable, /Operational checks failed at rehearsal/);
+});
+
+test('missing fingerprints are omitted rather than shown as placeholders', () => {
+  const app = harness();
+  const current = packageRun('ready_for_review');
+  delete current.source_fingerprint;
+  app.state.run = current;
+  const card = app.packageView(current);
+  assert.doesNotMatch(card, /Pinned at investigation/);
+  assert.match(card, /data-recheck-export/);
+});
+
+// ---------- Evidence lines and the incident timeline ----------
+
+function evidenceState(app, files, {incident = 'case-a', orders = []} = {}) {
+  app.state.incident = {id: incident, artifacts: Object.keys(files).map(name => ({name})), orders};
+  for (const [name, rows] of Object.entries(files)) {
+    const lines = rows.map((row, i) => ({ref: `${name}:L${i + 1}`, text: typeof row === 'string' ? row : JSON.stringify(row)}));
+    app.state.files.set(`${incident}:${name}`, {data: {lines, total: lines.length}});
+  }
+}
+const write = (attempt, order_id, extra = {}) => ({type: 'write_committed', attempt, event_id: `evt-${order_id}`, order_id, ...extra});
+
+test('a selected line from another evidence file names its file and offers to show it', () => {
+  const app = harness();
+  evidenceState(app, {'events.jsonl': [write('import-first', 'ord_a')], 'commit_receipts.csv': ['type,attempt,event_id,order_id']});
+  app.state.tab = 'evidence';
+  app.state.ev.name = 'commit_receipts.csv';
+  const other = app.lineContext('events.jsonl:L1');
+  assert.match(other, /From <span class="mono">events\.jsonl<\/span>\. The log is showing <span class="mono">commit_receipts\.csv<\/span>/);
+  assert.match(other, /data-open-ref="events\.jsonl:L1">Show in events\.jsonl/);
+  app.state.ev.name = 'events.jsonl';
+  const same = app.lineContext('events.jsonl:L1');
+  assert.doesNotMatch(same, /The log is showing|data-open-ref/);
+});
+
+test('the timeline keeps file order, lanes by first appearance, and places incident markers', () => {
+  const app = harness();
+  evidenceState(app, {'events.jsonl': [
+    write('import-first', 'ord_a'), write('import-first', 'ord_b'),
+    {type: 'connection_lost', detail: 'timeout'},
+    write('import-retry', 'ord_c'), {type: 'log_gap'}, write('web-checkout', 'ord_d'),
+  ]});
+  const model = app.evidenceWrites();
+  assert.deepEqual(Array.from(model.writes, w => w.order_id), ['ord_a', 'ord_b', 'ord_c', 'ord_d']);
+  assert.deepEqual(Array.from(model.lanes), ['import-first', 'import-retry', 'web-checkout']);
+  assert.equal(model.bySeq, false);
+  const lost = model.marks.find(m => m.type === 'connection_lost'), gap = model.marks.find(m => m.type === 'log_gap');
+  assert.equal(lost.attempt, 'import-first'); // the attempt that was writing when the connection dropped
+  assert.equal(lost.x, 2);
+  assert.equal(gap.attempt, 'import-first'); // a gap with no attempt is noted on the first lane
+});
+
+test('commit sequence orders split evidence only when every write records one', () => {
+  const app = harness();
+  evidenceState(app, {
+    'events.jsonl': [write('import-retry', 'ord_c', {commit_seq: 3}), write('import-first', 'ord_a', {commit_seq: 1})],
+    'commit_receipts.csv': ['type,attempt,event_id,order_id,movement_id,commit_seq', 'write_committed,import-first,evt-b,ord_b,mv-b,2'],
+  });
+  const merged = app.evidenceWrites();
+  assert.equal(merged.bySeq, true);
+  assert.deepEqual(Array.from(merged.writes, w => w.order_id), ['ord_a', 'ord_b', 'ord_c']);
+  assert.equal(merged.writes[1].ref, 'commit_receipts.csv:L2');
+
+  const partial = harness();
+  evidenceState(partial, {'events.jsonl': [write('import-retry', 'ord_c', {commit_seq: 3}), write('import-first', 'ord_a')]});
+  const fileOrder = partial.evidenceWrites();
+  assert.equal(fileOrder.bySeq, false);
+  assert.deepEqual(Array.from(fileOrder.writes, w => w.order_id), ['ord_c', 'ord_a']);
+});
+
+test('the timeline links repeats only from the given pairs and never invents one', () => {
+  const app = harness();
+  evidenceState(app, {'events.jsonl': [write('import-first', 'ord_a'), write('import-first', 'ord_b'), write('import-retry', 'ord_c'), write('import-retry', 'ord_d')]});
+  const plain = app.reconstructionView();
+  assert.doesNotMatch(plain, /recon-tick (repeat|kept)|recon-arc/);
+  assert.match(plain, /4 committed writes across 2 attempts\. The investigation decides which writes repeat\./);
+
+  const linked = app.reconstructionView([{order_id: 'ord_c', duplicate_of: 'ord_a'}, {order_id: 'ord_x', duplicate_of: 'ord_b'}]);
+  assert.equal((linked.match(/class="recon-tick repeat"/g) || []).length, 1);
+  assert.equal((linked.match(/class="recon-tick kept"/g) || []).length, 1);
+  assert.equal((linked.match(/class="recon-arc"/g) || []).length, 1); // the pair naming an unknown order is skipped
+  assert.match(linked, /The proposal cancels 1 repeated write and keeps the first write of each source event\. 2 other writes are untouched\./);
+  assert.match(linked, /data-key="order:ord_c"/);
+  assert.doesNotMatch(linked, /\bstyle=/);
+
+  const stopped = app.reconstructionView(null, {stopped: 20});
+  assert.match(stopped, /The script stopped instead of guessing: 20 source events have no commit record\./);
+});
+
+test('a recording whose inputs differ draws the timeline without links to current records', () => {
+  const app = harness();
+  evidenceState(app, {'events.jsonl': [write('import-first', 'ord_a'), write('import-retry', 'ord_b')]});
+  app.state.source = 'recorded';
+  app.state.recording = {incident_id: 'case-a', citations_enabled: false, review: {changes: []}};
+  const view = app.reconstructionView([{order_id: 'ord_b', duplicate_of: 'ord_a'}], {recorded: true});
+  assert.doesNotMatch(view, /data-key=/);
+  assert.doesNotMatch(view, /Enter to open one/);
 });

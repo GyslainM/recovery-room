@@ -383,8 +383,8 @@ function render() {
 
 function renderSourceSwitch() {
   const list = recordedList(), count = list.status === 'ok' ? String(list.list.length) : list.status === 'error' ? '!' : '…';
-  $('#source-switch').innerHTML = `<button data-source="script" aria-pressed="${!recordedMode()}">${icon('play')}<span>Script run · offline</span></button>
-    <button data-source="recorded" aria-pressed="${recordedMode()}">${icon('history')}<span>Recorded model runs</span><span class="count">${count}</span></button>`;
+  $('#source-switch').innerHTML = `<button data-source="script" aria-pressed="${!recordedMode()}">${icon('play')}<span>Script run<span class="long"> · offline</span></span></button>
+    <button data-source="recorded" aria-pressed="${recordedMode()}">${icon('history')}<span>Recorded<span class="long"> model</span> runs</span><span class="count">${count}</span></button>`;
 }
 
 // Recorded mode header: the fixed provenance label is prominent; no rehearse, SQL or download action exists.
@@ -498,9 +498,9 @@ function stepsView(run) {
   const items = steps.map((step, i) => {
     const st = plan[i], spinning = (working === 'investigate' && i === 0) || (working === 'rehearse' && i === 1);
     const dot = spinning ? icon('loader-circle', 'spin') : st === 'done' ? icon('check') : st === 'warn' ? '!' : st === 'danger' ? '×' : String(i + 1);
-    const sub = spinning ? (i === 0 ? 'reading evidence…' : 'testing on a copy…') : subs[i] || step.sub;
-    const inner = `<span class="step-dot" aria-hidden="true">${dot}</span><span class="step-text"><span class="step-label">${step.label}</span><span class="step-sub">${text(sub)}</span></span><span class="sr-only"> · ${STEP_SR[st]}</span>`;
-    const attrs = `class="step ${st}"${st === 'current' ? ' aria-current="step"' : ''}`;
+    const flag = spinning ? (i === 0 ? 'reading evidence…' : 'testing on a copy…') : subs[i];
+    const inner = `<span class="step-dot" aria-hidden="true">${dot}</span><span class="step-label">${step.label}</span>${flag ? `<span class="step-sub">${text(flag)}</span>` : `<span class="sr-only"> · ${text(step.sub)}</span>`}<span class="sr-only"> · ${STEP_SR[st]}</span>`;
+    const attrs = `class="step ${st}" title="${escape(`${step.label} · ${flag || step.sub}`)}"${st === 'current' ? ' aria-current="step"' : ''}`;
     const target = st === 'upcoming' || (i === 0 && !run) ? '' : i === 3 && st === 'open' ? 'data-review-downloads' : `data-tab="${step.tab}"`;
     return `<li class="${st}">${target ? `<button ${attrs} ${target}>${inner}</button>` : `<span ${attrs}>${inner}</span>`}</li>`;
   });
@@ -1227,6 +1227,7 @@ function moveActive(step, edge = null) {
 function openInEvidence(ref, query = '', name = null) {
   Object.assign(state.ev, {name: name || (ref ? fileOf(ref) : state.ev.name), query, citedOnly: false, activeRef: ref || null});
   setTab('evidence');
+  if (state.selection?.kind === 'line') renderContext(); // its "from another file" note may no longer apply
   const settle = () => { const box = $('#ev-lines'); if (box) box.focus({preventScroll: true}); };
   ensureFile(state.ev.name).then(() => { if (state.tab === 'evidence') { renderEvidence(); settle(); } }).catch(error => notice(error.message));
 }
@@ -1253,7 +1254,7 @@ function changesView() {
 
 function reviewView() {
   const run = state.run, review = run.review;
-  return `${reviewSummary(run, review)}${diffView(review)}${artifactsView(run)}`;
+  return `${reviewSummary(run, review)}${diffView(review)}${packageView(run)}`;
 }
 
 function reviewSummary(run, review) {
@@ -1345,12 +1346,37 @@ function changesTable(changes) {
   }),rows.map(c=>selAttrs(`order:${c.before.id}`)));
 }
 
-function artifactsView(run) {
-  const check = state.exportChecks.get(run.id);
-  return `<section class="artifacts" id="repair-package" tabindex="-1"><h3>Export for review</h3>
-    <p class="small muted">Each download rechecks source, evidence and candidate freshness. Guarded SQL also rejects changed table state when applied. Human review is required.${check?` Last check: ${check.ok?'passed':'refused'} at ${time(check.at)}.`:''}</p>
-    <div class="download-row">${run.downloads.map(name=>`<button class="download" data-download="${escape(name)}">${icon('download')}<span class="download-text"><strong>${text(name)}</strong><span>${text(DOWNLOAD_NOTES[name]||'')}</span></span></button>`).join('')||'<span class="caption">No artifacts available for export.</span>'}</div>
-    <p class="caption">Source database untouched.</p></section>`;
+// The repair package: what a reviewer downloads, described from this run's own records. The workbench
+// never applies it. The server pins the source and evidence fingerprints at investigation and refuses a
+// download if either, or the rehearsed copy, has changed since.
+const shortHash = (hash) => /^[0-9a-f]{12,}$/i.test(String(hash || '')) ? String(hash).slice(0, 12) : '';
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+function packageNotes(review) {
+  const passed = review.checks.filter(c => c.passed).length, moved = review.stock.filter(p => p.after !== p.before).length;
+  const cited = new Set(review.changes.flatMap(c => c.evidence_refs || [])).size;
+  return {
+    'repair.sql': `Cancels ${plural(review.cancellations, 'order')}${moved ? ` and returns stock on ${plural(moved, 'product')}` : ''}. Rolls back if table state differs.`,
+    'plan.json': `${plural(review.changes.length, 'cancellation')}${cited ? `, citing ${plural(cited, 'evidence line')}` : ''}.`,
+    'report.json': `${passed} / ${review.checks.length} checks · active orders ${review.before_active} → ${review.after_active}.`,
+  };
+}
+function packageView(run) {
+  const review = run.review, exp = exportStatus(run), ready = run.status === 'ready_for_review';
+  const notes = packageNotes(review), files = ready ? run.downloads || [] : [];
+  const busy = state.rechecking.has(run.id);
+  const list = files.length
+    ? `<ul class="package-files">${files.map(name => `<li><button class="package-file" data-download="${escape(name)}"><span class="package-name mono">${text(name)}</span><span class="package-note">${text(notes[name] || DOWNLOAD_NOTES[name] || '')}</span>${icon('download')}<span class="sr-only"> · download</span></button></li>`).join('')}</ul>`
+    : `<p class="package-empty">${text(ready ? 'No artifacts available for export.' : exp.detail)}</p>`;
+  const source = shortHash(run.source_fingerprint), evidence = shortHash(run.evidence_fingerprint);
+  const pinned = source && evidence
+    ? `<p class="package-pin">Pinned at investigation to source <span class="mono" title="${escape(run.source_fingerprint)}">${text(source)}</span> and evidence <span class="mono" title="${escape(run.evidence_fingerprint)}">${text(evidence)}</span>. ${ready ? 'Each download checks both again, and the rehearsed copy; a change refuses it.' : 'Nothing is served for this run.'}</p>`
+    : '';
+  const recheck = ready ? `<button class="secondary" data-recheck-export ${busy ? 'disabled aria-busy="true"' : ''}>${busy ? `${icon('loader-circle', 'spin')}<span>Rechecking…</span>` : `${icon('refresh-cw')}<span>Recheck now</span>`}</button>` : '';
+  return `<section class="package" id="repair-package" tabindex="-1" aria-labelledby="package-title">
+    <div class="package-head"><div><h3 id="package-title">${icon('package')}Repair package</h3><p>For human review. This workbench never applies it.</p></div>${badge(exp.label, exp.tone)}</div>
+    ${list}
+    ${pinned || recheck ? `<div class="package-foot">${pinned}${recheck}</div>` : ''}
+  </section>`;
 }
 
 /* ---------- Checks ---------- */
@@ -1548,7 +1574,10 @@ function lineContext(ref) {
   let fields = '';
   try { const parsed = line && JSON.parse(line.text); if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) fields = `<h3>Fields</h3>${fieldTable(parsed)}`; } catch (_) { /* not JSON */ }
   const citedBy = citedRefs().get(ref) || [];
+  // Switching files keeps the selection (to compare a write with its receipt), so say which file it is from.
+  const elsewhere = state.tab === 'evidence' && fileOf(ref) !== state.ev.name;
   return `<h2 class="mono ctx-title">${text(ref)}</h2><div class="ctx-status">${badge('Exact evidence line')}${citedBy.length?badge(`Cited by ${citedBy.length}`, 'ok'):''}</div>
+    ${elsewhere?`<p class="ctx-note">${icon('file-text')}<span>From <span class="mono">${text(fileOf(ref))}</span>. The log is showing <span class="mono">${text(state.ev.name)}</span>. <button class="link" data-open-ref="${escape(ref)}">Show in ${text(fileOf(ref))}</button></span></p>`:''}
     ${line?`<pre class="cite-line">${tint(line.text)}</pre>`:`<div class="cite-line">${skeleton(2)}</div>`}${fields}
     ${citedBy.length?`<h3>Cited for cancelling</h3><div class="id-grid">${citedBy.map(id=>`<button class="id-chip mono" data-key="order:${escape(id)}">${text(id)}</button>`).join('')}</div>`:''}
     ${state.tab!=='evidence'?`<button class="secondary" data-open-ref="${escape(ref)}">Open in Evidence</button>`:''}`;
@@ -1817,6 +1846,8 @@ async function copySql(button) {
 async function recheckExport() {
   const runId = state.run?.id;
   if (state.run?.status !== 'ready_for_review' || state.rechecking.has(runId)) return;
+  // The button is replaced while the check runs; give focus back to it afterwards.
+  const refocus = !!document.activeElement?.matches?.('[data-recheck-export]');
   state.rechecking.add(runId);
   state.exportChecks.delete(runId);
   renderPanel();
@@ -1828,6 +1859,8 @@ async function recheckExport() {
   finally {
     state.rechecking.delete(runId);
     if (state.run?.id === runId) render();
+    const now = document.activeElement;
+    if (refocus && (!now || now === document.body || !now.isConnected)) $('#content [data-recheck-export]')?.focus({preventScroll: true});
   }
 }
 
@@ -2058,6 +2091,8 @@ function runPaletteItem(index) {
 /* ---------- Events ---------- */
 
 document.addEventListener('click', event => {
+  const details = $('#run-details');
+  if (details?.open && !event.target.closest?.('#run-details')) details.open = false;
   if (event.target.id === 'palette') { event.target.close(); return; } // backdrop click
   if (event.target.closest?.('[data-close-nav]')) { closeNav(); return; } // drawer backdrop
   const option = event.target.closest?.('[data-palette-index]');
@@ -2095,7 +2130,13 @@ document.addEventListener('click', event => {
   if (d.reviewDownloads !== undefined) reviewRepair(true);
   if (d.action) task = act(d.action);
   if (d.download) task = download(d.download, el);
-  if (d.file) { Object.assign(state.ev, {name: d.file, activeRef: null}); renderPanel(); }
+  if (d.file) {
+    // Returning to the selected line's own file highlights it again; Details notes when it is from another file.
+    const line = state.selection?.kind === 'line' ? state.selection.id : null;
+    Object.assign(state.ev, {name: d.file, activeRef: line && fileOf(line) === d.file ? line : null});
+    renderPanel();
+    if (line) renderContext();
+  }
   if (d.citedOnly !== undefined) { state.ev.citedOnly = !state.ev.citedOnly; el.setAttribute('aria-pressed', String(state.ev.citedOnly)); renderEvidence(); }
   if (d.openRef) openInEvidence(d.openRef);
   if (d.searchEvent) openInEvidence(null, d.searchEvent, 'events.jsonl');
@@ -2125,6 +2166,7 @@ document.addEventListener('keydown', event => {
     return; // Escape is handled by the native <dialog>
   }
   if ($('#palette')?.open) return;
+  if (key === 'Escape' && $('#run-details')?.open && t.closest?.('#run-details')) { event.preventDefault(); $('#run-details').open = false; $('#run-details>summary').focus(); return; }
   if (key === 'Escape' && sideDrag) { event.preventDefault(); endSideDrag(null, true); return; }
   if (t.classList?.contains('resizer') && !isNarrow() && resizeKey(event)) return;
   if (key === 'Escape' && state.nav) { event.preventDefault(); closeNav(); return; }

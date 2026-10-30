@@ -119,32 +119,34 @@ a{color:var(--accent-ink)}
 :root{--rec:#8fb0ff;--rec-soft:rgba(143,176,255,.1);--rec-line:rgba(143,176,255,.38)}
 .mode.recorded{border-color:var(--rec-line);background:var(--rec-soft);color:var(--rec)}
 .mode.recorded:before{background:var(--rec)}
-.source-switch{display:inline-flex;flex-wrap:wrap;gap:2px;margin-left:auto;padding:2px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface)}
-.source-switch button{display:inline-flex;align-items:center;gap:7px;padding:5px 10px;border-radius:var(--radius-sm);color:var(--muted);font-size:12.5px}
+/* Run source: the right end of the tab bar, since it changes what every tab shows. */
+.source-switch{display:inline-flex;flex:none;gap:2px;padding:2px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface)}
+.source-switch button{display:inline-flex;align-items:center;gap:7px;padding:4px 10px;border-radius:var(--radius-sm);color:var(--muted);font-size:12.5px;white-space:nowrap}
 .source-switch button:hover{color:var(--ink)}
 .source-switch button[aria-pressed=true]{background:var(--raised);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line-2)}
 .source-switch button[data-source=recorded][aria-pressed=true]{color:var(--rec);box-shadow:inset 0 0 0 1px var(--rec-line);background:var(--rec-soft)}
 .source-switch .count{font-size:10.5px}
-.incident-head{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:var(--s2) var(--s4);padding:var(--s3) var(--s4) var(--s2)}
+/* Header: the title, its status and the actions; then one line of context (mode, progress, links). */
+.incident-head{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:10px var(--s4);padding:14px var(--s4) 12px}
 /* Title and its status read as one line, like a pull request title and its state. */
 .title-row{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;min-width:0}
 .title-status{display:inline-flex;flex-wrap:wrap;align-items:center;gap:6px}
-h1{margin:0;font-size:24px;line-height:1.2;font-weight:600;letter-spacing:-.018em}
-/* Second row: progress (or recording facts) on the left, run source on the right. */
-.flow-row{grid-column:1/-1;display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px;min-width:0}
+h1{margin:0;font-size:22px;line-height:1.25;font-weight:600;letter-spacing:-.018em;text-wrap:balance}
+/* Second row: the mode label, then progress (or recording facts), then Guide and Run details. */
+.flow-row{grid-column:1/-1;display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;min-width:0}
+.flow-links{display:flex;flex-wrap:wrap;align-items:center;gap:6px 16px;margin-left:auto}
 .meta{display:flex;flex-wrap:wrap;align-items:center;gap:6px;min-width:0}
 /* Progress steps */
 .steps{display:flex;flex-wrap:wrap;align-items:center;gap:4px 0;margin:0;padding:0;list-style:none}
 .steps>li{display:flex;align-items:center}
-.steps>li+li:before{content:'';width:18px;height:1px;margin:0 4px;background:var(--line-2)}
+.steps>li+li:before{content:'';width:14px;height:1px;margin:0 4px;background:var(--line-2)}
 .steps>li.done+li:before{background:var(--accent-line)}
-.step{display:inline-flex;align-items:center;gap:8px;padding:3px 10px 3px 3px;border-radius:999px;color:var(--faint);text-align:left;line-height:1.2}
+.step{display:inline-flex;align-items:center;gap:7px;padding:2px 8px 2px 2px;border-radius:999px;color:var(--faint);text-align:left;line-height:1.2;white-space:nowrap}
 button.step:hover{background:var(--hover);color:var(--ink)}
-.step-dot{display:grid;place-items:center;flex:none;width:22px;height:22px;border-radius:50%;border:1px solid var(--line-2);background:var(--surface);color:var(--muted);font:600 11px/1 var(--mono)}
+.step-dot{display:grid;place-items:center;flex:none;width:20px;height:20px;border-radius:50%;border:1px solid var(--line-2);background:var(--surface);color:var(--muted);font:600 11px/1 var(--mono)}
 .step-dot .icon{width:12px;height:12px;stroke-width:2.5}
-.step-text{display:flex;flex-direction:column}
 .step-label{font-size:12.5px;font-weight:500;color:var(--muted)}
-.step-sub{font-size:11px;color:var(--faint)}
+.step-sub{font-size:11.5px;color:var(--faint)}
 .step.upcoming{opacity:.7}
 .step.done .step-dot{border-color:var(--accent-line);background:var(--accent-soft);color:var(--accent-ink)}
 .step.current .step-dot{border-color:var(--accent);background:var(--accent);color:var(--on-accent);box-shadow:0 0 0 3px var(--accent-soft)}
@@ -162,12 +164,19 @@ button.step:hover{background:var(--hover);color:var(--ink)}
 .chip{padding:2px 0;border:0;color:var(--muted);font-size:12px;white-space:nowrap}
 .meta .chip+.chip:before{content:'·';margin-right:8px;color:var(--faint)}
 .chip.mono{font-size:11px}
-.head-side{display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:8px 12px}
 .head-actions{display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:8px}
 .run-details{font-size:12.5px;color:var(--muted)}
 .run-details[open]{flex-basis:100%;max-width:760px;margin-top:4px}
 .run-details>summary{width:fit-content;cursor:pointer;text-underline-offset:3px}
 .run-details[open]>summary{margin-bottom:8px;color:var(--ink)}
+/* Wide screens: Run details opens as a panel under its link instead of pushing the header down. */
+@media(min-width:901px){
+  .run-details{position:relative}
+  .run-details[open]{flex-basis:auto;max-width:none;margin-top:0}
+  .run-details[open]>summary{margin-bottom:0}
+  .run-details>div{position:absolute;top:calc(100% + 8px);right:0;z-index:20;width:min(560px,60vw)}
+  .run-details .run-facts{margin:0;background:var(--raised);border-color:var(--line-2);box-shadow:0 14px 36px rgba(0,0,0,.5)}
+}
 .run-facts{display:grid;grid-template-columns:auto minmax(0,1fr);gap:8px 14px;padding:12px 14px;margin:0 0 10px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface)}
 .run-facts dt{color:var(--faint)}
 .run-facts dd{margin:0;overflow-wrap:anywhere}
@@ -175,7 +184,29 @@ button.step:hover{background:var(--hover);color:var(--ink)}
 #notice .icon{margin-top:1px}
 
 /* Tabs */
+.tabbar{display:flex;flex:none;align-items:center;gap:12px;padding-right:20px;border-bottom:1px solid var(--line);background:var(--bg)}
 .tabs{position:relative;z-index:5;display:flex;flex:none;gap:12px;height:var(--tabs-h);padding:0 20px;border-bottom:1px solid var(--line);background:var(--bg);overflow-x:auto;scrollbar-width:none}
+.tabbar>.tabs{flex:1;min-width:0;border-bottom:0}
+/* The header and tab bar adapt to their own width (the sidebar can be dragged wider), not the screen's.
+   Containment makes a stacking context, so the header sits above the tab bar for the Run details panel. */
+@media(min-width:901px){
+  .incident-head{container:head / inline-size;position:relative;z-index:6}
+  .tabbar{container:tabbar / inline-size}
+}
+@container head (max-width:1000px){
+  /* New investigation becomes an icon button; its name stays in the tooltip and for assistive tech. */
+  .head-actions .secondary[data-action=investigate]{width:36px;padding:0;justify-content:center}
+  .head-actions .secondary[data-action=investigate]>span{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+}
+@container head (max-width:860px){
+  /* Steps keep their dots; the current step and any step that needs attention keep their words. */
+  .steps>li:not(.current):not(:has(.step-sub)) .step-label{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+  .steps>li:not(.current):not(:has(.step-sub)) .step{padding:2px}
+  .steps>li+li:before{width:10px;margin:0 2px}
+}
+@container tabbar (max-width:1030px){ .source-switch .long{display:none} }
+@container tabbar (max-width:940px){ .source-switch .icon{display:none} .tabs{gap:4px} }
+@container tabbar (max-width:870px){ .tabs [role=tab] .icon{display:none} }
 .tabs [role=tab]{display:inline-flex;align-items:center;gap:7px;padding:0 10px;margin-bottom:-1px;color:var(--muted);font-size:13px;white-space:nowrap}
 .tabs [role=tab] .icon{opacity:.7;transition:opacity var(--dur-1)}
 .tabs [role=tab]:hover{color:var(--ink)}
@@ -194,7 +225,7 @@ button.step:hover{background:var(--hover);color:var(--ink)}
 .workspace.ctx-closed>.context{display:none}
 .guide-toggle[aria-expanded=true]{color:var(--accent-ink)}
 .panel{min-width:0;min-height:0;height:100%;overflow:auto;overscroll-behavior:contain;padding:var(--s4) var(--s4) var(--s5);scrollbar-gutter:stable}
-.panel,.artifacts{scroll-margin-top:calc(var(--tabs-h) + 12px)}
+.panel,.package{scroll-margin-top:calc(var(--tabs-h) + 12px)}
 .panel:focus{outline:none}
 .panel[aria-busy=true]{opacity:.55;transition:opacity .15s}
 .context{position:relative;height:100%;min-height:0;overflow:auto;overscroll-behavior:contain;border-left:1px solid var(--line);background:var(--surface)}
@@ -367,7 +398,32 @@ mark{background:var(--warn-soft);color:var(--warn-ink);border-radius:2px;box-sha
 .filter select{width:auto;cursor:pointer}
 .group-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;margin:18px 0 8px}
 .group-head h4{font:600 12px var(--mono);color:var(--ink)}
-.artifacts{margin-top:24px;border-top:1px solid var(--line);padding-top:4px}
+/* Repair package: one card listing what a reviewer downloads, with the fingerprints it is pinned to. */
+.package{margin-top:28px;border:1px solid var(--line-2);border-radius:var(--radius);background:var(--surface)}
+.package:focus-visible{outline-offset:3px}
+.package-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:14px 16px 12px}
+.package-head h3{display:flex;align-items:center;gap:8px;margin:0;font-size:14px;font-weight:600;color:var(--ink)}
+.package-head h3 .icon{width:16px;height:16px;color:var(--muted)}
+.package-head p{margin:3px 0 0 24px;font-size:12.5px;color:var(--muted)}
+.package-head .pill{margin-top:1px}
+.package-files{margin:0;padding:0;list-style:none;border-top:1px solid var(--line)}
+.package-files li+li{border-top:1px solid var(--line)}
+.package-file{display:grid;grid-template-columns:112px minmax(0,1fr) auto;align-items:center;gap:14px;width:100%;min-height:42px;padding:8px 16px;border-radius:0;text-align:left;color:var(--ink)}
+.package-file:hover{background:var(--hover)}
+.package-file:focus-visible{outline-offset:-2px;border-radius:0}
+.package-name{font-size:12.5px;font-weight:500}
+.package-note{font-size:12.5px;color:var(--muted)}
+.package-file>.icon{width:15px;height:15px;color:var(--faint)}
+.package-file:hover>.icon,.package-file:focus-visible>.icon{color:var(--accent-ink)}
+.package-file[aria-busy=true]>.icon{color:var(--accent-ink);animation:nudge .8s var(--ease-out) infinite}
+.package-empty{margin:0;padding:12px 16px;border-top:1px solid var(--line);font-size:13px;color:var(--muted)}
+.package-foot{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px 16px;padding:10px 16px;border-top:1px solid var(--line)}
+.package-pin{flex:1 1 320px;margin:0;font-size:12px;line-height:1.5;color:var(--faint)}
+.package-pin .mono{color:var(--muted)}
+.package-foot .secondary{min-height:30px;font-size:12.5px}
+.ctx-note{display:flex;align-items:flex-start;gap:7px;margin:0 0 10px;padding:8px 10px;border-radius:var(--radius-sm);background:var(--raised);font-size:12.5px;line-height:1.5;color:var(--muted)}
+.ctx-note .link{font-size:inherit}
+.ctx-note .icon{flex:none;width:14px;height:14px;margin-top:2px;color:var(--faint)}
 
 /* Checks */
 .status-cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:12px 0}
@@ -700,8 +756,8 @@ details.tl-card>.tl-head:hover{background:var(--hover)}
   .app{--side-default:228px}
   .workspace{grid-template-columns:minmax(0,1fr) 320px}
   .panel{padding:18px 20px 32px}
-  .incident-head{grid-template-columns:minmax(0,1fr);padding:var(--s3) 20px var(--s2)}
-  .head-side{justify-content:flex-start}
+  .incident-head{padding:12px 20px 10px}
+  .tabbar{padding-right:14px}
   .welcome{margin:0;padding-left:20px}
   .topbar{padding:0 20px}
   .tabs{padding:0 14px}
@@ -722,18 +778,25 @@ details.tl-card>.tl-head:hover{background:var(--hover)}
   .scrim{position:fixed;inset:0;z-index:39;background:rgba(0,0,0,.55);animation:fade var(--dur-2) var(--ease-out)}
   .nav-toggle{display:inline-flex}
   .rail-toggle,.resizer{display:none}
+  .package-file{grid-template-columns:minmax(0,1fr) auto;gap:2px 12px;min-height:44px}
+  .package-note{grid-column:1;grid-row:2}
+  .package-file>.icon{grid-column:2;grid-row:1/3}
+  .package-head{flex-wrap:wrap}
   .topbar{display:flex;padding:0 16px}
   :root{--tabs-h:44px}
   .primary,.secondary,.nav-toggle,.palette-trigger,.source-switch button,.segmented button,.toggle,.case,.run-item,.step,.guide-toggle,.run-details>summary{min-height:44px}
   .run-details>summary,.guide-toggle{display:inline-flex;align-items:center}
-  .head-side{justify-content:flex-start}
   .head-actions .primary{order:-1}
   .incident-head{grid-template-columns:minmax(0,1fr);gap:var(--s2);padding:var(--s3) var(--s3) var(--s2)}
   .welcome{position:relative;flex-wrap:wrap;margin:0;padding:8px 44px 8px 16px}
   .welcome-actions{width:100%}
   .welcome .icon-button{position:absolute;top:8px;right:8px}
   .head-actions{justify-content:flex-start}
-  .source-switch{order:2;margin-left:0}
+  /* The tab bar's parts join the page flow: the tabs stay sticky; the run source sits under them. */
+  .tabbar{display:contents}
+  .tabbar>.tabs{flex:none;border-bottom:1px solid var(--line)}
+  .tabbar>.source-switch{align-self:flex-start;margin:12px 16px 0}
+  .flow-links{margin-left:0}
   .workspace.ctx-closed>.context{display:block}
   .tabs{padding:0 8px}
   #notice{margin:0 16px 10px}
@@ -763,7 +826,7 @@ details.tl-card>.tl-head:hover{background:var(--hover)}
   .head-actions .secondary[data-action=investigate]{width:44px;padding:0;justify-content:center}
   .head-actions .secondary[data-action=investigate]>span{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
   /* Compact progress: every step keeps its dot; only the current step shows its words. */
-  .steps>li:not(.current) .step-text{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+  .steps>li:not(.current) .step-label,.steps>li:not(.current) .step-sub{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
   .steps>li:not(.current) .step{padding:3px}
   .steps>li+li:before{width:10px;margin:0 2px}
   h1{font-size:20px}
