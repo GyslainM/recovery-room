@@ -734,7 +734,7 @@ function callsView(trace) {
 
 // Lane names for the attempts in the synthetic evidence; an unknown attempt is shown as written.
 const ATTEMPT_LABEL = {'import-first': 'First import', 'import-retry-partial': 'Partial retry', 'import-retry': 'Retry', 'web-checkout': 'Customer checkouts'};
-const RECON_FILES = ['events.jsonl', 'commit_receipts.csv'];
+const RECON_FILES = ['events.jsonl', 'commit_receipts.csv', 'inbox_receipts.txt'];
 const RECON_LANE = 30; // px per lane; the SVG uses the same units vertically
 
 // One CSV record per evidence line, read the way the engine reads receipts (Python's csv module,
@@ -778,7 +778,8 @@ function evidenceWrites() {
     }
     return null;
   }
-  const writes = [], marks = [];
+  const writes = [], marks = [], inboxDeclarations = [];
+  let inboxCount = 0, inboxInvalid = false;
   let seen = 0, lastAttempt = '';
   for (const [name, d] of data) {
     let header = null;
@@ -789,10 +790,26 @@ function evidenceWrites() {
         if (!header) { header = cells || []; continue; }
         if (!cells || cells.length !== header.length) continue;
         row = Object.fromEntries(header.map((h, j) => [h, cells[j]]));
+      } else if (name === 'inbox_receipts.txt') {
+        // Presentation of copied service receipts only. Narrative messages never draw a write;
+        // the engine's plan/review remains the sole source of cancellation/retention pairs.
+        if (!line.text.startsWith('[RR-COMMIT v1] ')) {
+          if (line.text.startsWith('[RR-COMMIT')) inboxInvalid = true;
+          continue;
+        }
+        try { row = JSON.parse(line.text.slice('[RR-COMMIT v1] '.length)); } catch (_) { inboxInvalid = true; continue; }
+        const fields = ['type', 'attempt', 'event_id', 'order_id', 'movement_id', 'commit_seq'];
+        if (!plainObject(row) || row.type !== 'write_committed' || Object.keys(row).length !== fields.length
+          || !fields.every(k => own(row, k)) || !['attempt', 'event_id', 'order_id', 'movement_id'].every(k => typeof row[k] === 'string' && row[k].length > 0 && row[k].length <= 80)
+          || !Number.isInteger(row.commit_seq) || row.commit_seq < 1 || row.commit_seq > 10000) {
+          inboxInvalid = true; continue;
+        }
+        inboxCount++;
       } else {
         try { row = JSON.parse(line.text); } catch (_) { continue; }
       }
       if (!row || typeof row !== 'object') continue;
+      if (name === 'events.jsonl' && row.type === 'receipt_inbox') inboxDeclarations.push(row);
       const at = seen++;
       if (row.type === 'write_committed' && row.order_id) {
         const seq = row.commit_seq === undefined || row.commit_seq === '' ? null : Number(row.commit_seq);
@@ -805,9 +822,20 @@ function evidenceWrites() {
       }
     }
   }
+  if (names.has('inbox_receipts.txt') || inboxDeclarations.length) {
+    const declared = inboxDeclarations[0];
+    if (inboxInvalid || !names.has('inbox_receipts.txt') || inboxDeclarations.length !== 1
+      || Object.keys(declared).length !== 4 || declared.name !== 'inbox_receipts.txt'
+      || declared.format !== 'embedded-commit-v1' || !Number.isInteger(declared.count)
+      || declared.count < 1 || declared.count > 200 || declared.count !== inboxCount
+      || writes.some(w => !Number.isInteger(w.seq) || w.seq < 1 || w.seq > 10000)
+      || new Set(writes.map(w => w.seq)).size !== writes.length) {
+      return {writes: [], marks: [], lanes: [], error: 'The inbox receipts could not be reconstructed completely. Inspect the evidence and recorded review; no partial timeline is shown.'};
+    }
+  }
   const bySeq = writes.length > 0 && writes.every(w => w.seq !== null);
   writes.sort((a, b) => bySeq ? a.seq - b.seq : a.at - b.at);
-  writes.forEach((w, i) => { w.x = i; });
+  writes.forEach((w, i) => { w.x = i; w.commitLabel = bySeq ? w.seq : i + 1; });
   // A marker sits after the last write before it (file order), or after its attempt's last write (commit order).
   for (const m of marks) {
     const own = writes.filter(w => w.attempt === m.attempt);
@@ -822,7 +850,7 @@ function evidenceWrites() {
 
 const reconLabel = (w, lane, role) => {
   const o = ordersById().get(w.order_id);
-  return `Commit ${w.x + 1} · ${ATTEMPT_LABEL[lane] || lane}${o ? ` · ${o.customer} ${o.sku} × ${o.quantity}` : ''} · ${w.order_id}${role ? ` · ${role}` : ''}`;
+  return `Commit ${w.commitLabel} · ${ATTEMPT_LABEL[lane] || lane}${o ? ` · ${o.customer} ${o.sku} × ${o.quantity}` : ''} · ${w.order_id}${role ? ` · ${role}` : ''}`;
 };
 
 // pairs: [{order_id: the repeated (cancelled) order, duplicate_of: the first write that stays}].
@@ -832,6 +860,7 @@ function reconstructionView(pairs = null, {recorded = false, stopped = null, reh
   const model = evidenceWrites();
   const head = `<div class="recon-head"><h3 id="recon-title">What happened</h3><span class="caption">Committed writes in order, read from the evidence files</span></div>`;
   if (model === null) return `<section class="recon" aria-labelledby="recon-title">${head}${skeleton(3)}</section>`;
+  if (model.error) return `<section class="recon" aria-labelledby="recon-title">${head}<p class="callout stop">${text(model.error)}</p></section>`;
   const {writes, marks, lanes} = model;
   if (!writes.length && !marks.length) return '';
   const n = Math.max(writes.length, 1), height = Math.max(lanes.length, 1) * RECON_LANE;
@@ -875,7 +904,7 @@ function reconstructionView(pairs = null, {recorded = false, stopped = null, reh
   const untouched = writes.length - repeat.size - kept.size;
   const lostCount = marks.filter(m => m.type === 'connection_lost').length;
   const summary = stopped ? `The script stopped instead of guessing: ${stopped} source events have no commit record${gaps.length ? ', where the log has a gap' : ''}.`
-    : recorded && !pairs ? `This recording proposed no repair, so no writes are marked. ${writes.length} committed writes across ${lanes.length} ${lanes.length === 1 ? 'attempt' : 'attempts'}.`
+    : recorded && !pairs ? `This recording has no selected repair, so no writes are marked. ${writes.length} committed writes across ${lanes.length} ${lanes.length === 1 ? 'attempt' : 'attempts'}.`
     : pairs && !recorded && !rehearsed ? `The proposal would cancel ${repeat.size} repeated write${repeat.size === 1 ? '' : 's'} and keep the first write of each source event. ${untouched} other write${untouched === 1 ? '' : 's'} would stay untouched. Nothing is cancelled until it is tested on a copy.`
     : pairs ? `${recorded ? 'This recording’s review cancels' : 'On the copy, the repair cancelled'} ${repeat.size} repeated write${repeat.size === 1 ? '' : 's'} and ${recorded ? 'keeps' : 'kept'} the first write of each source event. ${untouched} other write${untouched === 1 ? ' is' : 's are'} untouched.`
     : `${writes.length} committed writes across ${lanes.length} ${lanes.length === 1 ? 'attempt' : 'attempts'}${lostCount ? `, with ${lostCount === 1 ? 'a lost connection' : `${lostCount} lost connections`}` : ''}${gaps.length ? ' and a gap in the commit log' : ''}. The investigation decides which writes repeat.`;
@@ -1555,7 +1584,21 @@ function compareView(r) {
 }
 
 // The runtime's own error text for a rejected step (never the model's wording).
-const rejectionText = (res) => { const v = res?.result; return v && typeof v === 'object' && 'error' in v ? String(v.error) : JSON.stringify(v ?? null); };
+const rejectionText = (res) => {
+  const v = res?.result;
+  if (plainObject(v) && v.passed === false && Array.isArray(v.checks) && v.checks.length)
+    return `Tested on a copy: ${v.checks.filter(c => c?.passed === true).length} of ${v.checks.length} checks passed, so the test did not pass.`;
+  return v && typeof v === 'object' && 'error' in v ? String(v.error) : JSON.stringify(v ?? null);
+};
+
+// A stopped/unfinished run may still contain an attempted test. Keep its observed checks visible
+// without manufacturing a selected repair review or a downloadable package.
+function lastRecordedTest(r) {
+  return displayedSteps(r).reverse().find(i => i.step.kind === 'tool_call' && i.step.name === 'rehearse_repair'
+    && plainObject(i.res?.result) && typeof i.res.result.passed === 'boolean'
+    && Array.isArray(i.res.result.checks) && i.res.result.checks.length > 0
+    && i.res.result.checks.every(c => plainObject(c) && typeof c.name === 'string' && typeof c.passed === 'boolean' && typeof c.detail === 'string')) || null;
+}
 
 // A short conclusion built only from validated data: the server's outcome, the recorded rehearsal review
 // and the runtime's rejection messages. It never paraphrases the model's summary.
@@ -1568,7 +1611,11 @@ function recordedConclusion(r, rejected) {
     return `Tested on a disposable copy, ${review.passed ? 'passing' : 'not passing'} ${passed} of ${review.checks.length} checks: ${review.cancellations} orders cancelled, active orders ${review.before_active} → ${review.after_active}, ${review.checkout_preserved} of ${review.checkout_total} later purchases unchanged.${along}`;
   }
   if (r.outcome === 'repair') return `The recording reports a repair, but no verified test on a copy was recorded.${along}`;
-  if (r.outcome === 'stop') return `The model stopped without proposing a repair, so nothing was rehearsed.${reason}`;
+  if (r.outcome === 'stop') {
+    const test = lastRecordedTest(r), v = test?.res.result;
+    const observed = v ? ` Its last test on a copy ${v.passed ? 'passed' : 'did not pass'}: ${v.checks.filter(c => c.passed).length} of ${v.checks.length} checks passed.` : '';
+    return `The model stopped. No repair was selected for review.${observed}${test && last?.call_id === test.res.call_id ? '' : reason}`;
+  }
   if (r.outcome === 'error') return `The attempt ended with an error after ${r.tool_calls} tool results. No verified repair was recorded.${reason}`;
   if (r.outcome === 'incomplete') return `The attempt did not finish after ${r.tool_calls} tool results. No verified repair was recorded.${reason}`;
   return `Outcome recorded as ${r.outcome}.`;
@@ -1608,9 +1655,9 @@ function recordedInvestigationView() {
 function recordedChangesView() {
   const r = state.recording;
   if (!r) return recordedPending();
-  if (!r.review) return `${recBanner(r, true)}${r.outcome === 'stop'
-    ? emptyState('No repair was recorded', 'The model stopped instead of proposing a repair, so this recording has no test on a copy.', 'ban')
-    : emptyState('No verified repair in this recording', `This attempt ended as ${r.outcome}; no verified test on a copy was recorded.`, 'circle-x')}`;
+  if (!r.review) return `${recBanner(r, true)}${emptyState('No repair selected for review', lastRecordedTest(r)
+    ? 'This recording includes an attempted test on a copy. Its saved results are in Checks and the recorded steps; no repair package was selected.'
+    : `This attempt ended as ${r.outcome}; no repair package was selected.`, r.outcome === 'stop' ? 'ban' : 'circle-x')}`;
   const review = r.review;
   return `${recBanner(r, true, true)}
     <div class="section-heading"><h2>Recorded repair review</h2></div>
@@ -1622,7 +1669,14 @@ function recordedChangesView() {
 function recordedChecksView() {
   const r = state.recording;
   if (!r) return recordedPending();
-  if (!r.review) return `${recBanner(r, true)}${emptyState('No checks in this recording', 'Checks run only when a test on a copy is recorded. This attempt did not record one.', 'shield-check')}`;
+  if (!r.review) {
+    const test = lastRecordedTest(r);
+    if (!test) return `${recBanner(r, true)}${emptyState('No recorded check results available', 'This recording has no selected repair review or complete test results to display. Its saved steps remain available.', 'shield-check')}`;
+    const v = test.res.result, passed = v.checks.filter(c => c.passed).length;
+    return `${recBanner(r, true)}<div class="section-heading"><h2>Recorded checks from an attempted repair</h2></div>
+      <div class="callout ${v.passed ? 'success' : 'stop'}"><strong>${passed} / ${v.checks.length} checks passed</strong><br>Saved results from step ${test.n}. No repair was selected for review; these results provide no export.</div>
+      ${table(['Check', 'Recorded result', 'Explanation'], v.checks.map(c => [text(c.name.replaceAll('_', ' ')), c.passed ? 'Passed' : 'Failed', text(c.detail)]))}`;
+  }
   const review = r.review, passed = review.checks.filter(c => c.passed).length;
   return `${recBanner(r, true, true)}
     <div class="section-heading"><h2>Recorded operational checks</h2></div>

@@ -27,7 +27,7 @@ function harness(handler, options = {}) {
     setInterval: (fn) => { intervals.push(fn); return intervals.length; }, clearInterval: (id) => { cleared.push(id); }, intervals, cleared,
   };
   vm.createContext(context);
-  vm.runInContext(source + '\nrender = () => { globalThis.renderCalls++; };\nrenderPanel = () => {};\nglobalThis.subject = {state, download, reviewView, exportStatus, recheckExport, act, changesView, checksTab, sqlView, modeInfo, repairFlow, stockVisual, transition, packageView, lineContext, evidenceWrites, reconstructionView, runsCompare, checkContext, checksTab, demoDefault, staticContract, demoStartCase, guardrailMoment, guardrailView, timelineItems, displayedSteps, evaluationData, evaluationView, renderActions, replayControls, startReplay, playReplay, pauseReplay, nextReplay, sqlView, paletteCommands, loadSql, copySql, api, statusOf, stepsView, recCitations, startup, timerOn: () => replayTimer !== null};', context);
+  vm.runInContext(source + '\nrender = () => { globalThis.renderCalls++; };\nrenderPanel = () => {};\nglobalThis.subject = {state, download, reviewView, exportStatus, recheckExport, act, changesView, checksTab, sqlView, modeInfo, repairFlow, stockVisual, transition, packageView, lineContext, evidenceWrites, reconstructionView, runsCompare, checkContext, checksTab, demoDefault, staticContract, demoStartCase, guardrailMoment, guardrailView, timelineItems, displayedSteps, evaluationData, evaluationView, renderActions, replayControls, startReplay, playReplay, pauseReplay, nextReplay, sqlView, paletteCommands, loadSql, copySql, api, statusOf, stepsView, recCitations, recordedConclusion, recordedChangesView, recordedChecksView, startup, timerOn: () => replayTimer !== null};', context);
   return {context, nodes, ...context.subject};
 }
 
@@ -480,6 +480,76 @@ test('a recording whose inputs differ draws the timeline without links to curren
   const view = app.reconstructionView([{order_id: 'ord_b', duplicate_of: 'ord_a'}], {recorded: true});
   assert.doesNotMatch(view, /data-key=/);
   assert.doesNotMatch(view, /Enter to open one/);
+});
+
+test('the real inbox timelines include forwarded receipts, recorded sequences and all reviewed cancellations', () => {
+  const data = JSON.parse(fs.readFileSync(path.join(__dirname, '../examples/public-demo/demo-data.json'), 'utf8'));
+  for (const [caseId, expectedWrites, expectedFirst] of [['inbox-evidence', 80, 20], ['inbox-ambiguous', 78, 19]]) {
+    const app = harness();
+    const files = Object.fromEntries(Object.entries(data.artifacts[caseId]).map(([name, f]) => [name, f.lines.map(l => l.text)]));
+    evidenceState(app, files, {incident: caseId, orders: data.api_get[`/api/incidents/${caseId}`].orders});
+    const model = app.evidenceWrites();
+    assert.equal(model.error, undefined);
+    assert.equal(model.writes.length, expectedWrites);
+    assert.equal(model.writes.filter(w => w.attempt === 'import-first').length, expectedFirst);
+    assert.equal(model.writes.filter(w => w.ref.startsWith('inbox_receipts.txt:')).length, expectedFirst);
+    assert.equal(model.writes[0].commitLabel, caseId === 'inbox-ambiguous' ? 2 : 1);
+    if (caseId === 'inbox-evidence') {
+      app.state.source = 'recorded';
+      app.state.recording = data.api_get[`/api/recordings/${data.defaults.recording_id}`];
+      const pairs = app.state.recording.review.changes.map(c => ({order_id: c.before.id, duplicate_of: c.duplicate_of}));
+      const view = app.reconstructionView(pairs, {recorded: true});
+      assert.equal((view.match(/class="recon-tick repeat"/g) || []).length, 20);
+      assert.equal((view.match(/class="recon-tick kept"/g) || []).length, 20);
+      assert.match(view, /cancels 20 repeated writes/);
+      assert.doesNotMatch(view, /cancels 0 repeated writes/);
+    }
+  }
+});
+
+test('inbox narrative never draws a commit or authorizes a cancellation', () => {
+  const app = harness();
+  const receipt = {...write('import-first', 'ord_a', {commit_seq: 1}), movement_id: 'mv-a'};
+  evidenceState(app, {'events.jsonl': [{type: 'receipt_inbox', name: 'inbox_receipts.txt', count: 1, format: 'embedded-commit-v1'}, write('import-retry', 'ord_b', {commit_seq: 2})],
+    'inbox_receipts.txt': ['Customer says these purchases repeat.', JSON.stringify(write('import-first', 'invented-order')), '[RR-COMMIT v1] ' + JSON.stringify(receipt)]});
+  const model = app.evidenceWrites();
+  assert.deepEqual(Array.from(model.writes, w => w.order_id), ['ord_a', 'ord_b']);
+  assert.equal(model.writes[0].ref, 'inbox_receipts.txt:L3');
+  assert.doesNotMatch(app.reconstructionView(), /class="recon-tick repeat"/);
+});
+
+test('missing, undeclared or malformed inbox receipts withhold the partial timeline', () => {
+  for (const variant of ['missing', 'undeclared', 'count', 'marker']) {
+    const app = harness();
+    const declaration = {type: 'receipt_inbox', name: 'inbox_receipts.txt', count: variant === 'count' ? 2 : 1, format: 'embedded-commit-v1'};
+    const receipt = {...write('import-first', 'ord_a', {commit_seq: 1}), movement_id: 'mv-a'};
+    const files = {'events.jsonl': [...(variant === 'undeclared' ? [] : [declaration]), write('import-retry', 'ord_b', {commit_seq: 2})]};
+    if (variant !== 'missing') files['inbox_receipts.txt'] = [(variant === 'marker' ? '[RR-COMMIT v2] ' : '[RR-COMMIT v1] ') + JSON.stringify(receipt)];
+    evidenceState(app, files);
+    const view = app.reconstructionView([{order_id: 'ord_b', duplicate_of: 'ord_a'}]);
+    assert.match(view, /no partial timeline is shown/, variant);
+    assert.doesNotMatch(view, /class="recon-tick/, variant);
+  }
+});
+
+test('the real stopped inbox recording keeps its failed checks visible without claiming no test occurred', () => {
+  const data = JSON.parse(fs.readFileSync(path.join(__dirname, '../examples/public-demo/demo-data.json'), 'utf8'));
+  const app = harness(), caseId = 'inbox-ambiguous';
+  app.state.incident = data.api_get[`/api/incidents/${caseId}`];
+  app.state.source = 'recorded';
+  const id = data.api_get[`/api/incidents/${caseId}/recordings`][0].id;
+  const r = app.state.recording = data.api_get[`/api/recordings/${id}`];
+  const conclusion = app.recordedConclusion(r, r.steps.filter(s => s.kind === 'tool_result' && s.error));
+  assert.match(conclusion, /No repair was selected for review/);
+  assert.match(conclusion, /last test on a copy did not pass: 8 of 10 checks passed/);
+  assert.doesNotMatch(conclusion, /nothing was rehearsed|without proposing|source_fingerprint|rehearsal_id/);
+  assert.match(app.recordedChangesView(), /saved results are in Checks/);
+  const checks = app.recordedChecksView();
+  assert.match(checks, /8 \/ 10 checks passed/);
+  assert.match(checks, /source evidence complete<\/td><td>Failed/);
+  assert.match(checks, /source events applied once<\/td><td>Failed/);
+  assert.doesNotMatch(checks, /No checks in this recording|data-download|data-recheck-export/);
+  assert.equal(app.guardrailView(r), '');
 });
 
 // ---------- Compared runs ----------

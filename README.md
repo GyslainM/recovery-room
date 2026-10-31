@@ -3,16 +3,16 @@
 Investigate a failed import, rehearse an evidence-supported correction on a copy,
 and give a developer a checked repair package to review.
 
-**Status: working local investigation/review workbench with recorded Meta runs.**
-The operator's October 28 library contains 13 Muse Spark 1.3 attempts: 7 repair,
-3 stop, 2 error and 1 incomplete outcomes. Recordings show actual tool calls,
+**Status: working local workbench and packaged read-only Meta demo.**
+The saved Muse Spark 1.3 observations include 16 attempts: 9 repair, 4 stop,
+2 error and 1 incomplete outcomes. Recordings show actual tool calls,
 including rejected proposals and corrections, and are explicitly labelled as
 recordings. These are synthetic development observations, not a general success
 rate or a production-safety claim. The competent script also solves the supported
 cases. API keys and raw provider responses stay outside the public demo.
 
-The scoped next stage is documented in [the frozen receipt-inbox experiment](docs/EVIDENCE_STORY_CONTRACT.md)
-and [the UI/static-demo contract](docs/UI_STORY_HANDOFF.md). Prepare its locked
+The completed experiment is documented in [the frozen receipt-inbox contract](docs/EVIDENCE_STORY_CONTRACT.md)
+and [its observed results](docs/EVIDENCE_STORY_RESULTS.md). To reproduce it, prepare a fresh locked
 three-attempt batch **offline** with `python -m recovery_room story-prepare --out <new directory>`.
 Only after that gate passes, enter a key in the local hidden PowerShell prompt
 using `scripts/run-story.ps1 -Prepared <directory>`. The batch runs once, keeps
@@ -21,16 +21,32 @@ also has a competent adapted parser; unsupported old formats do not prove AI nec
 
 `python -m recovery_room demo-export --recordings <library> --out <new directory>`
 creates inert `public/demo-data.json`, retaining failed/incomplete recordings.
-It has no live-model, mutation or export capability. Frontend integration and a
-tested deployment package are required before publishing; the local workbench
-server remains loopback-only.
+It has no live-model, mutation or export capability. The integrated frontend
+and standalone static server were tested together, including dataset refusal,
+all six cases and desktop/phone layouts. Container execution and public
+deployment remain pending; the local workbench server remains loopback-only.
 
 The [October 31 locked batch](docs/EVIDENCE_STORY_RESULTS.md) is now complete:
 two independently verified repairs and one justified stop on the new inbox
 format. The adapted script achieved the same outcomes. A committed
 [read-only dataset](examples/public-demo/demo-data.json) retains all 16 model
-attempts, including earlier errors/incomplete results, for Claude's static UI
-integration. No additional API calls are needed to view that dataset.
+attempts, including earlier errors/incomplete results. The UI opens on the matched
+inbox recording, can replay saved steps, and shows actual rejected proposals,
+failed checks and corrections. Playback pacing is not recorded step timing.
+No additional API calls are needed to view that dataset.
+
+Build and view the recorded demo without a key:
+
+~~~bash
+python -m recovery_room demo-package --data examples/public-demo/demo-data.json --out dist/recorded-demo
+cd dist/recorded-demo
+python public_server.py
+~~~
+
+Open `http://127.0.0.1:8080`. Only fixed static GET/HEAD assets are served;
+there are no public model, repair or export endpoints. Publish only this
+allowlisted package, never raw runs or private-build/. See
+[integration verification](docs/INTEGRATION_VALIDATION.md) for checks and remaining deployment work.
 
 ## Start here
 
