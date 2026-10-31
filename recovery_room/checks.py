@@ -47,6 +47,18 @@ def _item(item: dict) -> dict:
     return out
 
 
+def safely(build):
+    """Run an explanation builder; if it fails, the check keeps its decision and simply has no diagnostics."""
+    try:
+        return build()
+    except Exception:  # noqa: BLE001 - explanations must never turn a computed decision into an error
+        return None
+
+
+def _number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def diagnostics(rule: str, items: list[dict], listing: str = "exceptions") -> dict:
     """listing: "exceptions" lists only what broke the rule; "all" lists every entity the rule covers."""
     return {"rule": _scalar(rule), "listing": listing, "items": [_item(row) for row in items[:MAX_ITEMS]],
@@ -66,6 +78,7 @@ def public_diagnostics(value) -> dict | None:
     for row in items:
         if (not isinstance(row, dict) or set(row) - {"entity", "expected", "observed", "difference", "parts",
                                                        "related", "related_truncated"}
+                or "expected" not in row or "observed" not in row
                 or not isinstance(row.get("entity"), dict) or len(row["entity"]) > MAX_KEYS
                 or not all(isinstance(v, scalar) for v in row["entity"].values())
                 or not isinstance(row.get("expected"), scalar) or not isinstance(row.get("observed"), scalar)
@@ -85,6 +98,11 @@ def public_diagnostics(value) -> dict | None:
         if original.get("related_truncated"):
             row["related_truncated"] = True
     return clean
+
+
+def _mismatches_first(rows: list[dict]) -> list[dict]:
+    """Products that break the rule (or cannot be computed) come first, so the 20-item limit never hides them."""
+    return sorted(rows, key=lambda row: row.get("difference") == 0)
 
 
 def _field_changes(table: str, key: str, before: dict, after: dict, skip: tuple[str, ...] = ()) -> list[dict]:
@@ -110,10 +128,14 @@ def check_state(incident: Path, candidate: Path, before: dict, targeted_ids: set
     foreign_keys = not foreign_key_rows
     checks: list[dict] = []
 
-    def add(name: str, passed: bool, detail: str, explained: dict) -> None:
-        checks.append({"name": name, "passed": bool(passed), "detail": detail, "diagnostics": explained})
+    def add(name: str, passed: bool, detail: str, explain) -> None:
+        check = {"name": name, "passed": bool(passed), "detail": detail}
+        explained = safely(explain)
+        if explained is not None:
+            check["diagnostics"] = explained
+        checks.append(check)
 
-    add("database_integrity", integrity and foreign_keys, "SQLite integrity and foreign-key checks.", diagnostics(
+    add("database_integrity", integrity and foreign_keys, "SQLite integrity and foreign-key checks.", lambda: diagnostics(
         "PRAGMA integrity_check returns ok and PRAGMA foreign_key_check returns no rows",
         ([] if integrity else [{"entity": {"check": "integrity_check"}, "expected": "ok", "observed": row} for row in integrity_rows])
         + [{"entity": {"table": row[0], "rowid": row[1]}, "expected": f"a parent row in {row[2]}", "observed": "missing"}
@@ -123,39 +145,42 @@ def check_state(incident: Path, candidate: Path, before: dict, targeted_ids: set
         set(orders) == set(original)
         and all(orders[key] == row for key, row in original.items() if key not in targeted_ids)
     )
-    exceptions = [{"entity": {"table": "orders", "id": key}, "expected": "present", "observed": "missing"}
-                  for key in sorted(set(original) - set(orders))]
-    exceptions += [{"entity": {"table": "orders", "id": key}, "expected": "absent", "observed": "added"}
-                   for key in sorted(set(orders) - set(original))]
-    for key in sorted(original):
-        if key not in targeted_ids and key in orders and orders[key] != original[key]:
-            exceptions += _field_changes("orders", key, original[key], orders[key])
-    add("unaffected_orders_preserved", unchanged, "Every untargeted order matches its original record exactly.",
-        diagnostics("Every order the plan does not target matches its original record exactly", exceptions))
+    def untouched_changes():
+        found = [{"entity": {"table": "orders", "id": key}, "expected": "present", "observed": "missing"}
+                 for key in sorted(set(original) - set(orders))]
+        found += [{"entity": {"table": "orders", "id": key}, "expected": "absent", "observed": "added"}
+                  for key in sorted(set(orders) - set(original))]
+        for key in sorted(original):
+            if key not in targeted_ids and key in orders and orders[key] != original[key]:
+                found += _field_changes("orders", key, original[key], orders[key])
+        return diagnostics("Every order the plan does not target matches its original record exactly", found)
+    add("unaffected_orders_preserved", unchanged, "Every untargeted order matches its original record exactly.", untouched_changes)
 
     history = all(
         all(orders[key][field] == row[field] for field in row if field != "status")
         for key, row in original.items() if key in orders
     )
-    exceptions = []
-    for key in sorted(original):
-        if key in orders:
-            exceptions += _field_changes("orders", key, original[key], orders[key], skip=("status",))
-    add("order_history_preserved", history, "Corrections retain original order identities, quantities and customer fields.",
-        diagnostics("Only an order's status may change; every other field keeps its original value", exceptions))
+    def history_changes():
+        found = []
+        for key in sorted(original):
+            if key in orders:
+                found += _field_changes("orders", key, original[key], orders[key], skip=("status",))
+        return diagnostics("Only an order's status may change; every other field keeps its original value", found)
+    add("order_history_preserved", history, "Corrections retain original order identities, quantities and customer fields.", history_changes)
 
     original_movements = {row["id"]: row for row in before["inventory_movements"]}
     current_movements = {row["id"]: row for row in movements}
     intact = all(current_movements.get(key) == row for key, row in original_movements.items())
-    exceptions = []
-    for key in sorted(original_movements):
-        current = current_movements.get(key)
-        if current is None:
-            exceptions.append({"entity": {"table": "inventory_movements", "id": key}, "expected": "present", "observed": "missing"})
-        elif current != original_movements[key]:
-            exceptions += _field_changes("inventory_movements", key, original_movements[key], current)
-    add("original_movements_preserved", intact, "Original stock movements remain intact; corrections are compensating entries.",
-        diagnostics("Every original stock movement is still present and unchanged", exceptions))
+    def movement_changes():
+        found = []
+        for key in sorted(original_movements):
+            current = current_movements.get(key)
+            if current is None:
+                found.append({"entity": {"table": "inventory_movements", "id": key}, "expected": "present", "observed": "missing"})
+            elif current != original_movements[key]:
+                found += _field_changes("inventory_movements", key, original_movements[key], current)
+        return diagnostics("Every original stock movement is still present and unchanged", found)
+    add("original_movements_preserved", intact, "Original stock movements remain intact; corrections are compensating entries.", movement_changes)
 
     balanced = all(
         product["on_hand"] == opening[product["sku"]] + sum(
@@ -163,17 +188,21 @@ def check_state(incident: Path, candidate: Path, before: dict, targeted_ids: set
         )
         for product in state["products"]
     )
-    ledger = []
-    for product in state["products"]:
-        sku = product["sku"]
-        moved = sum(row["delta"] for row in movements if row["sku"] == sku)
-        expected = opening[sku] + moved
-        added = [row["id"] for row in movements if row["sku"] == sku and row["id"] not in original_movements]
-        ledger.append({"entity": {"table": "products", "sku": sku}, "parts": {"opening": opening[sku], "movements": moved},
-                       "expected": expected, "observed": product["on_hand"], "difference": product["on_hand"] - expected,
-                       "related": {"added_movement_ids": added} if added else None})
-    add("stock_matches_movement_ledger", balanced, "Opening stock plus all recorded movements equals current stock.",
-        diagnostics("Stock on hand = opening stock + the sum of recorded movements", ledger, "all"))
+    def ledger_rows():
+        rows = []
+        for product in state["products"]:
+            sku, base = product["sku"], opening.get(product["sku"])
+            moved = sum(row["delta"] for row in movements if row["sku"] == sku)
+            added = [row["id"] for row in movements if row["sku"] == sku and row["id"] not in original_movements]
+            row = {"entity": {"table": "products", "sku": sku}, "parts": {"opening": base if _number(base) else None, "movements": moved},
+                   "observed": product["on_hand"], "related": {"added_movement_ids": added} if added else None}
+            if _number(base) and _number(product["on_hand"]):
+                row.update(expected=base + moved, difference=product["on_hand"] - (base + moved))
+            else:
+                row["expected"] = "unavailable: no opening stock for this product"
+            rows.append(row)
+        return diagnostics("Stock on hand = opening stock + the sum of recorded movements", _mismatches_first(rows), "all")
+    add("stock_matches_movement_ledger", balanced, "Opening stock plus all recorded movements equals current stock.", ledger_rows)
 
     active_balance = all(
         product["on_hand"] == opening[product["sku"]] - sum(
@@ -182,18 +211,23 @@ def check_state(incident: Path, candidate: Path, before: dict, targeted_ids: set
         )
         for product in state["products"]
     )
-    reconciled = []
-    for product in state["products"]:
-        sku = product["sku"]
-        active = sum(row["quantity"] for row in orders.values() if row["sku"] == sku and row["status"] == "active")
-        expected = opening[sku] - active
-        reconciled.append({"entity": {"table": "products", "sku": sku}, "parts": {"opening": opening[sku], "active_quantity": active},
-                           "expected": expected, "observed": product["on_hand"], "difference": product["on_hand"] - expected})
-    add("stock_matches_active_orders", active_balance, "Stock reconciles with all active purchases, including later purchases.",
-        diagnostics("Stock on hand = opening stock − the quantity of every active order", reconciled, "all"))
+    def reconciled_rows():
+        rows = []
+        for product in state["products"]:
+            sku, base = product["sku"], opening.get(product["sku"])
+            active = sum(row["quantity"] for row in orders.values() if row["sku"] == sku and row["status"] == "active")
+            row = {"entity": {"table": "products", "sku": sku}, "parts": {"opening": base if _number(base) else None, "active_quantity": active},
+                   "observed": product["on_hand"]}
+            if _number(base) and _number(product["on_hand"]):
+                row.update(expected=base - active, difference=product["on_hand"] - (base - active))
+            else:
+                row["expected"] = "unavailable: no opening stock for this product"
+            rows.append(row)
+        return diagnostics("Stock on hand = opening stock − the quantity of every active order", _mismatches_first(rows), "all")
+    add("stock_matches_active_orders", active_balance, "Stock reconciles with all active purchases, including later purchases.", reconciled_rows)
 
     covered = source_ids.issubset(groups)
-    add("source_evidence_complete", covered, "Every source event has an observable committed write.", diagnostics(
+    add("source_evidence_complete", covered, "Every source event has an observable committed write.", lambda: diagnostics(
         "Every imported source event has at least one committed-write record",
         [{"entity": {"event_id": event_id}, "expected": "a committed write", "observed": "none"}
          for event_id in sorted(source_ids - set(groups))]))
@@ -202,15 +236,16 @@ def check_state(incident: Path, candidate: Path, before: dict, targeted_ids: set
         sum(orders.get(item["order_id"], {}).get("status") == "active" for item in groups[event_id]) == 1
         for event_id in source_ids
     )
-    exceptions = []
-    for event_id in sorted(source_ids):
-        recorded = [item["order_id"] for item in groups.get(event_id, [])]
-        active = [key for key in recorded if orders.get(key, {}).get("status") == "active"]
-        if len(active) != 1:
-            exceptions.append({"entity": {"event_id": event_id}, "expected": 1, "observed": len(active),
-                               "related": {"active_order_ids": active, "recorded_order_ids": recorded}})
-    add("source_events_applied_once", once, "Exactly one recorded order remains active per imported source event.",
-        diagnostics("Exactly one recorded order stays active for each imported source event", exceptions))
+    def activation_counts():
+        found = []
+        for event_id in sorted(source_ids):
+            recorded = [item["order_id"] for item in groups.get(event_id, [])]
+            active = [key for key in recorded if orders.get(key, {}).get("status") == "active"]
+            if len(active) != 1:
+                found.append({"entity": {"event_id": event_id}, "expected": 1, "observed": len(active),
+                              "related": {"active_order_ids": active, "recorded_order_ids": recorded}})
+        return diagnostics("Exactly one recorded order stays active for each imported source event", found)
+    add("source_events_applied_once", once, "Exactly one recorded order remains active per imported source event.", activation_counts)
     return checks
 
 

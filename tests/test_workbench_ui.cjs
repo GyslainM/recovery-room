@@ -635,7 +635,7 @@ test('a check with diagnostics shows what the checker computed, not a derived vi
   assert.match(view, /<th scope="col">Product<\/th><th scope="col">Expected<\/th><th scope="col">Observed<\/th><th scope="col">Difference<\/th>/);
   assert.match(view, /<small class="diag-sum">162 \+ 10<\/small>/);
   assert.match(view, /<span class="num cancelled">\+2<\/span>/);
-  assert.match(view, /1 product differs from the rule\. The repair added 2 compensating movements\./);
+  assert.match(view, /1 listed product breaks the rule\. The repair added 2 compensating movements\./);
   assert.match(view, /data-key="product:KEYBOARD">Keyboard</);
   assert.doesNotMatch(view, /Derived from the rehearsal review/);
 });
@@ -669,4 +669,41 @@ test('a recording without diagnostics keeps the derived view, and mismatched inp
   const view = app.checkContext('stock_matches_movement_ledger');
   assert.match(view, /What the checker computed/);
   assert.doesNotMatch(view, /data-key=/);
+});
+
+test('a partial stock list never claims every product matches, and names where the failure is', () => {
+  const app = harness();
+  app.state.incident = {id: 'case-a', products: []};
+  const items = Array.from({length: 20}, (_, i) => ({entity: {table: 'products', sku: `SKU_${String(i).padStart(2, '0')}`},
+    parts: {opening: 10, movements: 0}, expected: 10, observed: 10, difference: 0}));
+  const failed = {name: 'stock_matches_movement_ledger', passed: false, detail: 'Opening stock plus all recorded movements equals current stock.',
+    diagnostics: {rule: 'r', listing: 'all', items, total: 21, truncated: true}};
+  app.state.run = diagnosedRun([failed]);
+  const view = app.checkContext('stock_matches_movement_ledger');
+  assert.doesNotMatch(view, /Every product matches/);
+  assert.match(view, /The 20 listed products match the rule, so the failure is among the 1 not listed\./);
+  assert.match(app.checksTab(), /Not among the 20 listed; 1 more was not listed/);
+
+  const passed = {...failed, passed: true};
+  app.state.run = diagnosedRun([passed]);
+  assert.match(app.checkContext('stock_matches_movement_ledger'), /The 20 listed products match the rule; 1 more was not listed\./);
+});
+
+test('a product whose expected stock is unavailable counts as breaking the rule', () => {
+  const app = harness();
+  app.state.incident = {id: 'case-a', products: []};
+  app.state.run = diagnosedRun([{name: 'stock_matches_active_orders', passed: false, detail: 'd', diagnostics: {rule: 'r', listing: 'all', total: 2, truncated: false, items: [
+    {entity: {table: 'products', sku: 'ZZZ_EXTRA'}, parts: {opening: null, active_quantity: 0}, expected: 'unavailable: no opening stock for this product', observed: 3},
+    {entity: {table: 'products', sku: 'MOUSE'}, parts: {opening: 5, active_quantity: 0}, expected: 5, observed: 5, difference: 0}]}}]);
+  assert.match(app.checkContext('stock_matches_active_orders'), /1 listed product breaks the rule\./);
+  assert.match(app.checksTab(), /ZZZ_EXTRA: expected unavailable: no opening stock for this product, observed 3/);
+});
+
+test('shortened related ID lists say so', () => {
+  const app = harness();
+  app.state.incident = {id: 'case-a', products: []};
+  const ids = Array.from({length: 20}, (_, i) => `ord_${i}`);
+  app.state.run = diagnosedRun([{name: 'source_events_applied_once', passed: false, detail: 'd', diagnostics: {rule: 'r', listing: 'exceptions', total: 1, truncated: false,
+    items: [{entity: {event_id: 'evt-1'}, expected: 1, observed: 25, related: {active_order_ids: ids}, related_truncated: true}]}}]);
+  assert.match(app.checkContext('source_events_applied_once'), /Lists shortened to their first 20 IDs/);
 });

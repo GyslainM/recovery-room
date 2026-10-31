@@ -10,7 +10,7 @@ from pathlib import Path
 import sqlite3
 import uuid
 
-from .checks import check_state, diagnostics
+from .checks import check_state, diagnostics, safely
 from .db import TABLES, copy_database, fingerprint, snapshot
 from .fixtures import artifact_names, evidence_index, read_artifact
 
@@ -179,7 +179,7 @@ def execute_plan(path: Path, plan: dict) -> None:
 def rehearse(incident: Path, plan: dict, output: Path) -> dict:
     plan = normalize_plan(plan)
     evidence_hash = evidence_fingerprint(incident)
-    evidence_files = evidence_digests(incident)
+    evidence_files = safely(lambda: evidence_digests(incident))
     output.mkdir(parents=True, exist_ok=True)
     folder = output / f"rehearsal-{uuid.uuid4().hex[:12]}"
     folder.mkdir()
@@ -192,24 +192,28 @@ def rehearse(incident: Path, plan: dict, output: Path) -> dict:
     checks = check_state(incident, candidate, before, {a["order_id"] for a in plan["cancellations"]})
     source_now = snapshot(original)
     source_unchanged = source_now == before
-    changed_tables = input_changes("table", before, source_now)
-    checks.append({
-        "name": "source_snapshot_unchanged", "passed": source_unchanged,
-        "detail": "The original still matches the snapshot used for rehearsal; otherwise this plan is stale.",
-        "diagnostics": diagnostics("The source database matches the snapshot taken when the rehearsal began",
-                                   changed_tables or ([] if source_unchanged else [{"entity": {"table": "source database"},
-                                                      "expected": "unchanged since the rehearsal began", "observed": "changed"}])),
-    })
+
+    def source_changes():
+        changed = input_changes("table", before, source_now)
+        return diagnostics("The source database matches the snapshot taken when the rehearsal began",
+                           changed or ([] if source_unchanged else [{"entity": {"table": "source database"},
+                                                                     "expected": "unchanged since the rehearsal began", "observed": "changed"}]))
+    source_check = {"name": "source_snapshot_unchanged", "passed": source_unchanged,
+                    "detail": "The original still matches the snapshot used for rehearsal; otherwise this plan is stale."}
     evidence_unchanged = evidence_fingerprint(incident) == evidence_hash
-    changed_files = input_changes("file", evidence_files, evidence_digests(incident))
-    checks.append({
-        "name": "evidence_snapshot_unchanged",
-        "passed": evidence_unchanged,
-        "detail": "The evidence files still match those used for the rehearsal.",
-        "diagnostics": diagnostics("Every evidence file matches the one read when the rehearsal began",
-                                   changed_files or ([] if evidence_unchanged else [{"entity": {"file": "evidence set"},
-                                                     "expected": "unchanged since the rehearsal began", "observed": "changed"}])),
-    })
+
+    def evidence_changes():
+        changed = input_changes("file", evidence_files, evidence_digests(incident))
+        return diagnostics("Every evidence file matches the one read when the rehearsal began",
+                           changed or ([] if evidence_unchanged else [{"entity": {"file": "evidence set"},
+                                                                       "expected": "unchanged since the rehearsal began", "observed": "changed"}]))
+    evidence_check = {"name": "evidence_snapshot_unchanged", "passed": evidence_unchanged,
+                      "detail": "The evidence files still match those used for the rehearsal."}
+    for check, explain in ((source_check, source_changes), (evidence_check, evidence_changes)):
+        explained = safely(explain)
+        if explained is not None:
+            check["diagnostics"] = explained
+        checks.append(check)
     after = snapshot(candidate)
     return {
         "passed": all(check["passed"] for check in checks),

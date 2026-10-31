@@ -1706,14 +1706,21 @@ function diagEntity(e) {
 }
 
 // One line for a failed check: its first exception (or product off by a difference), and how many more.
+// A listed row breaks the rule unless it shows a zero difference; a row whose expected value could not be
+// computed cannot be shown to match. A partial list never supports a claim about the rows it leaves out.
+const offRow = (i) => !(typeof i.difference === 'number' && i.difference === 0);
+const unlisted = (d) => Math.max(0, (Number.isInteger(d.total) ? d.total : 0) - d.items.length);
+const wasWere = (n) => `${n} more ${n === 1 ? 'was' : 'were'} not listed`;
+
 function diagSummary(check) {
   if (check.passed || !hasDiagnostics(check)) return '';
-  const d = check.diagnostics;
-  const off = d.listing === 'all' ? d.items.filter(i => typeof i.difference === 'number' && i.difference !== 0) : d.items;
-  if (!off.length) return '';
-  const first = off[0], more = (d.listing === 'all' ? off.length : d.total) - 1;
+  const d = check.diagnostics, hidden = unlisted(d);
+  const off = d.listing === 'all' ? d.items.filter(offRow) : d.items;
+  if (!off.length) return hidden ? `Not among the ${d.items.length} listed; ${wasWere(hidden)}` : '';
+  const first = off[0], more = d.listing === 'all' ? off.length - 1 : d.total - 1;
   const diff = typeof first.difference === 'number' ? ` (${signedNum(first.difference)})` : '';
-  return `${diagEntityText(first.entity)}: expected ${diagValue(first.expected)}, observed ${diagValue(first.observed)}${diff}${more > 0 ? ` · ${more} more` : ''}`;
+  const tail = [more > 0 ? `${more} more` : '', d.listing === 'all' && hidden ? `${hidden} not listed` : ''].filter(Boolean).join(' · ');
+  return `${diagEntityText(first.entity)}: expected ${diagValue(first.expected)}, observed ${diagValue(first.observed)}${diff}${tail ? ` · ${tail}` : ''}`;
 }
 
 function diagnosticsView(check) {
@@ -1721,7 +1728,8 @@ function diagnosticsView(check) {
   const rule = `<p class="diag-rule">${icon('shield-check')}<span>${text(d.rule)}</span></p>`;
   const more = d.truncated ? `<p class="caption">Showing ${items.length} of ${text(d.total)}; the checker lists at most ${items.length}.</p>` : '';
   if (d.listing === 'all') {
-    const added = items.reduce((n, i) => n + (i.related?.added_movement_ids?.length || 0), 0);
+    const added = items.reduce((n, i) => n + (i.related?.added_movement_ids?.length || 0), 0), hidden = unlisted(d);
+    const atLeast = hidden > 0 || items.some(i => i.related_truncated) ? 'at least ' : '';
     // The parts behind each expected value, as a small sum under it (the rule above names them).
     const sum = (parts) => {
       const known = Object.entries(parts || {}).filter(([k, v]) => k in DIAG_PART_SIGN && typeof v === 'number');
@@ -1730,17 +1738,22 @@ function diagnosticsView(check) {
     };
     const rows = items.map(i => [diagEntity(i.entity),
       `<span class="num">${text(diagValue(i.expected))}</span>${sum(i.parts) ? `<small class="diag-sum">${text(sum(i.parts))}</small>` : ''}`,
-      `<span class="num">${text(diagValue(i.observed))}</span>`, `<span class="num${i.difference ? ' cancelled' : ''}">${signedNum(i.difference)}</span>`]);
-    const off = items.filter(i => i.difference).length;
+      `<span class="num">${text(diagValue(i.observed))}</span>`, `<span class="num${offRow(i) ? ' cancelled' : ''}">${signedNum(i.difference)}</span>`]);
+    const off = items.filter(offRow).length;
+    const verdict = off ? `${off} listed product${off === 1 ? ' breaks' : 's break'} the rule${hidden ? `; ${wasWere(hidden)}` : ''}.`
+      : !hidden ? (check.passed ? 'Every product matches the rule.' : 'No listed product breaks the rule, yet the check failed.')
+      : check.passed ? `The ${items.length} listed products match the rule; ${wasWere(hidden)}.`
+      : `The ${items.length} listed products match the rule, so the failure is among the ${hidden} not listed.`;
     return `<h3>What the checker computed</h3>${rule}
       ${table(['Product', 'Expected', 'Observed', 'Difference'], rows)}${more}
-      <p class="small">${text(off ? `${off} product${off === 1 ? '' : 's'} differ${off === 1 ? 's' : ''} from the rule.` : 'Every product matches the rule.')}${added ? text(` The repair added ${added} compensating movement${added === 1 ? '' : 's'}.`) : ''}</p>`;
+      <p class="small">${text(verdict)}${added ? text(` The repair added ${atLeast}${added} compensating movement${added === 1 && !atLeast ? '' : 's'}.`) : ''}</p>`;
   }
   if (!items.length) return `<h3>What the checker computed</h3>${rule}<p class="small">No exceptions: nothing broke this rule.</p>`;
   const withDiff = items.some(i => typeof i.difference === 'number'), withRelated = items.some(i => i.related);
-  const related = (r) => r ? Object.entries(r).map(([k, ids]) => `<div class="diag-related"><span class="caption">${text(DIAG_RELATED[k] || k)}</span> ${ids.length ? ids.map(id => /order/.test(k) && active().selectable ? `<button class="link small mono" data-key="${escape(`order:${id}`)}">${text(id)}</button>` : `<span class="mono">${text(id)}</span>`).join(' ') : '<span class="caption">none</span>'}</div>`).join('') : '';
+  const related = (r, cut) => r ? Object.entries(r).map(([k, ids]) => `<div class="diag-related"><span class="caption">${text(DIAG_RELATED[k] || k)}</span> ${ids.length ? ids.map(id => /order/.test(k) && active().selectable ? `<button class="link small mono" data-key="${escape(`order:${id}`)}">${text(id)}</button>` : `<span class="mono">${text(id)}</span>`).join(' ') : '<span class="caption">none</span>'}</div>`).join('')
+    + (cut ? `<div class="caption">Lists shortened to their first ${Math.max(...Object.values(r).map(ids => ids.length))} IDs</div>` : '') : '';
   const rows = items.map(i => [diagEntity(i.entity), text(diagValue(i.expected)), `<span class="cancelled">${text(diagValue(i.observed))}</span>`,
-    ...(withDiff ? [`<span class="num">${signedNum(i.difference)}</span>`] : []), ...(withRelated ? [related(i.related)] : [])]);
+    ...(withDiff ? [`<span class="num">${signedNum(i.difference)}</span>`] : []), ...(withRelated ? [related(i.related, i.related_truncated)] : [])]);
   return `<h3>What the checker found</h3>${rule}
     ${table(['Record', 'Expected', 'Observed', ...(withDiff ? ['Difference'] : []), ...(withRelated ? ['Related'] : [])], rows)}${more}`;
 }

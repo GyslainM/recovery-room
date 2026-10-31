@@ -14,11 +14,12 @@ from recovery_room import repairs
 from recovery_room.agent import AgentTools
 from recovery_room.baselines import event_aware_plan
 from recovery_room.checks import MAX_ITEMS, MAX_TEXT, check_state, public_diagnostics
+from recovery_room import checks as checks_module
 from recovery_room.db import copy_database, snapshot
 from recovery_room.fixtures import create_incident
 from recovery_room.repairs import input_changes, rehearse
 
-from test_recordings import RecordingCase
+from tests.test_recordings import RecordingCase
 
 
 def by_name(checks):
@@ -155,6 +156,68 @@ class CheckDiagnosticsTests(DiagnosticsCase):
         self.assertTrue(all(set(check) == {"name", "passed", "detail"} for check in result["checks"]))
 
 
+class DiagnosticsRegressionTests(DiagnosticsCase):
+    """Codex's reproductions of a65f936: explanations never change or abort a decision, and never hide a failure."""
+
+    def reference_stock_decisions(self, candidate):
+        # The stock decisions exactly as written before diagnostics existed (short-circuiting all()).
+        state = snapshot(candidate)
+        orders = {row["id"]: row for row in state["orders"]}
+        movements = state["inventory_movements"]
+        opening = json.loads((self.incident / "evidence" / "opening_stock.json").read_text(encoding="utf-8"))
+        balanced = all(product["on_hand"] == opening[product["sku"]] + sum(
+            row["delta"] for row in movements if row["sku"] == product["sku"]) for product in state["products"])
+        active = all(product["on_hand"] == opening[product["sku"]] - sum(
+            row["quantity"] for row in orders.values() if row["sku"] == product["sku"] and row["status"] == "active")
+            for product in state["products"])
+        return balanced, active
+
+    def test_a_product_missing_from_opening_stock_fails_the_checks_instead_of_raising(self):
+        result = self.rehearsal()
+        candidate = Path(result["candidate_path"])
+        checks = self.recheck(result, "UPDATE products SET on_hand = on_hand - 1 WHERE sku = 'HEADPHONES';"
+                                      "INSERT INTO products (sku, name, on_hand) VALUES ('ZZZ_EXTRA', 'Extra', 3);")
+        ledger, active = checks["stock_matches_movement_ledger"], checks["stock_matches_active_orders"]
+        self.assertEqual((ledger["passed"], active["passed"]), self.reference_stock_decisions(candidate))
+        self.assertEqual((ledger["passed"], active["passed"]), (False, False))
+        for check in (ledger, active):
+            with self.subTest(check=check["name"]):
+                rows = {item["entity"]["sku"]: item for item in check["diagnostics"]["items"]}
+                self.assertEqual(rows["ZZZ_EXTRA"]["expected"], "unavailable: no opening stock for this product")
+                self.assertEqual(rows["ZZZ_EXTRA"]["observed"], 3)
+                self.assertNotIn("difference", rows["ZZZ_EXTRA"])
+                self.assertIsNone(rows["ZZZ_EXTRA"]["parts"]["opening"])
+                self.assertEqual(rows["HEADPHONES"]["difference"], -1)
+                # Rows that break or cannot satisfy the rule come first.
+                self.assertEqual([item["entity"]["sku"] for item in check["diagnostics"]["items"][:2]], ["HEADPHONES", "ZZZ_EXTRA"])
+
+    def test_a_mismatch_past_the_twentieth_product_is_listed_first(self):
+        result = self.rehearsal()
+        opening_path = self.incident / "evidence" / "opening_stock.json"
+        opening = json.loads(opening_path.read_text(encoding="utf-8"))
+        extra = [f"ZZ_{n:02d}" for n in range(17)]  # 4 real products + 17 = 21
+        opening.update({sku: 10 for sku in extra})
+        opening_path.write_text(json.dumps(opening), encoding="utf-8")
+        values = ", ".join(f"('{sku}', '{sku}', {12 if sku == extra[-1] else 10})" for sku in extra)
+        checks = self.recheck(result, f"INSERT INTO products (sku, name, on_hand) VALUES {values};")
+        for name in ("stock_matches_movement_ledger", "stock_matches_active_orders"):
+            with self.subTest(check=name):
+                explained = checks[name]["diagnostics"]
+                self.assertFalse(checks[name]["passed"])
+                self.assertEqual((explained["total"], len(explained["items"]), explained["truncated"]), (21, MAX_ITEMS, True))
+                self.assertEqual(explained["items"][0]["entity"]["sku"], extra[-1])
+                self.assertEqual(explained["items"][0]["difference"], 2)
+                self.assertEqual(sum(item["difference"] != 0 for item in explained["items"]), 1)
+
+    def test_a_failing_explanation_leaves_the_decision_and_omits_diagnostics(self):
+        result = self.rehearsal()
+        with mock.patch.object(checks_module, "diagnostics", side_effect=RuntimeError("explanation broke")):
+            plain = check_state(self.incident, Path(result["candidate_path"]), result["before"],
+                                {a["order_id"] for a in result["plan"]["cancellations"]})
+        self.assertEqual([(c["name"], c["passed"]) for c in plain], [(c["name"], c["passed"]) for c in result["checks"][:8]])
+        self.assertTrue(all(set(check) == {"name", "passed", "detail"} for check in plain))
+
+
 class PublicDiagnosticsTests(unittest.TestCase):
     VALID = {"rule": "r", "listing": "all", "total": 1, "truncated": False,
              "items": [{"entity": {"sku": "MOUSE"}, "expected": 3, "observed": 4, "difference": 1,
@@ -169,13 +232,22 @@ class PublicDiagnosticsTests(unittest.TestCase):
                    lambda d: d["items"][0]["entity"].update(sku={"nested": 1}),
                    lambda d: d["items"][0].update(expected=[1, 2]), lambda d: d["items"][0].update(difference=True),
                    lambda d: d["items"][0].update(related={"order_ids": [1]}), lambda d: d["items"][0].update(note="x"),
-                   lambda d: d.update(items="none")]
+                   lambda d: d.update(items="none"),
+                   lambda d: d["items"][0].pop("expected"), lambda d: d["items"][0].pop("observed"),
+                   lambda d: d.update(items=[{"entity": {"sku": "MOUSE"}}])]
         for change in changes:
             value = copy.deepcopy(self.VALID)
             change(value)
             with self.subTest(value=value):
                 self.assertIsNone(public_diagnostics(value))
         self.assertIsNone(public_diagnostics(None))
+
+    def test_an_explicitly_recorded_null_is_kept_but_never_invented(self):
+        value = copy.deepcopy(self.VALID)
+        value["items"][0]["observed"] = None
+        self.assertIsNone(public_diagnostics(value)["items"][0]["observed"])
+        del value["items"][0]["observed"]
+        self.assertIsNone(public_diagnostics(value))
 
     def test_long_or_control_text_is_rebounded(self):
         value = copy.deepcopy(self.VALID)
