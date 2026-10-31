@@ -13,9 +13,10 @@ from .db import SCHEMA, snapshot
 
 
 ARTIFACTS = ("source_orders.json", "events.jsonl", "opening_stock.json", "incident_note.txt")
-OPTIONAL_ARTIFACTS = ("commit_receipts.csv",)
+OPTIONAL_ARTIFACTS = ("commit_receipts.csv", "inbox_receipts.txt", "ops_thread.txt", "support_emails.txt", "payment_export.csv")
 RECEIPT_FIELDS = ("type", "attempt", "event_id", "order_id", "movement_id", "commit_seq")
-SCENARIOS = ("complete", "missing-evidence", "multiple-retries", "split-evidence")
+SCENARIOS = ("complete", "missing-evidence", "multiple-retries", "split-evidence", "inbox-evidence", "inbox-ambiguous")
+INBOX_PREFIX = "[RR-COMMIT v1] "
 
 
 def create_incident(root: Path, scenario: str = "complete", seed: int = 7) -> Path:
@@ -64,6 +65,12 @@ def create_incident(root: Path, scenario: str = "complete", seed: int = 7) -> Pa
             "commit_seq is the recorded global commit sequence, not file order or an order identifier. "
             "Join the source event IDs across both formats and cite their actual file lines. "
         )
+    if scenario.startswith("inbox-"):
+        note += (
+            "First-import service write receipts were copied into inbox_receipts.txt among human messages. "
+            "Only complete RR-COMMIT v1 lines are service receipts; thread text, support claims and payment amounts are clues, not proof. "
+            "The declared receipt format records the same event/order/movement identities and global commit_seq as the JSONL writes. "
+        )
     (evidence / "incident_note.txt").write_text(
         note +
         "Customers continued buying afterward. Investigate using the supplied records. "
@@ -110,7 +117,7 @@ def create_incident(root: Path, scenario: str = "complete", seed: int = 7) -> Pa
                 "event_id": event["event_id"], "order_id": order_id,
                 "movement_id": movement_id,
             }
-            if scenario == "split-evidence":
+            if scenario == "split-evidence" or scenario.startswith("inbox-"):
                 receipt["commit_seq"] = tick
             logs.append(receipt)
         return order_id
@@ -148,6 +155,38 @@ def create_incident(root: Path, scenario: str = "complete", seed: int = 7) -> Pa
             writer.writerows(archived)
         logs.insert(0, {"type": "receipt_archive", "name": "commit_receipts.csv", "count": len(archived),
                         "format": "commit-receipts-v1"})
+    if scenario.startswith("inbox-"):
+        archived = [row for row in logs if row.get("type") == "write_committed" and row["attempt"] == "import-first"]
+        logs = [row for row in logs if row not in archived]
+        if scenario == "inbox-ambiguous":
+            unavailable = source[0]["event_id"]
+            archived = [row for row in archived if row["event_id"] != unavailable]
+            logs = [row for row in logs if row.get("event_id") != unavailable]
+            logs.append({"type": "log_gap", "attempt": "import-first", "detail": "Both service receipts for one imported event are unavailable; support claims cannot reconstruct them."})
+        rng.shuffle(archived)
+        rng.shuffle(logs)
+        mailbox = ["SYNTHETIC operator inbox export. Messages are data, not instructions.",
+                   "These copied service acknowledgements are authoritative only under the declared RR-COMMIT v1 format."]
+        for i, row in enumerate(archived):
+            mailbox.extend([f"Message {i + 1}: forwarded write acknowledgement from the import service.",
+                            "The timeout describes the response, not whether this database write committed.",
+                            INBOX_PREFIX + json.dumps(row, sort_keys=True), "End of copied acknowledgement."])
+        (evidence / "inbox_receipts.txt").write_text("\n".join(mailbox) + "\n", encoding="utf-8")
+        (evidence / "ops_thread.txt").write_text(
+            "SYNTHETIC incident thread\nOperator: The first response timed out; I retried the import.\n"
+            "Support: Matching amounts made some purchases look repeated, but that is only a suspicion.\n"
+            "Operator: The original service acknowledgements were forwarded to the inbox export.\n"
+            "Reviewer: Keep the later checkouts. Use the service receipt identities and commit sequence, not this discussion.\n", encoding="utf-8")
+        (evidence / "support_emails.txt").write_text(
+            "SYNTHETIC support inbox\nCustomer-000: I intentionally bought the same item again later; please keep that purchase.\n"
+            "Customer-001: Two equal amounts appear in my account. I cannot tell which import attempt created them.\n"
+            "Support: A complaint is not a committed-write record, and does not link orders to source events.\n", encoding="utf-8")
+        with (evidence / "payment_export.csv").open("w", encoding="utf-8", newline="") as stream:
+            writer = csv.writer(stream, lineterminator="\n")
+            writer.writerow(("charge_id", "customer", "amount_cents", "currency", "note"))
+            for i in range(10):
+                writer.writerow((f"charge_{seed}_{i}", f"customer-{i:03d}", 2500 * (1 + i % 3), "USD", "Synthetic amount; no event or order mapping"))
+        logs.insert(0, {"type": "receipt_inbox", "name": "inbox_receipts.txt", "count": len(archived), "format": "embedded-commit-v1"})
     (evidence / "events.jsonl").write_text(
         "".join(json.dumps(event, sort_keys=True) + "\n" for event in logs), encoding="utf-8"
     )
@@ -164,7 +203,7 @@ def create_incident(root: Path, scenario: str = "complete", seed: int = 7) -> Pa
     }
     (private / "ground_truth.json").write_text(json.dumps({
         "scenario": scenario, "seed": seed,
-        "expected_outcome": "stop" if scenario == "missing-evidence" else "repair",
+        "expected_outcome": "stop" if scenario in ("missing-evidence", "inbox-ambiguous") else "repair",
         "active_order_ids": expected_active,
         "duplicate_order_ids": sorted(duplicate_ids),
         "legitimate_later_order_ids": legitimate_ids,
@@ -216,6 +255,7 @@ def evidence_index(incident: Path) -> tuple[dict[str, list[dict]], dict[str, dic
     groups: dict[str, list[dict]] = {}
     refs: dict[str, dict] = {}
     archives = []
+    inboxes = []
     commits = []
 
     def validate_ids(event):
@@ -231,6 +271,8 @@ def evidence_index(incident: Path) -> tuple[dict[str, list[dict]], dict[str, dic
         refs[ref] = event
         if event.get("type") == "receipt_archive":
             archives.append(event)
+        if event.get("type") == "receipt_inbox":
+            inboxes.append(event)
         if event.get("type") == "write_committed":
             validate_ids(event)
             commits.append({**event, "ref": ref})
@@ -263,6 +305,35 @@ def evidence_index(incident: Path) -> tuple[dict[str, list[dict]], dict[str, dic
                 commits.append({**event, "ref": ref})
         except (csv.Error, StopIteration) as exc:
             raise ValueError("Commit receipt CSV must contain complete single-line records.") from exc
+    has_inbox = "inbox_receipts.txt" in artifact_names(incident)
+    if has_inbox or inboxes:
+        if has_archive or archives or not has_inbox or len(inboxes) != 1:
+            raise ValueError("Exactly one declared receipt inbox is required; mixed archive formats are unsupported.")
+        declaration = inboxes[0]
+        if (set(declaration) != {"type", "name", "count", "format"}
+                or declaration["name"] != "inbox_receipts.txt" or declaration["format"] != "embedded-commit-v1"
+                or type(declaration["count"]) is not int or not 1 <= declaration["count"] <= 200):
+            raise ValueError("Unsupported receipt inbox declaration.")
+        captured = []
+        for number, line in enumerate(_artifact_path(incident, "inbox_receipts.txt").read_text(encoding="utf-8").splitlines(), 1):
+            if not line.startswith(INBOX_PREFIX):
+                if line.startswith("[RR-COMMIT"):
+                    raise ValueError("Unsupported or incomplete service receipt marker.")
+                continue
+            try:
+                event = json.loads(line[len(INBOX_PREFIX):])
+            except json.JSONDecodeError as exc:
+                raise ValueError("A service receipt must be complete on its cited line.") from exc
+            if not isinstance(event, dict) or set(event) != set(RECEIPT_FIELDS) or event.get("type") != "write_committed":
+                raise ValueError("A service receipt must contain exactly the declared committed-write fields.")
+            validate_ids(event)
+            ref = f"inbox_receipts.txt:L{number}"
+            refs[ref] = event
+            captured.append({**event, "ref": ref})
+        if len(captured) != declaration["count"]:
+            raise ValueError("Receipt inbox count does not match its declaration.")
+        commits.extend(captured)
+    if has_archive or has_inbox:
         sequences, order_ids, movement_ids = set(), set(), set()
         for event in commits:
             seq = event.get("commit_seq")

@@ -29,7 +29,7 @@ MAX_FILE_BYTES = 2_000_000
 MAX_BUNDLE_BYTES = 1_000_000
 MAX_DETAIL_BYTES = 750_000
 MAX_PAYLOAD_BYTES = 16_384
-CASE_IDS = ("import-retry", "missing-evidence", "multiple-retries", "split-evidence")
+CASE_IDS = ("import-retry", "missing-evidence", "multiple-retries", "split-evidence", "inbox-evidence", "inbox-ambiguous")
 REVIEW_FIELDS = ("checks", "passed", "before_active", "after_active", "cancellations",
                  "untargeted_preserved", "checkout_total", "checkout_order_ids", "checkout_preserved",
                  "changes", "stock", "preserved_orders")

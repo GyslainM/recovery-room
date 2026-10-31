@@ -3,9 +3,27 @@
 Investigate a failed import, rehearse an evidence-supported correction on a copy,
 and give a developer a checked repair package to review.
 
-**Status: local investigation/review workbench, not a finished hackathon submission.**
-The offline engine and tool boundaries are tested. A live Meta model run still
-needs your own API access. No model success rate or production-safety claim is made.
+**Status: working local investigation/review workbench with recorded Meta runs.**
+The operator's October 28 library contains 13 Muse Spark 1.3 attempts: 7 repair,
+3 stop, 2 error and 1 incomplete outcomes. Recordings show actual tool calls,
+including rejected proposals and corrections, and are explicitly labelled as
+recordings. These are synthetic development observations, not a general success
+rate or a production-safety claim. The competent script also solves the supported
+cases. API keys and raw provider responses stay outside the public demo.
+
+The scoped next stage is documented in [the frozen receipt-inbox experiment](docs/EVIDENCE_STORY_CONTRACT.md)
+and [the UI/static-demo contract](docs/UI_STORY_HANDOFF.md). Prepare its locked
+three-attempt batch **offline** with `python -m recovery_room story-prepare --out <new directory>`.
+Only after that gate passes, enter a key in the local hidden PowerShell prompt
+using `scripts/run-story.ps1 -Prepared <directory>`. The batch runs once, keeps
+every outcome, and stops on a technical error without retrying. The inbox format
+also has a competent adapted parser; unsupported old formats do not prove AI necessity.
+
+`python -m recovery_room demo-export --recordings <library> --out <new directory>`
+creates inert `public/demo-data.json`, retaining failed/incomplete recordings.
+It has no live-model, mutation or export capability. Frontend integration and a
+tested deployment package are required before publishing; the local workbench
+server remains loopback-only.
 
 ## Start here
 

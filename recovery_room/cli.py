@@ -12,6 +12,7 @@ from .agent import MetaClient, run_agent
 from .baselines import event_aware_plan, similarity_only_candidates
 from .checks import evaluate_fixture
 from .fixtures import SCENARIOS, create_incident
+from .recordings import CASE_IDS
 from .repairs import finalize_report, rehearse
 
 
@@ -72,7 +73,7 @@ def main(argv: list[str] | None = None) -> int:
     recording = sub.add_parser("recording", help="Import a saved Meta attempt into a sanitized read-only recording library; no API call.")
     recording.add_argument("--incident", type=Path, required=True)
     recording.add_argument("--session", type=Path, required=True)
-    recording.add_argument("--incident-id", choices=("import-retry", "missing-evidence", "multiple-retries", "split-evidence"), required=True)
+    recording.add_argument("--incident-id", choices=CASE_IDS, required=True)
     recording.add_argument("--out", type=Path, required=True, help="Server-owned recordings library root.")
     recording.add_argument("--input-manifest", type=Path, help="Original pre-run file hashes, required for legacy runs without native provenance.")
     repair = sub.add_parser("rehearse", help="Rehearse a user-supplied bounded plan on a fresh copy.")
@@ -87,16 +88,39 @@ def main(argv: list[str] | None = None) -> int:
     local.add_argument("--out", type=Path, help="Fresh session directory; existing runs are never overwritten.")
     local.add_argument("--port", type=int, default=8765)
     local.add_argument("--recordings", type=Path, help="Server-owned sanitized recording library; no live execution.")
-    local.add_argument("--cases", nargs="+", choices=("import-retry", "missing-evidence", "multiple-retries", "split-evidence"),
+    local.add_argument("--cases", nargs="+", choices=CASE_IDS,
                        help="Opt into distinct built-in cases; defaults remain the original three.")
     benchmark = sub.add_parser("benchmark", help="Evaluate the offline event-aware script on development fixtures; no API calls.")
     benchmark.add_argument("--out", type=Path, help="New output directory; previous evaluations are preserved.")
     benchmark.add_argument("--seeds", type=int, nargs="+", default=[7, 23, 41], help="1 to 10 distinct seeds (default: 7 23 41). Seeds vary IDs, not failure families.")
     benchmark.add_argument("--scenarios", choices=SCENARIOS, nargs="+",
                            help="Opt into selected format/incident variants; defaults to the original three cases.")
+    prepare = sub.add_parser("story-prepare", help="Prepare the locked receipt-inbox experiment offline; no API calls.")
+    prepare.add_argument("--out", type=Path, required=True)
+    batch = sub.add_parser("story-run", help="Run the fixed three-attempt Meta batch once, with no automatic retry.")
+    batch.add_argument("--prepared", type=Path, required=True)
+    public = sub.add_parser("demo-export", help="Export inert public demo data; no model calls or public write endpoints.")
+    public.add_argument("--out", type=Path, required=True)
+    public.add_argument("--recordings", type=Path, required=True)
+    public.add_argument("--story", type=Path, help="Optional completed/stopped fixed experiment batch, including every outcome.")
+    package = sub.add_parser("demo-package", help="Package the static demo after frontend integration; no deployment.")
+    package.add_argument("--data", type=Path, required=True)
+    package.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
-        if args.command == "benchmark":
+        if args.command == "demo-package":
+            from .packaging import package_demo
+            value = package_demo(args.data, args.out)
+        elif args.command == "demo-export":
+            from .demo import export_demo
+            value = export_demo(args.out, args.recordings, story=args.story)
+        elif args.command == "story-prepare":
+            from .story import prepare_story
+            value = prepare_story(args.out)
+        elif args.command == "story-run":
+            from .story import run_story
+            value = run_story(args.prepared)
+        elif args.command == "benchmark":
             from .evaluation import run_benchmark
             benchmark_result = run_benchmark(args.out or default_output("benchmark"), args.seeds, args.scenarios)
             value = {key: value for key, value in benchmark_result.items() if key != "trials"}

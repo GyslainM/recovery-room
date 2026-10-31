@@ -29,7 +29,9 @@ CASES = {
     "multiple-retries": ("Two retries after partial imports", "multiple-retries"),
 }
 # CLI evaluation can opt into this format variation; the browser's default cases stay unchanged.
-CASE_CATALOG = {**CASES, "split-evidence": ("Archived commits across CSV and JSONL", "split-evidence")}
+CASE_CATALOG = {**CASES, "split-evidence": ("Archived commits across CSV and JSONL", "split-evidence"),
+                "inbox-evidence": ("The receipts are in the inbox", "inbox-evidence"),
+                "inbox-ambiguous": ("An inbox claim without commit proof", "inbox-ambiguous")}
 DOWNLOADS = {"repair.sql": "application/sql", "plan.json": "application/json",
              "report.json": "application/json", "report.html": "text/html"}
 ASSETS = {"/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascript"),
@@ -127,7 +129,7 @@ class Workbench:
         artifacts = observe("list_artifacts", {}, list_artifacts(incident))
         # These are actual bounded reads, recorded as script observations.
         names = ["incident_note.txt", "source_orders.json", "events.jsonl"]
-        names.extend(item["name"] for item in artifacts if item["name"] == "commit_receipts.csv")
+        names.extend(item["name"] for item in artifacts if item["name"] not in names and item["name"] != "opening_stock.json")
         for name in names:
             line = 1
             while line is not None:

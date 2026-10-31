@@ -129,6 +129,14 @@ def validate_evidence(incident: Path, state: dict, plan: dict) -> None:
         ]
         if len(sales) != 1 or sales[0]["delta"] != -orders[order_id]["quantity"] or sales[0]["sku"] != orders[order_id]["sku"]:
             raise ValueError("A supported cancellation needs exactly one matching sale movement.")
+        if any(ref.startswith("inbox_receipts.txt:L") for ref in action["evidence_refs"]):
+            for receipt in pair:
+                recorded_sales = [row for row in state["inventory_movements"]
+                                  if row["order_id"] == receipt["order_id"] and row["reason"] == "sale"]
+                if (len(recorded_sales) != 1 or recorded_sales[0]["id"] != receipt.get("movement_id")
+                        or recorded_sales[0]["sku"] != event["sku"]
+                        or recorded_sales[0]["delta"] != -event["quantity"]):
+                    raise ValueError("Inbox receipts must identify the actual sale movement for both orders.")
 
 
 def execute_plan(path: Path, plan: dict) -> None:
