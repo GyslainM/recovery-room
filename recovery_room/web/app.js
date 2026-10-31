@@ -23,6 +23,10 @@ const state = {
   recDetails: new Map(),
   // reconWaiting: cases whose timeline evidence is being read; each case starts and repaints its own.
   reconWaiting: new Set(),
+  // sourceChosen: the person picked script or recorded; until then each case opens on its recorded Meta run.
+  // replay: {recId, cursor, playing} while the saved steps of the open recording are being replayed.
+  // demo: the public read-only demo's dataset defaults and evaluation notes (see staticContract).
+  sourceChosen: false, replay: null, demo: null,
 };
 const escape = (value) => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const text = (value) => escape(value);
@@ -58,7 +62,7 @@ const CHECK_GROUPS = [
   ['Preserved work', ['unaffected_orders_preserved', 'order_history_preserved', 'original_movements_preserved']],
   ['Stock', ['stock_matches_movement_ledger', 'stock_matches_active_orders']],
   ['Source evidence', ['source_evidence_complete', 'source_events_applied_once']],
-  ['Freshness', ['source_snapshot_unchanged', 'evidence_snapshot_unchanged']],
+  ['Files unchanged', ['source_snapshot_unchanged', 'evidence_snapshot_unchanged']],
 ];
 const DOWNLOAD_NOTES = {
   'repair.sql': 'Guarded SQLite script. Rolls back if table state differs.',
@@ -76,9 +80,88 @@ function setLoading(on) {
   if (bar) bar.hidden = loadingCount === 0;
 }
 
+/* ---------- Public read-only demo (RR_STATIC_DEMO_V1) ---------- */
+
+// A generated public copy of index.html carries <html data-demo-mode="read-only">. The page then reads
+// ./demo-data.json once, refuses it unless it is schema version 1, read-only and turns every capability off,
+// and answers each GET from it by exact path. Nothing reaches an API and nothing falls back to one. Without
+// the attribute (the local workbench) startup is unchanged. RR_STATIC_DEMO_V1 marks this adapter.
+const STATIC_DEMO = document.documentElement?.dataset?.demoMode === 'read-only';
+const STATIC_LABEL = 'Recorded demo · No live API calls';
+const STATIC_CAPABILITIES = ['investigate', 'rehearse', 'export', 'live_model'];
+const READ_ONLY_NOTE = 'This recorded demo is read-only: it cannot investigate, test on a copy, check files, copy SQL or export.';
+const plainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+const own = (o, key) => plainObject(o) && Object.prototype.hasOwnProperty.call(o, key);
+const copyJson = (v) => JSON.parse(JSON.stringify(v));
+const demoError = (message, status) => Object.assign(new Error(message), {status, demo: true});
+let staticData = null;
+
+function checkStaticData(d) {
+  const refuse = (why) => { throw demoError(`The recorded demo data was refused: ${why}`, 0); };
+  if (!plainObject(d)) refuse('it is not a JSON object.');
+  if (d.schema_version !== 1) refuse('only schema version 1 is supported.');
+  if (d.read_only !== true) refuse('it is not marked read-only.');
+  const caps = d.capabilities;
+  if (!plainObject(caps) || STATIC_CAPABILITIES.some(k => caps[k] !== false) || Object.values(caps).some(v => v !== false))
+    refuse('it must turn off investigation, testing, export and live model calls.');
+  const index = plainObject(d.api_get) ? d.api_get['/api/incidents'] : null;
+  if (!plainObject(index) || !Array.isArray(index.incidents) || !index.incidents.length || !plainObject(d.artifacts))
+    refuse('its recorded responses are missing.');
+  return d;
+}
+
+// Fetched at most once. A refusal is kept too, so a missing or invalid dataset is never retried elsewhere.
+function staticDataset() {
+  staticData ||= (async () => {
+    let response, value;
+    try { response = await fetch('./demo-data.json'); } catch (_) { throw demoError('The recorded demo data could not be read.', 0); }
+    if (!response.ok) throw demoError(`The recorded demo data is missing (HTTP ${response.status}).`, response.status);
+    try { value = await response.json(); } catch (_) { throw demoError('The recorded demo data is not valid JSON.', 0); }
+    return checkStaticData(value);
+  })();
+  return staticData;
+}
+
+const STATIC_PAGE = /^\/api\/incidents\/([^/?#]+)\/artifacts\/([^/?#]+)\?([^#]*)$/;
+async function staticGet(path) {
+  const d = await staticDataset(), page = STATIC_PAGE.exec(path);
+  if (page) return staticPage(d, page[1], page[2], page[3]);
+  if (!own(d.api_get, path)) throw demoError('Not part of the recorded demo.', 404);
+  return copyJson(d.api_get[path]);
+}
+
+// Evidence pages keep the local server's shape and bounds: start_line from 1, max_lines 1 to 200, and
+// next_line or null. Unknown cases, files or arguments fail.
+function staticPage(d, rawCase, rawName, query) {
+  let caseId, name;
+  try { caseId = decodeURIComponent(rawCase); name = decodeURIComponent(rawName); } catch (_) { throw demoError('Not part of the recorded demo.', 404); }
+  const file = own(d.artifacts, caseId) && own(d.artifacts[caseId], name) ? d.artifacts[caseId][name] : null;
+  if (!plainObject(file) || !Array.isArray(file.lines) || file.total_lines !== file.lines.length) throw demoError('Not part of the recorded demo.', 404);
+  const args = {};
+  for (const part of query.split('&')) {
+    const [key, value, extra] = part.split('=');
+    if (extra !== undefined || !['start_line', 'max_lines'].includes(key) || own(args, key) || !/^[1-9]\d{0,6}$/.test(value || ''))
+      throw demoError('Unknown, repeated or invalid evidence pagination argument.', 400);
+    args[key] = Number(value);
+  }
+  const start = args.start_line ?? 1, max = args.max_lines ?? 80;
+  if (max > 200) throw demoError('max_lines must be from 1 to 200.', 400);
+  const lines = file.lines.slice(start - 1, start - 1 + max);
+  return {name, total_lines: file.total_lines, lines: copyJson(lines), next_line: start - 1 + lines.length < file.total_lines ? start + lines.length : null};
+}
+
+// Read-only history: everything in the public demo, and any run the server marks read_only (a recorded
+// offline baseline). Its status is as recorded; it grants no new investigation, test, file check, SQL or export.
+const historicalRun = (run) => STATIC_DEMO || run?.read_only === true;
+
 async function api(path, post = false) {
   setLoading(true);
   try {
+    // The public demo answers recorded GETs only; a write is refused before any request is made.
+    if (STATIC_DEMO) {
+      if (post) throw demoError(READ_ONLY_NOTE, 405);
+      return await staticGet(path);
+    }
     const response = await fetch(path, post ? {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'} : {});
     const value = await response.json();
     if (!response.ok) throw Object.assign(new Error(value.error || 'The local request failed.'), {status: response.status});
@@ -132,7 +215,9 @@ function positionTabIndicator() {
   ind.style.setProperty('--w', `${tab.offsetWidth}px`);
 }
 
-const statusOf = (run) => run ? (RUN_STATUS[run.status] || [run.status.replaceAll('_', ' '), '']) : ['Not started', ''];
+// A recorded baseline's "ready for review" was true when it was built; it is not a current export check.
+const statusOf = (run) => !run ? ['Not started', ''] : historicalRun(run) && run.status === 'ready_for_review' ? ['Checks passed · recorded', 'ok']
+  : (RUN_STATUS[run.status] || [run.status.replaceAll('_', ' '), '']);
 const modeInfo = (mode) => MODE_INFO[mode] || {
   short: `Mode: ${String(mode || 'unknown').replaceAll('_', ' ')}`, long: String(mode || 'unknown').replaceAll('_', ' '),
   method: 'Reported by the server. This page makes no offline or no-model claim for this mode.', unverified: true,
@@ -265,15 +350,15 @@ function attemptsTree(caseId) {
   const item = (attrs, current, iconHtml, label, meta, title, warn = false) =>
     `<button class="run-item attempt${current ? ' current' : ''}" ${attrs} aria-current="${current ? 'true' : 'false'}" title="${escape(title)}">${iconHtml}<span class="attempt-label">${text(label)}</span><span class="attempt-meta${warn ? ' warn' : ''}">${text(meta)}</span></button>`;
   const script = runs.length
-    ? runs.map(r => item(`data-source="script" data-run="${escape(r.id)}"`, !recordedMode() && r.id === state.run?.id, icon('play', 'attempt-icon'),
-        'Script run', clockShort(r.created_at), `Script run ${shortId(r.id)} · ${statusOf(r)[0]} · started ${started(r.created_at) || 'time not recorded'} · offline, no model`))
-    : [item('data-source="script"', !recordedMode(), icon('play', 'attempt-icon'), 'Script run', 'not started', 'Offline script run · not started')];
+    ? runs.map(r => item(`data-source="script" data-run="${escape(r.id)}"`, !recordedMode() && r.id === state.run?.id, icon('git-compare', 'attempt-icon'),
+        'Script baseline', clockShort(r.created_at), `Script baseline ${shortId(r.id)} · ${statusOf(r)[0]} · started ${started(r.created_at) || 'time not recorded'} · offline, no model`))
+    : [item('data-source="script"', !recordedMode(), icon('git-compare', 'attempt-icon'), 'Script baseline', 'not run', 'Offline script baseline · not run yet')];
   const meta = recs.map((r, i) => {
     const n = recs.length - i, [label, tone, iconName] = recOutcome(r), differs = r.fixture_matches === false;
     return item(`data-source="recorded" data-recording="${escape(r.id)}"`, recordedMode() && r.id === state.recId, icon(iconName, `attempt-icon tone-${tone}`),
       `Meta run ${n}`, differs ? 'inputs differ' : dayShort(r.recorded_at), `Meta run ${n} · ${label} · ${recordedAt(r.recorded_at) || 'time not recorded'} · recorded, not live${differs ? ' · inputs differ from this case' : ''}`, differs);
   });
-  return `<div class="tree" role="group" aria-label="Attempts on this case">${script.join('')}${meta.join('')}</div>`;
+  return `<div class="tree" role="group" aria-label="Attempts on this case">${meta.join('')}${script.join('')}</div>`;
 }
 
 function renderCases() {
@@ -338,9 +423,12 @@ async function selectCase(identifier, tab = null) {
     const view = state.views.get(identifier);
     transition(() => {
       if (version !== state.version) return; // a newer case switch started before this frame
-      const restoredRec = view?.recId && recordedList().list.some(r => r.id === view.recId) ? view.recId : null;
-      // A case seen before keeps its own source; a new case opens in the source being browsed now.
-      const source = view?.source || (state.source === 'recorded' ? 'recorded' : 'script');
+      const list = state.recordings.get(identifier)?.list || [];
+      const restoredRec = view?.recId && list.some(r => r.id === view.recId) ? view.recId : null;
+      // A case seen before keeps its own source. Until the person picks one, a case opens on its recorded
+      // Meta run when one with matching inputs exists, and on the script baseline otherwise.
+      const source = view?.source || (state.sourceChosen ? state.source : demoDefault(identifier) ? 'recorded' : 'script');
+      resetReplay();
       Object.assign(state, {
         incident, run, switching: null, sheet: false,
         tab: tab || view?.tab || (source === 'script' && run?.review ? 'changes' : 'investigation'),
@@ -350,7 +438,7 @@ async function selectCase(identifier, tab = null) {
       });
       // A recording selection is refetched (never reused from memory) so its fixture match is current.
       if (state.source === 'recorded') {
-        const pick = restoredRec || recordedList().list[0]?.id;
+        const pick = restoredRec || demoDefault(identifier)?.id || recordedList().list[0]?.id;
         if (pick) loadRecording(pick, {renderNow: false});
       }
       render();
@@ -390,8 +478,8 @@ function render() {
 
 function renderSourceSwitch() {
   const list = recordedList(), count = list.status === 'ok' ? String(list.list.length) : list.status === 'error' ? '!' : '…';
-  $('#source-switch').innerHTML = `<button data-source="script" aria-pressed="${!recordedMode()}">${icon('play')}<span>Script run<span class="long"> · offline</span></span></button>
-    <button data-source="recorded" aria-pressed="${recordedMode()}">${icon('history')}<span>Recorded<span class="long"> model</span> runs</span><span class="count">${count}</span></button>`;
+  $('#source-switch').innerHTML = `<button data-source="recorded" aria-pressed="${recordedMode()}">${icon('history')}<span>Meta runs</span><span class="count">${count}</span></button>
+    <button data-source="script" aria-pressed="${!recordedMode()}">${icon('git-compare')}<span>Script baseline</span></button>`;
 }
 
 // Recorded mode header: the fixed provenance label is prominent; no rehearse, SQL or download action exists.
@@ -413,7 +501,7 @@ function renderRecordedHeader() {
       <dt>Model and mode</dt><dd class="mono">${text(`${p.model || 'not recorded'} · ${p.mode || 'not recorded'}`)}</dd>
       <dt>Recorded</dt><dd>${text(recordedAt(p.recorded_at) || 'Not recorded')}${p.timestamp_source ? ` · ${text(TIMESTAMP_SOURCE[p.timestamp_source] || p.timestamp_source)}` : ''}</dd>
       <dt>Inputs</dt><dd>${text(INPUT_PROVENANCE[p.input_provenance] || p.input_provenance || 'Not recorded')}${r.fixture_matches ? ' · match this case now' : ' · do not match this case'}</dd>
-      <dt>Boundary</dt><dd>Read-only history. Nothing here calls a model, rehearses or exports.</dd>
+      <dt>Boundary</dt><dd>Read-only history. Nothing here calls a model, tests a repair or exports.</dd>
     </dl>`;
   } else {
     $('#title-status').innerHTML = `<span class="status">${text(list.status === 'ok' ? `${list.list.length} recorded runs` : 'Loading recorded runs…')}</span>`;
@@ -441,7 +529,7 @@ function renderHeader() {
       <dt>Run ID</dt><dd><span class="mono">${text(run.id)}</span> <button class="link" data-copy-value="${escape(run.id)}" data-copy-what="Run ID">${icon('copy')}<span>Copy run ID</span></button></dd>
       <dt>Started</dt><dd>${text(started(run.created_at)) || 'Not recorded'}</dd>
       <dt>Method</dt><dd>${text(info.long)}. ${text(info.method)}</dd>
-      <dt>Review boundary</dt><dd>The source stays unchanged. Rehearsal uses a disposable copy. Human review is required before using exported SQL.</dd>
+      <dt>Review boundary</dt><dd>${historicalRun(run) ? 'Recorded offline baseline. Nothing runs again here, and nothing can be exported.' : 'The source stays unchanged. The repair is tested on a disposable copy. Human review is required before using exported SQL.'}</dd>
     </dl>` : '';
 
 }
@@ -454,9 +542,18 @@ function renderActions() {
   const {run, busy, tab} = state;
   const button = (cls, attrs, iconName, label) => `<button class="${cls}" ${attrs}>${icon(iconName)}<span>${text(label)}</span></button>`;
   if (recordedMode()) {
-    // Recordings lead to their historical review; there is no rehearse, SQL or download action.
-    const review = state.recording?.review && tab !== 'changes' ? button('primary', 'data-tab="changes"', 'git-compare', 'View recorded changes') : '';
-    $('#header-actions').innerHTML = `${button('secondary', 'data-source="script"', 'play', 'Back to script run')}${review}`;
+    // A recording replays its saved steps; there is no rehearse, SQL or download action.
+    const replay = state.recording && displayedSteps(state.recording).length ? button('primary', 'data-replay-start', 'play', 'Replay recorded steps') : '';
+    $('#header-actions').innerHTML = `${button('secondary', 'data-source="script"', 'git-compare', 'Script baseline')}${replay}`;
+    return;
+  }
+  if (historicalRun(run)) {
+    // A recorded baseline offers navigation only: no new investigation, test or download from history.
+    const go = !run ? '' : run.status === 'stopped' ? button('primary', 'data-view-missing', 'file-search', 'View missing evidence')
+      : run.status === 'failed_checks' ? (tab === 'checks' ? '' : button('primary', 'data-tab="checks"', 'shield-check', 'Review failed checks'))
+      : run.review && !['changes', 'checks'].includes(tab) ? button('primary', 'data-review-repair', 'git-compare', 'Review repair') : '';
+    const meta = recordedList().list.length ? button('secondary', 'data-source="recorded"', 'history', 'Meta runs') : '';
+    $('#header-actions').innerHTML = `${meta}${go}`;
     return;
   }
   const working = (label) => `${icon('loader-circle', 'spin')}<span>${label}</span>`;
@@ -484,12 +581,12 @@ function olderRunNote(run) {
 // The four steps of the offline repair, from the server's run status only. A step is "done" only when
 // the server reported it (a run exists; a rehearsal review exists), so nothing here claims that a person
 // reviewed or exported anything. Reachable steps open their tab; Export opens the guarded downloads.
-const STEP_SR = {done: 'done', current: 'current step', open: 'available', warn: 'needs attention', danger: 'failed', upcoming: 'not reached yet'};
+const STEP_SR = {done: 'done', current: 'current step', open: 'available', warn: 'needs attention', danger: 'failed', upcoming: 'not reached yet', off: 'not available here'};
 function stepsView(run) {
   const s = run?.status, rehearsed = !!run?.review, working = state.busy ? state.busyAction : null;
   const steps = [
     {label: 'Investigate', sub: 'read-only', tab: 'investigation'},
-    {label: 'Rehearse', sub: 'test on a copy', tab: rehearsed ? 'changes' : 'investigation'},
+    {label: 'Test on a copy', sub: 'changes made only on a copy', tab: rehearsed ? 'changes' : 'investigation'},
     {label: 'Review', sub: 'changes and checks', tab: s === 'failed_checks' ? 'checks' : 'changes'},
     {label: 'Export', sub: 'guarded SQL', tab: 'sql'},
   ];
@@ -502,13 +599,14 @@ function stepsView(run) {
     : ['done', 'upcoming', 'upcoming', 'upcoming'];
   const subs = {0: s === 'stopped' ? 'evidence needed' : null, 1: s === 'blocked' && !rehearsed ? 'refused' : null,
     2: s === 'failed_checks' ? 'checks failed' : null, 3: s === 'blocked' && rehearsed ? 'blocked' : null};
+  if (run && historicalRun(run)) { plan[3] = 'off'; subs[3] = 'not in this demo'; }
   const items = steps.map((step, i) => {
     const st = plan[i], spinning = (working === 'investigate' && i === 0) || (working === 'rehearse' && i === 1);
     const dot = spinning ? icon('loader-circle', 'spin') : st === 'done' ? icon('check') : st === 'warn' ? '!' : st === 'danger' ? '×' : String(i + 1);
     const flag = spinning ? (i === 0 ? 'reading evidence…' : 'testing on a copy…') : subs[i];
     const inner = `<span class="step-dot" aria-hidden="true">${dot}</span><span class="step-label">${step.label}</span>${flag ? `<span class="step-sub">${text(flag)}</span>` : `<span class="sr-only"> · ${text(step.sub)}</span>`}<span class="sr-only"> · ${STEP_SR[st]}</span>`;
     const attrs = `class="step ${st}" title="${escape(`${step.label} · ${flag || step.sub}`)}"${st === 'current' ? ' aria-current="step"' : ''}`;
-    const target = st === 'upcoming' || (i === 0 && !run) ? '' : i === 3 && st === 'open' ? 'data-review-downloads' : `data-tab="${step.tab}"`;
+    const target = st === 'upcoming' || st === 'off' || (i === 0 && !run) ? '' : i === 3 && st === 'open' ? 'data-review-downloads' : `data-tab="${step.tab}"`;
     return `<li class="${st}">${target ? `<button ${attrs} ${target}>${inner}</button>` : `<span ${attrs}>${inner}</span>`}</li>`;
   });
   return `<nav class="steps-nav" aria-label="Repair progress"><ol class="steps">${items.join('')}</ol></nav>`;
@@ -520,7 +618,7 @@ function renderTabs() {
     evidence: state.incident.artifacts.length,
     changes: review ? review.changes.length : '',
     checks: review ? `${review.checks.filter(c => c.passed).length}/${review.checks.length}` : '',
-    sql: recordedMode() ? 'n/a' : review && state.run.status !== 'ready_for_review' ? 'unavailable' : '',
+    sql: recordedMode() || historicalRun(state.run) ? 'n/a' : review && state.run.status !== 'ready_for_review' ? 'unavailable' : '',
   };
   for (const tab of TABS) {
     const button = $(`#tab-${tab}`), selected = tab === state.tab, [iconName, label] = TAB_META[tab];
@@ -535,6 +633,7 @@ function renderTabs() {
 
 function setTab(tab, focusTab = false) {
   if (!TABS.includes(tab)) return;
+  if (tab !== 'investigation' && state.replay?.playing) { stopReplayTimer(); state.replay.playing = false; }
   const changed = tab !== state.tab;
   const direction = TABS.indexOf(tab) >= TABS.indexOf(state.tab) ? 'forward' : 'back';
   transition(() => {
@@ -588,12 +687,12 @@ const emptyState = (title, body, iconName = 'info') => `<div class="empty">${ico
 // Why a run has no rehearsal review, from its server status. A run blocked before rehearsal cannot be
 // rehearsed again (the server only rehearses proposed runs), so it points to a new investigation instead.
 function noReview(run, what) {
-  if (!run) return emptyState(`No ${what} yet`, 'Start the offline investigation, then rehearse its proposal on a disposable copy.', 'play');
+  if (!run) return emptyState(`No ${what} yet`, 'Start the offline investigation, then test its proposal on a copy.', 'play');
   if (run.status === 'stopped') return emptyState('No repair was proposed', 'The investigation stopped because evidence is missing. Nothing was changed.', 'ban');
-  if (run.status === 'blocked') return `<div class="section-heading"><h2>Rehearsal refused</h2></div>
+  if (run.status === 'blocked') return `<div class="section-heading"><h2>Test on a copy refused</h2></div>
     <div class="callout stop">${text(run.summary)}</div>
     <p class="small muted">Nothing was rehearsed or changed. Start a new offline investigation from the header to work from the current source and evidence.</p>`;
-  return emptyState('Not rehearsed yet', `Rehearse the proposal on a disposable copy to see ${what}.`, 'flask-conical');
+  return emptyState('Not tested on a copy yet', `Test the proposal on a copy to see ${what}.`, 'flask-conical');
 }
 
 /* ---------- Investigation ---------- */
@@ -623,7 +722,7 @@ function sourceRecords() {
 }
 
 function callsView(trace) {
-  return `<div class="row-head"><h3>Script trace</h3><span class="caption">${trace.length} local function calls, in order · not model reasoning or a replay of a model run</span></div>
+  return `<div class="row-head"><h3>Script trace</h3><span class="caption">${trace.length} local function calls, in order. Not model reasoning, and not a replay of a model run.</span></div>
     <ol class="calls">${trace.map((step,i)=>{
       const a = step.arguments || {};
       const arg = a.name ? `${a.name}${a.start_line ? ` · from L${a.start_line}` : ''}` : step.tool === 'query_database' ? (a.sql || '') : 'no arguments';
@@ -777,7 +876,7 @@ function reconstructionView(pairs = null, {recorded = false, stopped = null, reh
   const lostCount = marks.filter(m => m.type === 'connection_lost').length;
   const summary = stopped ? `The script stopped instead of guessing: ${stopped} source events have no commit record${gaps.length ? ', where the log has a gap' : ''}.`
     : recorded && !pairs ? `This recording proposed no repair, so no writes are marked. ${writes.length} committed writes across ${lanes.length} ${lanes.length === 1 ? 'attempt' : 'attempts'}.`
-    : pairs && !recorded && !rehearsed ? `The proposal would cancel ${repeat.size} repeated write${repeat.size === 1 ? '' : 's'} and keep the first write of each source event. ${untouched} other write${untouched === 1 ? '' : 's'} would stay untouched. Nothing is cancelled until the rehearsal.`
+    : pairs && !recorded && !rehearsed ? `The proposal would cancel ${repeat.size} repeated write${repeat.size === 1 ? '' : 's'} and keep the first write of each source event. ${untouched} other write${untouched === 1 ? '' : 's'} would stay untouched. Nothing is cancelled until it is tested on a copy.`
     : pairs ? `${recorded ? 'This recording’s review cancels' : 'On the copy, the repair cancelled'} ${repeat.size} repeated write${repeat.size === 1 ? '' : 's'} and ${recorded ? 'keeps' : 'kept'} the first write of each source event. ${untouched} other write${untouched === 1 ? ' is' : 's are'} untouched.`
     : `${writes.length} committed writes across ${lanes.length} ${lanes.length === 1 ? 'attempt' : 'attempts'}${lostCount ? `, with ${lostCount === 1 ? 'a lost connection' : `${lostCount} lost connections`}` : ''}${gaps.length ? ' and a gap in the commit log' : ''}. The investigation decides which writes repeat.`;
   const described = `${summary} Use the arrow keys to move between writes${selectable ? ' and Enter to open one' : ''}.`;
@@ -826,7 +925,7 @@ function runsCompare(model) {
   const byOrder = new Map(model.writes.map(w => [w.order_id, w]));
   const run = state.run?.incident_id === caseId ? state.run : null;
   const engine = run?.plan ? new Set(run.plan.cancellations.map(a => a.order_id)) : null, rehearsed = !!run?.review;
-  const rows = [{label: 'Script run', current: !recordedMode(), attrs: 'data-source="script"', set: engine, script: true,
+  const rows = [{label: 'Script baseline', current: !recordedMode(), attrs: 'data-source="script"', set: engine, script: true,
     line: engine ? '' : run?.status === 'stopped' ? 'stop' : '',
     note: engine ? `${rehearsed ? 'cancels' : 'targets'} ${engine.size}` : run?.status === 'stopped' ? `stopped · ${run.missing_event_ids?.length ?? 0} events unmatched` : run ? statusOf(run)[0] : 'not investigated yet',
     short: engine ? `× ${engine.size}` : run?.status === 'stopped' ? 'stopped' : run ? statusOf(run)[0] : 'not run'}];
@@ -876,7 +975,7 @@ function runsCompare(model) {
   }
   if (!run && tally.repair) headline += ' Investigate the incident to compare them with the script.';
 
-  const H = 24, n = Math.max(model.writes.length, 1);
+  const H = RECON_LANE, n = Math.max(model.writes.length, 1);
   let anyMissed = false, anyExtra = false, anyPlanned = false;
   const svgRows = rows.map((row, i) => {
     const y = i * H, band = `<rect class="recon-band${i % 2 ? ' alt' : ''}${row.current ? ' current' : ''}" x="0" y="${y}" width="${n}" height="${H}"/>`;
@@ -900,7 +999,7 @@ function runsCompare(model) {
   const labels = rows.map(row => `<li><button class="compare-run${row.current ? ' current' : ''}" ${row.attrs} ${row.current ? 'aria-current="true"' : ''} title="${escape(`${row.label} · ${row.note}`)}"><strong>${text(row.label)}</strong><span class="cmp-long">${text(row.note)}</span><span class="cmp-short" aria-hidden="true">${text(row.short)}</span></button></li>`).join('');
   const legend = `<span><i class="repeat"></i>Cancelled by that run</span>${anyPlanned ? '<span><i class="planned"></i>Script’s target · not rehearsed yet</span>' : ''}${anyMissed ? `<span><i class="missed"></i>${rehearsed ? 'Cancelled' : 'Targeted'} by the script, kept by that run</span>` : ''}${anyExtra ? '<span><i class="extra"></i>Not in the script’s plan</span>' : ''}<span><i class="line"></i>No repair</span>`;
   return `<div class="recon-compare">
-    <div class="recon-head"><h4 id="compare-title">Compared runs</h4><span class="caption">In the columns above · recordings from their verified reviews, the script from its ${rehearsed ? 'rehearsal' : 'proposal'}</span></div>
+    <div class="recon-head"><h4 id="compare-title">Compared runs</h4><span class="caption">Lined up with the writes above. Recordings show their verified reviews; the script shows its ${rehearsed ? 'test on a copy' : 'proposal'}.</span></div>
     <div class="recon-body"><ol class="recon-lanes compare-lanes" aria-labelledby="compare-title">${labels}</ol>
       <svg class="compare-svg" viewBox="0 0 ${n} ${rows.length * H}" height="${rows.length * H}" preserveAspectRatio="none" aria-hidden="true" focusable="false">${svgRows}</svg></div>
     <div class="recon-legend" aria-hidden="true">${legend}</div>
@@ -934,10 +1033,11 @@ function investigationView() {
   const {run} = state;
   if (!run) return `${incidentOverview()}${reconstructionView()}${sourceRecords()}`;
   const stopped = run.status === 'stopped';
-  const result = `<div class="section-heading"><h2>${stopped?'Evidence needed to continue':run.plan?'Proposed fix':'Investigation result'}</h2></div>
-    ${stopped || !run.plan ? `<div class="callout ${stopped?'stop':''}"><strong>${stopped?'No repair exported.':'What the script found'}</strong><br>${text(run.summary)}</div>` : ''}`;
+  // With a plan, the timeline below states the finding; only a stop or a run without a plan needs a heading.
+  const result = stopped || !run.plan ? `<div class="section-heading"><h2>${stopped ? 'Evidence needed to continue' : 'Investigation result'}</h2></div>
+    <div class="callout ${stopped?'stop':''}"><strong>${stopped?'No repair exported.':'What the script found'}</strong><br>${text(run.summary)}</div>` : '';
   const plan = run.plan ? `<div class="row-head"><h3>Proposed cancellations</h3>${badge(`${run.plan.cancellations.length} targets`)}</div>
-    <p class="small muted">Keep the first recorded write for each source event. Each target cites both committed writes; select a row to inspect them.${run.status==='proposed'?' Next: rehearse on a disposable copy.':''}</p>${planTable(run.plan)}` : '';
+    <p class="small muted">Keep the first recorded write for each source event. Each target cites both committed writes; select a row to inspect them.${run.status==='proposed'?' Next: test it on a copy.':''}</p>${planTable(run.plan)}` : '';
   const stop = stopped ? `<h3>Next useful step</h3><p class="small">Recover the committed-write logs for the missing source events, then investigate again. The source has not been changed.</p>
     <div class="row-head" id="missing-events" tabindex="-1"><h4>${run.missing_event_ids.length} source events without commit evidence</h4><span class="caption">Select one to find it in the evidence</span></div>
     <div class="id-grid">${run.missing_event_ids.map(id=>`<button class="id-chip mono" data-key="event:${escape(id)}" aria-selected="false">${text(id)}</button>`).join('')}</div>` : '';
@@ -961,7 +1061,7 @@ function citations(action) {
 
 function planTable(plan) {
   const orders = ordersById();
-  return table(['Purchase','Cancel duplicate','Keep original','Evidence'],
+  return table(['Purchase','Cancel duplicate','Original order','Evidence'],
     plan.cancellations.map(a=>[purchaseCell(orders.get(a.order_id)),idRef(a.order_id,'cancelled'),idRef(a.duplicate_of),citations(a)]),
     plan.cancellations.map(a=>selAttrs(`order:${a.order_id}`)));
 }
@@ -971,6 +1071,30 @@ function planTable(plan) {
 const fmtNum = (n) => Number.isFinite(n) ? n.toLocaleString() : '—';
 const recordingLabel = (r) => r?.provenance?.label || REC_LABEL;
 const recordedList = () => state.recordings.get(state.incident?.id) || {status: 'loading', list: []};
+
+// The public demo's choices from its checked dataset: the case and recording it opens on, and its evaluation
+// notes. The local workbench has none of these. Defaults never name a recording directly: they are used only
+// where the recording is listed for that case with inputs that match it.
+function staticContract(d) {
+  const def = plainObject(d?.defaults) ? d.defaults : null;
+  const defaults = def && def.source === 'recorded' && typeof def.incident_id === 'string' && typeof def.recording_id === 'string'
+    ? {incident_id: def.incident_id, recording_id: def.recording_id} : null;
+  return {defaults, evaluation: plainObject(d?.evaluation) ? d.evaluation : null};
+}
+
+// The recorded Meta run a case opens on: the dataset's default for this case if it is listed with matching
+// inputs, otherwise the newest recording whose inputs match. A case without one opens on the script baseline.
+function demoDefault(caseId) {
+  const usable = (state.recordings.get(caseId)?.list || []).filter(r => r.fixture_matches === true);
+  const def = state.demo?.defaults;
+  return (def?.incident_id === caseId && usable.find(r => r.id === def.recording_id)) || usable[0] || null;
+}
+
+// The case the public demo opens on: the dataset's default case, only while its default recording is usable.
+function demoStartCase() {
+  const def = state.demo?.defaults;
+  return def && state.cases.some(c => c.id === def.incident_id) && demoDefault(def.incident_id)?.id === def.recording_id ? def.incident_id : null;
+}
 
 async function refreshRecordings(caseId) {
   const previous = state.recordings.get(caseId);
@@ -989,6 +1113,7 @@ async function refreshRecordings(caseId) {
 // fixture match each time. A late response for another case or selection is dropped.
 async function loadRecording(id, {renderNow = true} = {}) {
   const caseId = state.incident.id, seq = ++state.recSeq;
+  resetReplay();
   Object.assign(state, {recId: id, recording: null, selection: null, sheet: false, stepFilter: 'all'});
   if (renderNow) render();
   try {
@@ -1010,9 +1135,11 @@ async function loadRecording(id, {renderNow = true} = {}) {
 // pick: a recording to open (from the sidebar's attempt list); otherwise the newest, if none is open.
 function setSource(source, pick = null) {
   if (!['script', 'recorded'].includes(source) || !state.incident) return;
+  state.sourceChosen = true;
   if (source === state.source) { if (source === 'recorded' && pick && pick !== state.recId) loadRecording(pick); return; }
+  resetReplay();
   Object.assign(state, {source, selection: null, sheet: false});
-  const target = pick || (!state.recId && recordedList().list[0]?.id);
+  const target = pick || (!state.recId && (demoDefault(state.incident.id)?.id || recordedList().list[0]?.id));
   if (source === 'recorded' && target) loadRecording(target, {renderNow: false});
   transition(() => render(), 'case');
 }
@@ -1034,7 +1161,7 @@ function recBanner(r, compact = false, observation = false) {
     ? `<span>${text(`${p.model || 'Model not recorded'} · recorded ${recordedShort(p.recorded_at)}`)}</span>`
     : `<span>${text(`${p.model || 'Model not recorded'} · recorded ${when}${source}`)}</span>`;
   return `<div class="rec-banner${compact ? ' compact' : ''}">${icon('history')}<div><strong>${text(recordingLabel(r))}</strong>${line}</div></div>
-    ${observation ? `<p class="rec-observation">${icon('history')}<span>${text(r.review_observation || 'Recorded at rehearsal; not a current export check.')}</span></p>` : ''}
+    ${observation ? `<p class="rec-observation">${icon('history')}<span>${text(r.review_observation || 'Recorded in the test on a copy; not a current export check.')}</span></p>` : ''}
     ${r.fixture_matches === false || r.fixture_warning ? `<div class="callout stop rec-warning">${icon('triangle-alert')}<span>${text(r.fixture_warning || 'Recording inputs do not match the served case. Current-case citations are disabled.')}</span></div>` : ''}
     ${r.incident_id !== state.incident?.id ? `<div class="callout stop rec-warning">${icon('triangle-alert')}<span>${text(`This recording belongs to another case (${r.incident_id}). Links into the current case are disabled.`)}</span></div>` : ''}`;
 }
@@ -1061,7 +1188,7 @@ function argsView(call, heading = true) {
   if (call.name === 'rehearse_repair' && a?.plan) {
     const rows = a.plan.cancellations || [];
     return `${h}${a.plan.rationale ? `<p class="tl-text">${text(a.plan.rationale)}</p>` : ''}
-      ${rows.length ? table(['Cancel', 'Keep', 'Cited evidence'], rows.map(c => [`<span class="mono cancelled">${text(c.order_id)}</span>`, `<span class="mono">${text(c.duplicate_of)}</span>`, refsView(c.evidence_refs, c.recorded_evidence_refs_text)])) : '<p class="caption">No cancellations in this plan.</p>'}`;
+      ${rows.length ? table(['Cancel', 'Original order', 'Cited evidence'], rows.map(c => [`<span class="mono cancelled">${text(c.order_id)}</span>`, `<span class="mono">${text(c.duplicate_of)}</span>`, refsView(c.evidence_refs, c.recorded_evidence_refs_text)])) : '<p class="caption">No cancellations in this plan.</p>'}`;
   }
   if (call.name === 'query_database' && a?.sql) return `${h}<pre class="tl-sql">${String(a.sql).split(/\r?\n/).map(sqlTint).join('\n')}</pre>`;
   return `${h}<pre>${text(JSON.stringify(a ?? null, null, 2))}</pre>`;
@@ -1072,7 +1199,7 @@ function resultView(call, res) {
   if (res.error) return `<div class="tl-error">${icon('circle-x')}<div><strong>Rejected by the local runtime</strong><p>${text(v && typeof v === 'object' && 'error' in v ? v.error : JSON.stringify(v))}</p></div></div>`;
   if (call.name === 'rehearse_repair' && v && Array.isArray(v.checks)) {
     const ok = v.checks.filter(c => c.passed).length;
-    return `<h4>Rehearsal result</h4><p class="small">${v.passed ? 'Passed' : 'Did not pass'} · ${ok}/${v.checks.length} checks${v.status ? ` · ${text(v.status)}` : ''}</p>
+    return `<h4>Test result on a copy</h4><p class="small">${v.passed ? 'Passed' : 'Did not pass'} · ${ok}/${v.checks.length} checks${v.status ? ` · ${text(v.status)}` : ''}</p>
       <ul class="tl-checks">${v.checks.map(c => `<li class="${c.passed ? '' : 'fail'}">${icon(c.passed ? 'check' : 'x')}<span>${text(checkName(c.name))}</span></li>`).join('')}</ul>`;
   }
   if (call.name === 'read_artifact' && v && Array.isArray(v.lines)) {
@@ -1110,24 +1237,286 @@ function assistantItem(step, n) {
     <p class="tl-text">${step.text ? text(step.text) : '<span class="faint">No text in this response.</span>'}</p></div></li>`;
 }
 
-function timelineItems(r) {
+// The steps as listed, in recorded order: each result sits inside its call, so a call and its result are one
+// numbered step. The list, the replay and the guardrail card all use this numbering.
+function displayedSteps(r) {
   const results = new Map(r.steps.filter(s => s.kind === 'tool_result').map(s => [s.call_id, s]));
   const callIds = new Set(r.steps.filter(s => s.kind === 'tool_call').map(s => s.call_id));
-  const out = []; let n = 0;
+  const out = [];
   for (const step of r.steps) {
     if (step.kind === 'tool_result' && callIds.has(step.call_id)) continue; // shown inside its call
-    n += 1;
-    const res = step.kind === 'tool_call' ? results.get(step.call_id) : null;
+    out.push({step, res: step.kind === 'tool_call' ? results.get(step.call_id) || null : null, n: out.length + 1});
+  }
+  return out;
+}
+
+function timelineItems(r) {
+  const replay = replayFor(r), out = [];
+  for (const {step, res, n} of displayedSteps(r)) {
     const rejected = step.kind === 'tool_call' ? !!res?.error : step.kind === 'tool_result' && step.error;
-    if (state.stepFilter === 'tools' && step.kind === 'assistant') continue;
-    if (state.stepFilter === 'messages' && step.kind !== 'assistant') continue;
-    if (state.stepFilter === 'rejected' && !rejected) continue;
-    if (step.kind === 'assistant') out.push(assistantItem(step, n));
-    else if (step.kind === 'tool_call') out.push(callItem(step, res, n));
-    else out.push(`<li class="tl-item tl-call${step.error ? ' rejected' : ''}"><span class="tl-dot">${icon('info')}</span><div class="tl-card"><div class="tl-head"><span class="tl-no">${pad(n)}</span><span class="tl-kind">Result without a matching call</span></div><div class="tl-detail"><pre>${text(JSON.stringify(step.result ?? null, null, 2))}</pre></div></div></li>`);
+    // A replay shows every step in order; the filters apply only outside a replay.
+    if (!replay && state.stepFilter === 'tools' && step.kind === 'assistant') continue;
+    if (!replay && state.stepFilter === 'messages' && step.kind !== 'assistant') continue;
+    if (!replay && state.stepFilter === 'rejected' && !rejected) continue;
+    const item = step.kind === 'assistant' ? assistantItem(step, n) : step.kind === 'tool_call' ? callItem(step, res, n)
+      : `<li class="tl-item tl-call${step.error ? ' rejected' : ''}"><span class="tl-dot">${icon('info')}</span><div class="tl-card"><div class="tl-head"><span class="tl-no">${pad(n)}</span><span class="tl-kind">Result without a matching call</span></div><div class="tl-detail"><pre>${text(JSON.stringify(step.result ?? null, null, 2))}</pre></div></div></li>`;
+    const attrs = ` data-seq="${n}"${replay && n > replay.cursor ? ' hidden' : ''}${replay && n === replay.cursor ? ' aria-current="step"' : ''}`;
+    out.push(item.replace('<li ', `<li${attrs} `));
   }
   return out.join('') || '<li class="tl-empty">No steps match this filter.</li>';
 }
+
+// One plain line for a listed step, for announcements and the guardrail card.
+const TOOL_PLAIN = {rehearse_repair: 'Proposed repair', read_artifact: 'File read', query_database: 'Database query', get_schema: 'Schema read', list_artifacts: 'File list'};
+function stepSummary({step, res}) {
+  if (step.kind === 'assistant') return 'Model message';
+  if (step.kind !== 'tool_call') return 'Result without a matching call';
+  const what = TOOL_PLAIN[step.name] || step.name;
+  return `${what} (${step.name}): ${!res || step.has_result === false ? 'no result recorded' : res.error ? 'rejected by the local runtime' : 'result recorded'}`;
+}
+
+/* ---------- The guardrail moment: a recorded rejection and the correction that followed ---------- */
+
+// From the saved steps only: a call the local runtime rejected (a proposed repair first, if there is one),
+// the model's messages that followed, verbatim, any further rejections of the same tool, and the next call
+// of that tool the runtime accepted. Nothing is inferred about the model's reasoning.
+// A test on a copy is accepted only when its saved result says it passed and lists checks that all passed;
+// any other rehearsal result is a failed attempt, whatever its error flag. Reads and queries are accepted
+// when the local runtime did not mark them as errors.
+const rehearsalPassed = (res) => {
+  const v = res?.result;
+  return !!res && !res.error && plainObject(v) && v.passed === true && Array.isArray(v.checks) && v.checks.length > 0 && v.checks.every(c => c?.passed === true);
+};
+const answered = (i) => i.step.kind === 'tool_call' && i.step.has_result !== false && !!i.res;
+const acceptedCall = (i) => answered(i) && (i.step.name === 'rehearse_repair' ? rehearsalPassed(i.res) : !i.res.error);
+const failedCall = (i) => answered(i) && !acceptedCall(i);
+
+// The first failed attempt (repairs first) that a later call of the same tool corrected, with the model's
+// messages and the further failed attempts in between. No accepted correction, no moment.
+function guardrailMoment(r) {
+  if (!r?.steps) return null;
+  const items = displayedSteps(r), failed = items.filter(failedCall);
+  const ordered = [...failed.filter(i => i.step.name === 'rehearse_repair'), ...failed.filter(i => i.step.name !== 'rehearse_repair')];
+  for (const bad of ordered) {
+    const fixed = items.find(i => i.n > bad.n && i.step.name === bad.step.name && acceptedCall(i));
+    if (!fixed) continue;
+    const between = items.filter(i => i.n > bad.n && i.n < fixed.n);
+    const shown = (i) => i.step.kind === 'assistant' || (i.step.name === bad.step.name && failedCall(i));
+    return {bad, fixed, between: between.filter(shown), others: between.filter(i => !shown(i)).length};
+  }
+  return null;
+}
+
+// What a failed attempt's saved result says: the runtime's rejection message, or how many checks passed.
+function attemptText(res) {
+  const v = res?.result;
+  if (plainObject(v) && !('error' in v) && Array.isArray(v.checks) && v.checks.length) {
+    const ok = v.checks.filter(c => c?.passed === true).length;
+    return {quote: false, words: `Tested on a copy: ${ok} of ${v.checks.length} checks passed, so the test did not pass.`};
+  }
+  return {quote: true, words: rejectionText(res)};
+}
+
+function guardrailView(r) {
+  const m = guardrailMoment(r);
+  if (!m) return '';
+  const what = TOOL_PLAIN[m.bad.step.name] || m.bad.step.name;
+  const quote = (i) => { const a = attemptText(i.res); return a.quote ? `<blockquote class="g-quote">${text(a.words)}</blockquote>` : `<p class="g-text">${text(a.words)}</p>`; };
+  const failedTitle = (i, again) => i.res.error ? (again ? 'Rejected again' : `${what} rejected by the local runtime`) : (again ? 'Checks failed again' : `${what} failed its checks on a copy`);
+  const message = (i) => {
+    const words = String(i.step.text || '');
+    if (!words) return '<p class="caption">No text in this response.</p>';
+    return words.length > 280 ? `<details class="g-more"><summary>${text(words.slice(0, 280))}…</summary><p class="g-text">${text(words)}</p></details>` : `<p class="g-text">${text(words)}</p>`;
+  };
+  const checks = m.fixed.step.name === 'rehearse_repair' ? m.fixed.res.result.checks : null;
+  const accepted = checks ? `Tested on a copy: ${checks.length} of ${checks.length} checks passed.` : 'Accepted by the local runtime; its result is in the recorded steps.';
+  const rows = [`<li class="g-step bad"><span class="g-no">Step ${m.bad.n}</span><div><strong>${text(failedTitle(m.bad, false))}</strong>${quote(m.bad)}</div></li>`,
+    ...m.between.map(i => i.step.kind === 'assistant'
+      ? `<li class="g-step msg"><span class="g-no">Step ${i.n}</span><div><strong>The model’s next message, verbatim</strong>${message(i)}</div></li>`
+      : `<li class="g-step bad"><span class="g-no">Step ${i.n}</span><div><strong>${text(failedTitle(i, true))}</strong>${quote(i)}</div></li>`),
+    `<li class="g-step good"><span class="g-no">Step ${m.fixed.n}</span><div><strong>Next ${text(what.toLowerCase())} accepted</strong><p class="g-text">${text(accepted)}</p></div></li>`];
+  return `<section class="guardrail" aria-labelledby="guardrail-title">
+    <div class="guardrail-head"><h3 id="guardrail-title">Caught by the guardrail</h3><span class="caption">From this recording’s saved steps${m.others ? `, with ${m.others} other ${m.others === 1 ? 'step' : 'steps'} in between` : ''}.</span></div>
+    <ol class="guardrail-steps">${rows.join('')}</ol>
+    <button class="secondary" data-replay-from="${m.bad.n}">${icon('play')}<span>Replay from step ${m.bad.n}</span></button>
+  </section>`;
+}
+
+/* ---------- How we evaluated: every recorded outcome, the failures kept, and the limits ---------- */
+
+const wordsOf = (v) => typeof v === 'string' && v.trim() ? v.trim() : null;
+const JUDGMENT = {correct_repair: 'Correct repair', justified_stop: 'Justified stop', unsupported_format: 'Refused: unsupported format'};
+const judged = (v) => JUDGMENT[v] || String(v || 'not recorded').replaceAll('_', ' ');
+
+// The public dataset's locked new-format attempts, as recorded: each attempt's outcome, its independent
+// judgment and what the adapted and frozen scripts did on the same case. Nothing is derived beyond counts.
+function storyData(s) {
+  if (!plainObject(s) || !Array.isArray(s.attempts)) return null;
+  const attempts = s.attempts.filter(plainObject).map(a => ({incident: String(a.incident_id || ''), seed: Number.isInteger(a.seed) ? a.seed : null,
+    outcome: String(a.outcome || 'unknown'), judgment: String(a.judgment || ''), adapted: String(a.adapted_parser || ''), frozen: String(a.frozen_parser || '')}));
+  return {attempts, model: wordsOf(s.configuration?.model), scope: wordsOf(s.scope),
+    planned: Number.isInteger(s.planned_attempts) ? s.planned_attempts : attempts.length, unattempted: Array.isArray(s.unattempted) ? s.unattempted.length : 0,
+    tokens: Number.isInteger(s.usage?.total_tokens) ? s.usage.total_tokens : null,
+    repairs: attempts.filter(a => a.judgment === 'correct_repair').length, stops: attempts.filter(a => a.judgment === 'justified_stop').length,
+    sameAsScript: attempts.length > 0 && attempts.every(a => a.adapted === a.judgment),
+    frozenRefused: attempts.filter(a => a.frozen === 'unsupported_format').length};
+}
+
+// Counts come only from the recording lists on screen (the server's, or the public dataset's), never from a
+// stated total. The public dataset adds its scope wording and its locked new-format attempts.
+function evaluationData() {
+  const cases = state.cases.map(c => {
+    const list = state.recordings.get(c.id)?.list || [];
+    const newest = state.history.get(c.id)?.[0];
+    return {id: c.id, title: c.title, baseline: newest ? statusOf(newest)[0] : null,
+      runs: list.map((r, i) => ({n: list.length - i, id: r.id, outcome: r.outcome, inputsMatch: r.fixture_matches !== false, model: r.model}))};
+  });
+  const runs = cases.flatMap(c => c.runs), count = (o) => runs.filter(r => r.outcome === o).length;
+  const ev = state.demo?.evaluation;
+  return {cases, total: runs.length, repairs: count('repair'), stops: count('stop'), errors: count('error'), incomplete: count('incomplete'),
+    other: runs.filter(r => !['repair', 'stop', 'error', 'incomplete'].includes(r.outcome)).length,
+    mismatched: runs.filter(r => !r.inputsMatch).length, models: [...new Set(runs.map(r => r.model).filter(Boolean))],
+    scope: wordsOf(ev?.scope), interpretation: wordsOf(ev?.interpretation), story: storyData(ev?.story)};
+}
+
+const RUN_CHIP = {repair: ['Repair, checks passed', 'ok'], stop: ['Stopped', 'warn'], error: ['Error', 'danger'], incomplete: ['Did not finish', 'danger']};
+function evaluationView() {
+  const e = evaluationData();
+  const chip = (r) => { const [label, tone] = RUN_CHIP[r.outcome] || [String(r.outcome || 'unknown').replaceAll('_', ' '), '']; return `<span class="pill ${tone}">Run ${r.n} · ${text(label)}${r.inputsMatch ? '' : ' · inputs differ'}</span>`; };
+  const parts = [[e.repairs, 'ended with a repair that passed its checks on a copy'], [e.stops, 'stopped without repairing'],
+    [e.errors, 'ended with an error'], [e.incomplete, 'did not finish'], [e.other, 'ended another way']].filter(([n]) => n);
+  return `<div class="eval-head"><h2 id="evaluation-title">How we evaluated</h2><button class="icon-button" data-close-evaluation aria-label="Close">${icon('x')}</button></div>
+    <p class="eval-lede">Every saved Meta run is listed, including the ones that failed. ${e.models.length ? text(`They were recorded from the command line with ${e.models.join(', ')}.`) : ''} This page shows saved results; it never calls a model.</p>
+    <p class="eval-totals"><strong>${text(e.total)}</strong> recorded runs on ${text(e.cases.length)} cases: ${parts.map(([n, what]) => `<strong>${text(n)}</strong> ${text(what)}`).join('; ')}.</p>
+    ${table(['Case', 'Recorded Meta runs', 'Script baseline'], e.cases.map(c => [text(c.title), c.runs.length ? `<div class="eval-runs">${c.runs.map(chip).join('')}</div>` : '<span class="caption">No recordings</span>', text(c.baseline || 'Not run in this session')]))}
+    ${storyView(e.story)}
+    <h3>What this does not show</h3>
+    <ul class="eval-limits">
+      <li>The offline script solves the supported cases${e.story ? ', the inbox format included once adapted' : ''}: it proposes a repair where the evidence allows one and stops where evidence is missing. The recordings show the model reaching correct outcomes, not doing better than the script.</li>
+      ${e.story ? '<li>The frozen parser refusing the new format does not show that a model is needed. These are authored development cases, not blind holdouts.</li>' : '<li>These are saved observations on authored development cases, not a success rate.</li>'}
+      <li>Failed runs stay in the count and in the list. None is hidden, and none was replaced by a retry.</li>
+      <li>Recorded runs are saved results, not live. Usage is shown per run as reported, and no cost is shown.</li>
+      ${e.mismatched ? `<li>${text(`${e.mismatched} ${e.mismatched === 1 ? 'recording was' : 'recordings were'} made on inputs that differ from these case files. They are listed, but not compared.`)}</li>` : ''}
+    </ul>
+    ${e.scope || e.interpretation ? `<p class="caption">${text(['Dataset scope, as published:', e.scope, e.interpretation].filter(Boolean).join(' '))}</p>` : ''}
+    <p class="caption">The note at the foot of every screen says the same: no AI advantage has been demonstrated on these cases.</p>`;
+}
+
+function storyView(s) {
+  if (!s) return '';
+  const n = s.attempts.length, titleOf = (id) => state.cases.find(c => c.id === id)?.title || id;
+  const rows = s.attempts.map(a => [text(`${titleOf(a.incident)}${a.seed === null ? '' : ` · seed ${a.seed}`}`), text((RUN_CHIP[a.outcome] || [a.outcome])[0]),
+    text(judged(a.judgment)), text(judged(a.adapted)), text(judged(a.frozen))]);
+  const sentence = [`${s.planned} locked ${s.planned === 1 ? 'attempt' : 'attempts'}${s.model ? ` with ${s.model}` : ''}${s.unattempted ? `, ${s.unattempted} not attempted` : ''}.`,
+    `Judged independently: ${s.repairs} correct ${s.repairs === 1 ? 'repair' : 'repairs'} and ${s.stops} justified ${s.stops === 1 ? 'stop' : 'stops'}.`,
+    n ? (s.sameAsScript ? 'The adapted script reached the same result in every attempt.' : 'The adapted script did not reach the same result in every attempt.') : '',
+    n && s.frozenRefused ? `The frozen parser refused the format in ${s.frozenRefused === n ? `all ${n}` : `${s.frozenRefused} of ${n}`}.` : ''].filter(Boolean).join(' ');
+  return `<h3>New format: receipts in an inbox</h3>
+    <p class="eval-story">${text(sentence)}</p>
+    ${n ? table(['Attempt', 'Meta run', 'Independent judgment', 'Adapted script', 'Frozen parser'], rows) : ''}
+    ${s.tokens !== null ? `<p class="caption">${text(`Usage for these attempts, as reported by the provider: ${s.tokens.toLocaleString('en-US')} tokens. No cost is inferred.`)}</p>` : ''}
+    ${s.scope ? `<p class="caption">${text(s.scope)}</p>` : ''}`;
+}
+
+function openEvaluation() {
+  const dialog = $('#evaluation');
+  if (!dialog?.showModal) return;
+  $('#evaluation-body').innerHTML = evaluationView();
+  if (!dialog.open) dialog.showModal();
+  dialog.querySelector('[data-close-evaluation]')?.focus();
+}
+
+/* ---------- Replay: the saved steps, in recorded order, at a fixed pace ---------- */
+
+// Recordings carry no per-step timing, so a replay reveals one saved step per REPLAY_MS and says so. Nothing
+// runs again: each revealed step is the same recorded call, result or message as in the full list.
+const REPLAY_MS = 1000;
+let replayTimer = null;
+const replayFor = (r) => (state.replay && r && state.replay.recId === r.id ? state.replay : null);
+const replayTotal = () => (state.recording ? displayedSteps(state.recording).length : 0);
+function stopReplayTimer() { if (replayTimer) { clearInterval(replayTimer); replayTimer = null; } }
+function resetReplay() { stopReplayTimer(); state.replay = null; }
+
+function replayControls(r) {
+  const rp = replayFor(r), total = displayedSteps(r).length, playing = !!rp?.playing, ended = !!rp && rp.cursor >= total;
+  if (!total) return '<div class="replay" id="replay-controls" role="group" aria-label="Replay of the saved steps"><span class="replay-status"><strong>No saved steps</strong><span>This recording has nothing to replay.</span></span></div>';
+  return `<div class="replay" id="replay-controls" role="group" aria-label="Replay of the saved steps">
+    <button class="secondary" data-replay="toggle" aria-pressed="${playing}">${icon(playing ? 'pause' : 'play')}<span>${playing ? 'Pause' : ended ? 'Play again' : 'Play'}</span></button>
+    <button class="secondary" data-replay="next" ${ended ? 'disabled' : ''}>${icon('skip-forward')}<span>Next step</span></button>
+    <button class="secondary" data-replay="restart" ${rp ? '' : 'disabled'}>${icon('rotate-ccw')}<span>Restart</span></button>
+    <span class="replay-status"><strong>${rp ? `Step ${rp.cursor} of ${total}` : `${total} saved steps`}</strong><span>Replay of saved steps, one per second. Not live: nothing runs again.</span></span>
+    ${rp ? '<button class="link small" data-replay="exit">Show all steps</button>' : ''}
+  </div>`;
+}
+
+// Reveal up to the cursor without rebuilding the list (open cards stay open); keep focus on the control used.
+function applyReplay(scroll = true) {
+  const rp = state.replay, list = $('#content .timeline');
+  if (!list?.querySelectorAll) return;
+  for (const li of list.querySelectorAll('li[data-seq]')) {
+    const n = Number(li.dataset.seq);
+    li.hidden = !!rp && n > rp.cursor;
+    if (rp && n === rp.cursor) li.setAttribute('aria-current', 'step'); else li.removeAttribute('aria-current');
+  }
+  const box = $('#replay-controls');
+  if (box && state.recording) {
+    const focused = document.activeElement?.dataset?.replay, holder = document.createElement('div');
+    holder.innerHTML = replayControls(state.recording);
+    box.replaceWith(holder.firstElementChild);
+    const again = focused && $(`#replay-controls [data-replay="${focused}"]`);
+    if (again && !again.disabled) again.focus({preventScroll: true});
+    else if (focused) $('#replay-controls [data-replay="toggle"]')?.focus({preventScroll: true});
+  }
+  const current = rp && list.querySelector(`li[data-seq="${rp.cursor}"]`);
+  if (current) {
+    if (scroll) current.scrollIntoView({block: 'nearest', behavior: prefersReducedMotion() ? 'auto' : 'smooth'});
+    const live = $('#replay-live'), item = displayedSteps(state.recording)[rp.cursor - 1];
+    if (live && item) live.textContent = `Step ${rp.cursor} of ${replayTotal()}: ${stepSummary(item)}`;
+  }
+}
+
+function startReplay(from = 1, play = true) {
+  const r = state.recording, total = r ? displayedSteps(r).length : 0;
+  if (!r || !recordedMode() || !total) return;
+  stopReplayTimer();
+  state.replay = {recId: r.id, cursor: Math.max(1, Math.min(from, total)), playing: false};
+  state.stepFilter = 'all';
+  if (state.tab !== 'investigation') setTab('investigation'); else renderPanel();
+  $('#recorded-steps')?.scrollIntoView({block: 'start', behavior: prefersReducedMotion() ? 'auto' : 'smooth'});
+  if (play) advanceReplay(); else applyReplay(false);
+}
+
+// Plays on from the cursor. With nothing left to reveal (a one-step recording, or the last step) the replay
+// is complete at once: no timer starts and nothing calls back into startReplay.
+function advanceReplay() {
+  const rp = state.replay;
+  stopReplayTimer();
+  if (!rp) return;
+  rp.playing = rp.cursor < replayTotal();
+  if (rp.playing) replayTimer = setInterval(() => {
+    const now = state.replay;
+    if (!now || state.recording?.id !== now.recId || state.tab !== 'investigation') { stopReplayTimer(); if (now) now.playing = false; return; }
+    now.cursor = Math.min(replayTotal(), now.cursor + 1);
+    if (now.cursor >= replayTotal()) { stopReplayTimer(); now.playing = false; }
+    applyReplay();
+  }, REPLAY_MS);
+  applyReplay(false);
+}
+
+// Play continues a paused replay; Play again (after the last step) starts over from step 1.
+function playReplay() {
+  const rp = replayFor(state.recording);
+  if (!rp || rp.cursor >= replayTotal()) startReplay(1, true); else advanceReplay();
+}
+
+function pauseReplay() { stopReplayTimer(); if (state.replay) { state.replay.playing = false; applyReplay(false); } }
+function nextReplay() {
+  if (!state.replay) return startReplay(1, false);
+  stopReplayTimer();
+  Object.assign(state.replay, {playing: false, cursor: Math.min(replayTotal(), state.replay.cursor + 1)});
+  applyReplay();
+}
+function exitReplay() { resetReplay(); renderPanel(); }
 
 // Agreement between a recording and this session's offline script run for the same case: which orders
 // each would cancel, and which original each keeps. Shown only while the recording's inputs match the
@@ -1176,9 +1565,9 @@ function recordedConclusion(r, rejected) {
   const reason = last ? ` Last rejection: “${rejectionText(last)}”` : '';
   if (r.outcome === 'repair' && review) {
     const passed = review.checks.filter(c => c.passed).length;
-    return `Rehearsal on a disposable copy ${review.passed ? 'passed' : 'did not pass'} ${passed} of ${review.checks.length} checks: ${review.cancellations} orders cancelled, active orders ${review.before_active} → ${review.after_active}, ${review.checkout_preserved} of ${review.checkout_total} later purchases unchanged.${along}`;
+    return `Tested on a disposable copy, ${review.passed ? 'passing' : 'not passing'} ${passed} of ${review.checks.length} checks: ${review.cancellations} orders cancelled, active orders ${review.before_active} → ${review.after_active}, ${review.checkout_preserved} of ${review.checkout_total} later purchases unchanged.${along}`;
   }
-  if (r.outcome === 'repair') return `The recording reports a repair, but no verified rehearsal review was recorded.${along}`;
+  if (r.outcome === 'repair') return `The recording reports a repair, but no verified test on a copy was recorded.${along}`;
   if (r.outcome === 'stop') return `The model stopped without proposing a repair, so nothing was rehearsed.${reason}`;
   if (r.outcome === 'error') return `The attempt ended with an error after ${r.tool_calls} tool results. No verified repair was recorded.${reason}`;
   if (r.outcome === 'incomplete') return `The attempt did not finish after ${r.tool_calls} tool results. No verified repair was recorded.${reason}`;
@@ -1202,15 +1591,17 @@ function recordedInvestigationView() {
   return `${recBanner(r)}
     <div class="section-heading"><h2>${heading}</h2></div>
     <div class="callout ${tone === 'ok' ? 'success' : 'stop'}"><strong>Outcome</strong><br>${text(recordedConclusion(r, rejectedResults))}</div>
+    ${guardrailView(r)}
     ${compareView(r)}
     ${recCitations(r) ? reconstructionView(r.review ? r.review.changes.map(c => ({order_id: c.before.id, duplicate_of: c.duplicate_of})) : null, {recorded: true}) : ''}
     <div class="incident-facts run-numbers"><span><strong>${text(Number.isFinite(r.elapsed_seconds) ? `${Math.round(r.elapsed_seconds)} s` : '—')}</strong> elapsed, as reported</span><span><strong>${text(rejected)}</strong> rejected tool ${rejected === 1 ? 'result' : 'results'}</span><span><strong>${text(messages)}</strong> model ${messages === 1 ? 'message' : 'messages'}</span></div>
     <div class="folds">
-      <details class="fold"><summary>Usage${usage.available ? text(` · ${fmtNum(usage.total_tokens)} tokens, as reported`) : ' · not recorded'}</summary><p class="small muted">${usage.available ? text(`Input ${fmtNum(usage.input_tokens)} (cached ${fmtNum(usage.cached_input_tokens)}) · output ${fmtNum(usage.output_tokens)}, which already includes ${fmtNum(usage.reasoning_tokens)} reasoning · ${fmtNum(usage.response_count)} responses with usage. No cost is shown.`) : 'This recording did not include usage totals.'}</p></details>
+      <details class="fold"><summary>${usage.available ? text(`Usage: ${fmtNum(usage.total_tokens)} tokens, as reported`) : 'Usage not recorded'}</summary><p class="small muted">${usage.available ? text(`Input ${fmtNum(usage.input_tokens)} (cached ${fmtNum(usage.cached_input_tokens)}) · output ${fmtNum(usage.output_tokens)}, which already includes ${fmtNum(usage.reasoning_tokens)} reasoning · ${fmtNum(usage.response_count)} responses with usage. No cost is shown.`) : 'This recording did not include usage totals.'}</p></details>
       <details class="fold model-summary"><summary>Model’s final summary · verbatim</summary><p class="tl-text">${text(r.final?.summary || r.summary || 'No summary recorded.')}</p></details>
     </div>
-    <h3 class="tl-title">Recorded steps <span class="caption">in order · nothing here runs again</span></h3>
-    <div class="tl-tools"><div class="segmented" role="group" aria-label="Filter steps">${filters.map(([key, name]) => `<button data-step-filter="${key}" aria-pressed="${state.stepFilter === key}">${text(name)}</button>`).join('')}</div><button class="link small" data-expand-steps>Expand all</button></div>
+    <h3 class="tl-title" id="recorded-steps" tabindex="-1">Recorded steps <span class="caption">In order. Nothing here runs again.</span></h3>
+    ${replayControls(r)}<p class="sr-only" id="replay-live" aria-live="polite"></p>
+    ${replayFor(r) ? '' : `<div class="tl-tools"><div class="segmented" role="group" aria-label="Filter steps">${filters.map(([key, name]) => `<button data-step-filter="${key}" aria-pressed="${state.stepFilter === key}">${text(name)}</button>`).join('')}</div><button class="link small" data-expand-steps>Expand all</button></div>`}
     <ol class="timeline">${timelineItems(r)}</ol>`;
 }
 
@@ -1218,32 +1609,32 @@ function recordedChangesView() {
   const r = state.recording;
   if (!r) return recordedPending();
   if (!r.review) return `${recBanner(r, true)}${r.outcome === 'stop'
-    ? emptyState('No repair was recorded', 'The model stopped instead of proposing a repair, so this recording has no rehearsal review.', 'ban')
-    : emptyState('No verified repair in this recording', `This attempt ended as ${r.outcome}; no verified rehearsal review was recorded.`, 'circle-x')}`;
+    ? emptyState('No repair was recorded', 'The model stopped instead of proposing a repair, so this recording has no test on a copy.', 'ban')
+    : emptyState('No verified repair in this recording', `This attempt ended as ${r.outcome}; no verified test on a copy was recorded.`, 'circle-x')}`;
   const review = r.review;
   return `${recBanner(r, true, true)}
     <div class="section-heading"><h2>Recorded repair review</h2></div>
     ${repairFlow(review, {recorded: true})}
     ${diffView(review)}
-    <p class="caption">Read-only history. To produce exportable SQL, run the offline script and rehearse it on a disposable copy.</p>`;
+    <p class="caption">Read-only history. To produce exportable SQL, run the offline script and test its repair on a copy.</p>`;
 }
 
 function recordedChecksView() {
   const r = state.recording;
   if (!r) return recordedPending();
-  if (!r.review) return `${recBanner(r, true)}${emptyState('No checks in this recording', 'Checks run only when a rehearsal is recorded. This attempt did not record one.', 'shield-check')}`;
+  if (!r.review) return `${recBanner(r, true)}${emptyState('No checks in this recording', 'Checks run only when a test on a copy is recorded. This attempt did not record one.', 'shield-check')}`;
   const review = r.review, passed = review.checks.filter(c => c.passed).length;
   return `${recBanner(r, true, true)}
     <div class="section-heading"><h2>Recorded operational checks</h2></div>
     <div class="status-cards">
-      <div class="status-card ${review.passed ? 'ok' : 'danger'}"><span class="eyebrow">At recorded rehearsal</span><strong>${passed} / ${review.checks.length} checks passed</strong><span class="caption">${text(r.review_observation || '')}</span></div>
-      <div class="status-card"><span class="eyebrow">Export</span><strong>Not available for recordings</strong><span class="caption">Recordings have no downloads. Exports come only from a current offline rehearsal, which rechecks freshness.</span></div>
+      <div class="status-card ${review.passed ? 'ok' : 'danger'}"><span class="eyebrow">In the recorded test</span><strong>${passed} / ${review.checks.length} checks passed</strong><span class="caption">${text(r.review_observation || '')}</span></div>
+      <div class="status-card"><span class="eyebrow">Export</span><strong>Not available for recordings</strong><span class="caption">Recordings have no downloads. Exports come only from a current offline test, and each one is refused if files changed since testing.</span></div>
     </div>
     ${checksView(review.checks)}`;
 }
 
 function recordedSqlView() {
-  return `${state.recording ? recBanner(state.recording, true) : ''}${emptyState('No SQL for recorded runs', 'Recordings are read-only history with no downloads. Guarded SQL comes only from a current offline rehearsal, which rechecks freshness first.', 'database')}`;
+  return `${state.recording ? recBanner(state.recording, true) : ''}${emptyState('No SQL for recorded runs', 'Recordings are read-only history with no downloads. Guarded SQL comes only from a current offline test, and it is refused if files changed since testing.', 'database')}`;
 }
 
 /* ---------- Evidence ---------- */
@@ -1417,11 +1808,11 @@ function reviewView() {
 function reviewSummary(run, review) {
   const ready = run.status === 'ready_for_review';
   const failed = review.checks.filter(c => !c.passed);
-  return `<div class="section-heading"><h2>${ready?'Rehearsal result':'Export unavailable'}</h2></div>
+  return `<div class="section-heading"><h2>${ready?'Test result on a copy':'Export unavailable'}</h2></div>
     ${ready?'':`<div class="callout stop">${text(run.summary)}</div>`}
     ${repairFlow(review, {run})}
-    ${run.status==='blocked'?'<p class="caption">Export is blocked. Counts describe the earlier rehearsal snapshot; see the server’s reason above.</p>':''}
-    ${failed.length?`<div class="failed"><h3>Failed checks at rehearsal</h3><ul>${failed.map(c=>`<li><span class="group">${text(groupOf(c.name))}</span><strong>${text(checkName(c.name))}</strong><div class="check-detail">${text(c.detail)}${diagSummary(c)?`<span class="check-diag">${text(diagSummary(c))}</span>`:''}</div></li>`).join('')}</ul></div>`:''}`;
+    ${run.status==='blocked'?'<p class="caption">Export is blocked. Counts describe the earlier test on a copy; see the server’s reason above.</p>':''}
+    ${failed.length?`<div class="failed"><h3>Checks that failed on the copy</h3><ul>${failed.map(c=>`<li><span class="group">${text(groupOf(c.name))}</span><strong>${text(checkName(c.name))}</strong><div class="check-detail">${text(c.detail)}${diagSummary(c)?`<span class="check-diag">${text(diagSummary(c))}</span>`:''}</div></li>`).join('')}</ul></div>`:''}`;
 }
 
 // A quiet outcome graphic, built from the selected rehearsal's observations.
@@ -1429,25 +1820,25 @@ function reviewSummary(run, review) {
 function repairFlow(review, {run = null, recorded = false} = {}) {
   const passed = review.checks.filter(c => c.passed).length, total = review.checks.length;
   const sourceCheck = review.checks.find(c => c.name === 'source_snapshot_unchanged');
-  const sourceNote = sourceCheck ? (sourceCheck.passed ? 'Source unchanged at rehearsal' : 'Source differed at rehearsal') : 'Source opened read-only';
+  const sourceNote = sourceCheck ? (sourceCheck.passed ? 'Source unchanged during the test' : 'Source changed during the test') : 'Source opened read-only';
   const changed = review.cancellations, preserved = review.untargeted_preserved;
   const known = [changed, preserved].every(n => Number.isSafeInteger(n) && n >= 0) && changed + preserved > 0;
   const portion = known ? changed / (changed + preserved) * 100 : 0;
   const pkg = recorded ? 'Read-only recording · no downloads'
-    : run?.status === 'ready_for_review' ? 'Package for human review · freshness checked on download'
+    : run?.status === 'ready_for_review' ? 'For human review · refused if files changed since testing'
     : run?.status === 'blocked' ? 'Export blocked' : 'Export unavailable · checks failed';
   const pkgTone = recorded ? '' : run?.status === 'ready_for_review' ? 'ok' : run?.status === 'blocked' ? 'warn' : 'danger';
-  return `<section class="repair-outcome" aria-label="${recorded ? 'Recorded rehearsal outcome' : 'Rehearsal outcome'}">
+  return `<section class="repair-outcome" aria-label="${recorded ? 'Recorded outcome of the test on a copy' : 'Outcome of the test on a copy'}">
     <div class="outcome-numbers"><div><span class="eyebrow">Active orders on the ${recorded ? 'recorded ' : ''}copy</span>
       <strong class="outcome-total">${text(review.before_active)} → ${text(review.after_active)}</strong>
       <p><strong>${text(changed)}</strong> duplicate orders cancelled. Order history retained.</p></div>
-      <div class="outcome-preserved"><strong>${text(preserved)}</strong><span>untargeted orders unchanged</span><small>including ${text(`${review.checkout_preserved} / ${review.checkout_total}`)} later purchases intact</small></div></div>
-    ${known ? `<figure class="impact" aria-label="${text(`${changed} cancelled orders and ${preserved} unchanged orders in the rehearsal review`)}">
+      <div class="outcome-preserved"><strong>${text(preserved)}</strong><span>orders left untouched</span><small>including ${text(`${review.checkout_preserved} / ${review.checkout_total}`)} later purchases intact</small></div></div>
+    ${known ? `<figure class="impact" aria-label="${text(`${changed} cancelled orders and ${preserved} unchanged orders in the test on a copy`)}">
       <svg class="impact-track" viewBox="0 0 100 7" preserveAspectRatio="none" aria-hidden="true"><rect class="impact-changed" x="0" y="0" width="${portion}" height="7"/><rect class="impact-preserved" x="${portion}" y="0" width="${100 - portion}" height="7"/></svg></figure>` : ''}
     <ol class="outcome-path" aria-label="${recorded ? 'Recorded repair path' : 'Repair path'}">
       <li class="path-step src">${icon('database')}<span><strong>Source database</strong><small>${text(sourceNote)}</small></span></li>
-      <li class="path-step copy">${icon('flask-conical')}<span><strong>${recorded ? 'Recorded rehearsal copy' : 'Disposable copy'}</strong><small>${recorded ? 'changes were made only here' : 'changes are made only here'}</small></span></li>
-      <li class="path-step ${review.passed ? 'ok' : 'danger'}">${icon(review.passed ? 'shield-check' : 'circle-x')}<span><strong>Independent checks</strong><small>${passed} / ${total} passed ${recorded ? 'at recorded rehearsal' : 'at rehearsal'}</small></span></li>
+      <li class="path-step copy">${icon('flask-conical')}<span><strong>${recorded ? 'Recorded test copy' : 'Disposable copy'}</strong><small>${recorded ? 'changes were made only here' : 'changes are made only here'}</small></span></li>
+      <li class="path-step ${review.passed ? 'ok' : 'danger'}">${icon(review.passed ? 'shield-check' : 'circle-x')}<span><strong>Independent checks</strong><small>${passed} / ${total} passed ${recorded ? 'in the recorded test' : 'on the copy'}</small></span></li>
       <li class="path-step pkg ${pkgTone}">${icon(recorded ? 'history' : 'package')}<span><strong>${recorded ? 'No repair package' : 'Repair package'}</strong><small>${text(pkg)}</small></span></li>
     </ol>
   </section>`;
@@ -1479,27 +1870,33 @@ function diffView(review) {
       <label class="search">${icon('search')}<span class="sr-only">Search changed records</span><input id="change-search" type="search" placeholder="Search order, customer or product" value="${escape(state.changeQuery)}" autocomplete="off" spellcheck="false"><kbd aria-hidden="true">/</kbd></label>
       <label class="filter">Product <select id="change-filter"><option value="">All (${review.changes.length})</option>${skus.map(sku=>`<option value="${escape(sku)}" ${sku===state.filter?'selected':''}>${text(sku)} (${review.changes.filter(c=>c.before.sku===sku).length})</option>`).join('')}</select></label>
     </div>
-    <p class="table-note">The original purchase stays. Only the retry is cancelled; stock is returned with a compensating entry.</p>
+    <p class="table-note">${uniformStatus(review.changes) ? 'Each order below goes from active to cancelled on the copy. ' : ''}The original purchase stays. Only the retry is cancelled; stock is returned with a compensating entry.</p>
     <div id="change-table">${changesTable(review.changes)}</div>
-    <div class="group-head"><h4>Stock reconciliation</h4><span class="caption">Before → after rehearsal · bars start at zero</span></div>
+    <div class="group-head"><h4>Stock reconciliation</h4><span class="caption">Before and after the test on a copy. Bars start at zero.</span></div>
     ${table(['','Product','Stock on hand','Change','From cancellations'],review.stock.map(p=>{
       const delta = p.after - p.before, entry = byProduct.get(p.sku);
       return [`<span class="sym ${delta?'mod':'same'}">${delta?'~':'='}</span>`,`${text(p.name)} <span class="mono faint">${text(p.sku)}</span>`,stockVisual(p, Math.max(0, ...review.stock.flatMap(row => [row.before, row.after]))),`<span class="${delta>0?'positive':delta<0?'cancelled':''} num">${delta>0?'+':''}${text(delta)}</span>`,entry?`${entry.orders} orders · +${entry.units} units`:'—'];
     }),review.stock.map(p=>selAttrs(`product:${p.sku}`)))}
-    <div class="group-head"><h4>preserved work</h4><span class="caption">Later purchases in this synthetic case. At rehearsal, ${text(review.checkout_preserved)} of ${text(review.checkout_total)} remained unchanged.</span></div>
+    <div class="group-head"><h4>preserved work</h4><span class="caption">Later purchases in this synthetic case. On the copy, ${text(review.checkout_preserved)} of ${text(review.checkout_total)} remained unchanged.</span></div>
     ${orderTable(checkout)}
     <details class="fold"><summary>Other untouched records · ${others.length}</summary>${orderTable(others)}</details>
   </section>`;
 }
 
+// Every cancellation normally goes from active to cancelled; then that fact is one sentence above the table
+// instead of a column that repeats on every row. Any other change keeps the column.
+const uniformStatus = (changes) => changes.every(c => c.before.status === 'active' && c.after.status === 'cancelled');
+
 function changesTable(changes) {
-  const q = state.changeQuery.trim().toLowerCase();
+  const q = state.changeQuery.trim().toLowerCase(), uniform = uniformStatus(changes);
   const rows = changes.filter(c => (!state.filter || c.before.sku === state.filter) &&
     (!q || [c.before.id, c.before.customer, c.before.sku, c.duplicate_of].some(v => String(v).toLowerCase().includes(q))));
   if (!rows.length) return `<div class="log-empty">No changed records match.</div>`;
-  return table(['Purchase','Cancelled order','Status on copy','Keeps original','Evidence'],rows.map(c=>{
+  return table(['Purchase','Cancelled order',...(uniform ? [] : ['Status on copy']),'Original order','Evidence'],rows.map(c=>{
     const changed = Object.keys(c.before).filter(k => c.before[k] !== c.after[k]);
-    return [purchaseCell(c.before),`<span class="sym mod" title="${escape(changed.join(', '))} changed">~</span> ${idRef(c.before.id,'cancelled',q)}`,`<span class="before">${text(c.before.status)}</span> → <span class="after">${text(c.after.status)}</span>`,idRef(c.duplicate_of,'',q),citations({order_id:c.before.id,evidence_refs:c.evidence_refs||[],recorded_evidence_refs_text:c.recorded_evidence_refs_text})];
+    return [purchaseCell(c.before),`<span class="sym mod" title="${escape(changed.join(', '))} changed">~</span> ${idRef(c.before.id,'cancelled',q)}`,
+      ...(uniform ? [] : [`<span class="before">${text(c.before.status)}</span> → <span class="after">${text(c.after.status)}</span>`]),
+      idRef(c.duplicate_of,'',q),citations({order_id:c.before.id,evidence_refs:c.evidence_refs||[],recorded_evidence_refs_text:c.recorded_evidence_refs_text})];
   }),rows.map(c=>selAttrs(`order:${c.before.id}`)));
 }
 
@@ -1518,7 +1915,7 @@ function packageNotes(review) {
   };
 }
 function packageView(run) {
-  const review = run.review, exp = exportStatus(run), ready = run.status === 'ready_for_review';
+  const review = run.review, exp = exportStatus(run), ready = run.status === 'ready_for_review' && !historicalRun(run);
   const notes = packageNotes(review), files = ready ? run.downloads || [] : [];
   const busy = state.rechecking.has(run.id);
   const list = files.length
@@ -1526,9 +1923,9 @@ function packageView(run) {
     : `<p class="package-empty">${text(ready ? 'No artifacts available for export.' : exp.detail)}</p>`;
   const source = shortHash(run.source_fingerprint), evidence = shortHash(run.evidence_fingerprint);
   const pinned = source && evidence
-    ? `<p class="package-pin">Pinned at investigation to source <span class="mono" title="${escape(run.source_fingerprint)}">${text(source)}</span> and evidence <span class="mono" title="${escape(run.evidence_fingerprint)}">${text(evidence)}</span>. ${ready ? 'Each download checks both again, and the rehearsed copy; a change refuses it.' : 'Nothing is served for this run.'}</p>`
+    ? `<p class="package-pin">File hashes from the investigation: source <span class="mono" title="${escape(run.source_fingerprint)}">${text(source)}</span> and evidence <span class="mono" title="${escape(run.evidence_fingerprint)}">${text(evidence)}</span>. ${ready ? 'Each download checks both again, and the rehearsed copy; a change refuses it.' : 'Nothing is served for this run.'}</p>`
     : '';
-  const recheck = ready ? `<button class="secondary" data-recheck-export ${busy ? 'disabled aria-busy="true"' : ''}>${busy ? `${icon('loader-circle', 'spin')}<span>Rechecking…</span>` : `${icon('refresh-cw')}<span>Recheck now</span>`}</button>` : '';
+  const recheck = ready ? `<button class="secondary" data-recheck-export ${busy ? 'disabled aria-busy="true"' : ''}>${busy ? `${icon('loader-circle', 'spin')}<span>Checking files…</span>` : `${icon('refresh-cw')}<span>Check files again</span>`}</button>` : '';
   return `<section class="package" id="repair-package" tabindex="-1" aria-labelledby="package-title">
     <div class="package-head"><div><h3 id="package-title">${icon('package')}Repair package</h3><p>For human review. This workbench never applies it.</p></div>${badge(exp.label, exp.tone)}</div>
     ${list}
@@ -1539,26 +1936,27 @@ function packageView(run) {
 /* ---------- Checks ---------- */
 
 function exportStatus(run) {
+  if (historicalRun(run)) return {label: 'No export in this demo', tone: '', detail: 'Recorded offline baseline. An export needs a current local test on a copy, so nothing is served here.'};
   const check = state.exportChecks.get(run.id);
   if (run.status === 'ready_for_review') {
-    if (state.rechecking.has(run.id)) return {label: 'Rechecking current files…', tone: '', detail: 'The server is checking source, evidence and candidate freshness.'};
-    if (check?.ok) return {label: 'Freshness check passed', tone: 'ok', detail: `Verified at ${time(check.at)} for ${check.artifact}. Every export is checked again.`};
+    if (state.rechecking.has(run.id)) return {label: 'Checking files…', tone: '', detail: 'The server is checking whether the source, evidence or tested copy changed since testing.'};
+    if (check?.ok) return {label: 'Files unchanged since testing', tone: 'ok', detail: `Checked at ${time(check.at)} for ${check.artifact}. Every export is checked again.`};
     if (check && !check.ok) return {label: 'Refused', tone: 'warn', detail: check.message};
-    return {label: 'Passed at rehearsal · Recheck required', tone: 'warn', detail: 'Current source, evidence and candidate freshness has not been rechecked. Recheck before export.'};
+    return {label: 'Tested on a copy · check files before export', tone: 'warn', detail: 'Not yet checked whether files changed since testing. Each download checks again.'};
   }
   if (run.status === 'blocked') return {label: 'Refused', tone: 'warn', detail: `${run.summary}${check && !check.ok ? ` Checked at ${time(check.at)}.` : ''}`};
-  if (run.status === 'failed_checks') return {label: 'Unavailable', tone: 'danger', detail: 'Operational checks failed at rehearsal, so nothing can be exported.'};
+  if (run.status === 'failed_checks') return {label: 'Unavailable', tone: 'danger', detail: 'Checks failed on the copy, so nothing can be exported.'};
   return {label: statusOf(run)[0], tone: '', detail: run.summary};
 }
 
 function checksTab() {
   const run = state.run, review = run?.review;
   if (!review) return noReview(run, 'independent checks');
-  const passed = review.checks.filter(c => c.passed).length, meta = state.runMeta.get(run.id) || {}, exp = exportStatus(run);
+  const passed = review.checks.filter(c => c.passed).length, meta = state.runMeta.get(run.id) || {}, exp = exportStatus(run), past = historicalRun(run);
   return `<div class="section-heading"><h2>Independent operational checks</h2></div>
     <div class="status-cards">
-      <div class="status-card ${review.passed?'ok':'danger'}"><span class="eyebrow">At rehearsal</span><strong>${passed} / ${review.checks.length} checks passed</strong><span class="caption">Observed on the rehearsal snapshot${meta.rehearsedAt?` · result received ${time(meta.rehearsedAt)} on this page`:''}</span></div>
-      <div class="status-card ${exp.tone}"><span class="eyebrow">Export freshness</span><strong>${text(exp.label)}</strong><span class="caption">${text(exp.detail)}</span>${run.status==='ready_for_review'?`<button class="secondary" data-recheck-export ${state.rechecking.has(run.id)?'disabled aria-busy="true"':''}>${state.rechecking.has(run.id)?`${icon('loader-circle','spin')}<span>Rechecking…</span>`:`${icon('refresh-cw')}<span>Recheck for export</span>`}</button>`:''}</div>
+      <div class="status-card ${review.passed?'ok':'danger'}"><span class="eyebrow">On the copy</span><strong>${passed} / ${review.checks.length} checks passed</strong><span class="caption">${past ? 'Recorded when this baseline was built, not a current check' : `Observed on the tested copy${meta.rehearsedAt?` · result received ${time(meta.rehearsedAt)} on this page`:''}`}</span></div>
+      <div class="status-card ${exp.tone}"><span class="eyebrow">${past ? 'Export' : 'Files since testing'}</span><strong>${text(exp.label)}</strong><span class="caption">${text(exp.detail)}</span>${run.status==='ready_for_review' && !past?`<button class="secondary" data-recheck-export ${state.rechecking.has(run.id)?'disabled aria-busy="true"':''}>${state.rechecking.has(run.id)?`${icon('loader-circle','spin')}<span>Checking files…</span>`:`${icon('refresh-cw')}<span>Check files again</span>`}</button>`:''}</div>
     </div>
     ${checksView(review.checks)}`;
 }
@@ -1584,25 +1982,29 @@ function sqlTint(line) {
 function sqlView() {
   const run = state.run;
   if (!run?.review) return noReview(run, 'the guarded repair script');
+  if (historicalRun(run)) return `<div class="section-heading"><h2>No SQL in this demo</h2>${badge('Read-only', true)}</div>
+    <div class="callout">A repair package needs a current local test on a copy, which this recorded demo does not run. No SQL file is included, so there is nothing to copy or download.</div>
+    <p class="small muted">In the local workbench the server serves repair.sql only for a current, passing test on a copy, and refuses it if files changed since testing.</p>`;
   if (run.status !== 'ready_for_review') return `<div class="section-heading"><h2>Export unavailable</h2>${badge(statusOf(run)[0], true)}</div>
     <div class="callout stop">${text(run.summary)}</div>
-    <p class="small muted">The server only serves SQL for a current, passing rehearsal. Every request rechecks source and evidence first.</p>`;
+    <p class="small muted">The server only serves SQL for a current, passing test on a copy. Every request is refused if files changed since testing.</p>`;
   const entry = state.sql.get(run.id) || {status: 'loading'};
   const body = entry.status === 'ok'
     ? `<div class="code" role="region" aria-label="repair.sql, read-only" tabindex="0">${entry.text.replace(/\r?\n$/, '').split(/\r?\n/).map((l,i)=>`<div class="code-line"><span class="ln">${i+1}</span><span class="lt">${sqlTint(l)}</span></div>`).join('')}</div>`
-    : entry.status === 'error' ? `<div class="callout stop">${text(entry.message)}</div>` : `<div class="code code-loading"><p class="caption">${icon('loader-circle','spin')} Rechecking freshness and loading repair.sql…</p>${skeleton(12)}</div>`;
+    : entry.status === 'error' ? `<div class="callout stop">${text(entry.message)}</div>` : `<div class="code code-loading"><p class="caption">${icon('loader-circle','spin')} Checking files and loading repair.sql…</p>${skeleton(12)}</div>`;
   return `<div class="sql-head"><div><span class="eyebrow">repair.sql · read-only</span><h2>Guarded repair script</h2></div>
-      <div class="sql-actions"><button class="secondary" data-copy-sql ${entry.status!=='ok'?'disabled':''}>${icon('copy')}<span>Copy</span></button><button class="secondary" data-reload-sql>${icon('refresh-cw')}<span>Recheck and reload</span></button></div></div>
-    <p class="small muted">Not applied by this workbench. Loaded through the freshness-gated download route${entry.at?` at ${time(entry.at)}`:''}. The script uses <span class="mono">BEGIN IMMEDIATE</span> and rolls back if table state differs from the rehearsal. Human review is required.</p>
+      <div class="sql-actions"><button class="secondary" data-copy-sql ${entry.status!=='ok'?'disabled':''}>${icon('copy')}<span>Copy</span></button><button class="secondary" data-reload-sql>${icon('refresh-cw')}<span>Check files and reload</span></button></div></div>
+    <p class="small muted">Not applied by this workbench. Loaded through the download route that refuses changed files${entry.at?` at ${time(entry.at)}`:''}. The script uses <span class="mono">BEGIN IMMEDIATE</span> and rolls back if table state differs from the tested copy. Human review is required.</p>
     ${body}`;
 }
 
 function maybeLoadSql() {
   const run = state.run;
-  if (run?.status === 'ready_for_review' && !state.sql.has(run.id)) loadSql();
+  if (run?.status === 'ready_for_review' && !historicalRun(run) && !state.sql.has(run.id)) loadSql();
 }
 
 async function loadSql() {
+  if (historicalRun(state.run)) { notice(READ_ONLY_NOTE); return; }
   const runId = state.run.id;
   state.sql.set(runId, {status: 'loading'});
   if (state.tab === 'sql') renderPanel();
@@ -1644,11 +2046,11 @@ function orderContext(id, focusRef) {
   const findIn = (oid) => review?.changes.find(c => c.before.id === oid)?.before || review?.preserved_orders.find(o => o.id === oid);
   const record = change?.before || (recorded ? findIn(id) : ordersById().get(id) || findIn(id));
   if (!record) return `<p class="muted">This record is not in the selected ${recorded ? 'recording' : 'incident'}.</p>`;
-  const when = recorded ? 'Recorded at rehearsal · not a current export check' : 'Engine before/after at rehearsal';
+  const when = recorded ? 'Recorded in the test, not a current export check' : 'Engine before and after the test on a copy';
   let html = `<h2 class="mono ctx-title">${text(id)}</h2><p class="small muted">${purchase(record)}</p><button class="link small" data-copy-value="${escape(id)}" data-copy-what="Order ID">${icon('copy')}<span>Copy order ID</span></button>`;
   if (change) html += `<div class="ctx-status">${badge(recorded ? 'Changed on the recorded copy' : 'Changed on the copy', true)}<span class="caption">${when}</span></div>${fieldTable(change.before, change.after)}`;
-  else if (planned) html += `<div class="ctx-status">${badge('Proposed cancellation')}<span class="caption">Not rehearsed yet · current source values</span></div>${fieldTable(record)}`;
-  else if (review) html += `<div class="ctx-status">${badge('Unchanged at rehearsal', 'ok')}${laterIds(review).has(id)?badge('Later purchase'):''}</div>${fieldTable(record)}`;
+  else if (planned) html += `<div class="ctx-status">${badge('Proposed cancellation')}<span class="caption">Not rehearsed yet. Current source values.</span></div>${fieldTable(record)}`;
+  else if (review) html += `<div class="ctx-status">${badge('Unchanged on the copy', 'ok')}${laterIds(review).has(id)?badge('Later purchase'):''}</div>${fieldTable(record)}`;
   else html += `<div class="ctx-status">${badge('Source record')}</div>${fieldTable(record)}`;
   const link = change ? {refs: change.evidence_refs || [], text: change.recorded_evidence_refs_text, keep: change.duplicate_of} : planned ? {refs: planned.evidence_refs, keep: planned.duplicate_of} : null;
   if (link) {
@@ -1665,10 +2067,10 @@ function orderContext(id, focusRef) {
 
 function productContext(sku) {
   const source = active(), review = source.review, row = review?.stock.find(p => p.sku === sku);
-  if (!row) return `<p class="muted">No rehearsal data for this product.</p>`;
+  if (!row) return `<p class="muted">No test data for this product.</p>`;
   const changes = review.changes.filter(c => c.before.sku === sku);
   return `<h2 class="ctx-title">${text(row.name)} <span class="mono faint">${text(sku)}</span></h2>
-    <div class="ctx-status">${badge(row.after !== row.before ? 'Changed on the copy' : 'Unchanged', row.after !== row.before)}<span class="caption">${source.recorded ? 'Recorded at rehearsal · not a current export check' : 'Engine before/after at rehearsal'}</span></div>
+    <div class="ctx-status">${badge(row.after !== row.before ? 'Changed on the copy' : 'Unchanged', row.after !== row.before)}<span class="caption">${source.recorded ? 'Recorded in the test, not a current export check' : 'Engine before and after the test on a copy'}</span></div>
     ${fieldTable({sku, name: row.name, on_hand: row.before}, {sku, name: row.name, on_hand: row.after})}
     ${changes.length?`<h3>From ${changes.length} cancellations</h3><div class="id-grid">${changes.map(c=>`<button class="id-chip mono" data-key="order:${escape(c.before.id)}">${text(c.before.id)} · +${text(c.before.quantity)}</button>`).join('')}</div>`:''}`;
 }
@@ -1759,7 +2161,7 @@ function diagnosticsView(check) {
 }
 
 function checkEvidence(name, review) {
-  const derived = '<p class="caption">Derived from the rehearsal review’s before/after records, not from the check’s own computation.</p>';
+  const derived = '<p class="caption">Derived from the test’s before and after records, not from the check’s own computation.</p>';
   const link = (key, label) => active().selectable ? `<button class="link small" data-key="${escape(key)}">${text(label)}</button>` : text(label);
   const signed = (n) => `${n > 0 ? '+' : ''}${n}`;
   if (name === 'stock_matches_movement_ledger' || name === 'stock_matches_active_orders') {
@@ -1772,11 +2174,11 @@ function checkEvidence(name, review) {
       return [link(`product:${p.sku}`, p.name), `<span class="num">${text(p.before)} → ${text(p.after)}</span>`,
         `<span class="num">${signed(expected)}</span>`, `<span class="num${observed === expected ? '' : ' cancelled'}">${signed(observed)}</span>`];
     });
-    return `<h3>Stock on the rehearsal copy</h3>${table(['Product', 'on_hand', 'Returned by cancellations', 'Observed change'], rows)}
+    return `<h3>Stock on the tested copy</h3>${table(['Product', 'on_hand', 'Returned by cancellations', 'Observed change'], rows)}
       <p class="small">${differs ? text(`${differs} product${differs === 1 ? '' : 's'} changed by a different amount than ${differs === 1 ? 'its' : 'their'} cancelled orders returned.`) : 'Each product changed by exactly the units its cancelled orders returned.'}</p>${derived}`;
   }
   if (name === 'unaffected_orders_preserved') {
-    return `<h3>Preserved records</h3><dl class="run-facts"><dt>Untargeted records unchanged</dt><dd>${text(review.untargeted_preserved)}</dd>
+    return `<h3>Preserved records</h3><dl class="run-facts"><dt>Records left untouched</dt><dd>${text(review.untargeted_preserved)}</dd>
       <dt>Later purchases unchanged</dt><dd>${text(`${review.checkout_preserved} of ${review.checkout_total}`)}</dd></dl>
       <button class="secondary" data-tab="changes">${icon('git-compare')}<span>Show preserved work</span></button>${derived}`;
   }
@@ -1800,10 +2202,10 @@ function checkContext(name) {
   const source = active(), check = source.review?.checks.find(c => c.name === name);
   if (!check) return `<p class="muted">This check is not in the current review.</p>`;
   return `<h2 class="ctx-title">${text(checkName(name))}</h2>
-    <div class="ctx-status">${badge(check.passed ? 'Passed' : 'Failed', check.passed ? 'ok' : 'danger')}<span class="caption">${text(groupOf(name))} · ${source.recorded ? 'recorded at rehearsal' : 'observed at rehearsal'}</span></div>
+    <div class="ctx-status">${badge(check.passed ? 'Passed' : 'Failed', check.passed ? 'ok' : 'danger')}<span class="caption">${text(groupOf(name))} · ${source.recorded ? 'recorded in the test on a copy' : 'observed on the copy'}</span></div>
     <p class="small">${text(check.detail)}</p><p class="caption mono">${text(name)}</p>
     ${hasDiagnostics(check) ? diagnosticsView(check) : checkEvidence(name, source.review)}
-    <p class="small muted">${source.recorded ? text(state.recording?.review_observation || 'Recorded at rehearsal; not a current export check.') : 'Checks run on the rehearsal snapshot and cannot be edited by the plan. Export status is rechecked separately on every download.'}</p>`;
+    <p class="small muted">${source.recorded ? text(state.recording?.review_observation || 'Recorded in the test on a copy; not a current export check.') : 'Checks run on the tested copy and cannot be edited by the plan. Every download separately checks whether files changed since testing.'}</p>`;
 }
 
 function lineContext(ref) {
@@ -1840,10 +2242,10 @@ function nextStep(run) {
     state.busyAction === 'rehearse' ? 'The proposal is applied to a disposable copy and checked. The source database is not touched.' : 'The offline script reads the evidence files and order records with read-only tools.', null];
   if (!run) return ['Next step', 'Investigate the incident', `The script reads the ${state.incident.artifacts.length} evidence files and the order records with read-only tools, then proposes which repeated orders to cancel. It calls no model.`, 'investigate'];
   switch (run.status) {
-    case 'proposed': return ['Next step', 'Test the repair on a copy', `The script proposes ${run.plan.cancellations.length} cancellations, each citing its evidence. Rehearsal applies them to a copy and runs independent checks.`, 'rehearse'];
+    case 'proposed': return ['Next step', 'Test the repair on a copy', `The script proposes ${run.plan.cancellations.length} cancellations, each citing its evidence. Testing applies them to a copy and runs independent checks.`, 'rehearse'];
     case 'stopped': return ['Stopped', 'Evidence is missing', `${run.missing_event_ids?.length ?? 'Some'} source events have no commit record, so the script stopped instead of guessing. Nothing was changed.`, null, 'warn'];
     case 'ready_for_review': return ['Next step', 'Review, then export', `Check the ${review.cancellations} cancellations in Changes and the ${passed} / ${total} checks in Checks. Each download rechecks that the source and evidence are unchanged.`, 'review'];
-    case 'failed_checks': return ['Checks failed', 'Nothing can be exported', `${total - passed} of ${total} checks failed at rehearsal. Open Checks to see which.`, 'checks', 'warn'];
+    case 'failed_checks': return ['Checks failed', 'Nothing can be exported', `${total - passed} of ${total} checks failed on the copy. Open Checks to see which.`, 'checks', 'warn'];
     case 'blocked': return ['Export blocked', 'Start a new investigation', run.summary, 'investigate', 'warn'];
     default: return ['Status', statusOf(run)[0], run.summary || '', null];
   }
@@ -1870,10 +2272,10 @@ function guideView() {
       <h3>How to read it</h3><ul class="guide-list">
         ${guideItem('bot', 'Investigation lists the recorded model messages and tool calls in order. Rejected steps show where the local runtime refused a call.')}
         ${guideItem('git-compare', 'The comparison on Investigation shows whether the model cancelled the same orders as the offline script. It checks agreement, not which is better.')}
-        ${guideItem('shield-check', 'Changes and Checks show the review recorded at rehearsal, not a current export check.')}
+        ${guideItem('shield-check', 'Changes and Checks show the review recorded in the test on a copy, not a current export check.')}
         ${guideItem('file-text', r && !matched ? 'This recording’s inputs differ from the case now, so links into the evidence are off.' : 'Evidence links work only while the recording’s inputs match this case.')}
       </ul>
-      <p class="guide-note">Recordings cannot be rehearsed, exported or downloaded. Exports come only from a current offline rehearsal.</p>
+      <p class="guide-note">Recordings cannot be tested again, exported or downloaded. Exports come only from a current offline test on a copy.</p>
       ${keys}</div>`;
   }
   const [eyebrow, title, body, cta, tone = ''] = nextStep(state.run), recs = recordedList().list;
@@ -1901,7 +2303,7 @@ function welcomeDismissed() {
 
 function renderWelcome() {
   const box = $('#welcome');
-  if (state.welcomeHidden || welcomeDismissed() || !state.cases.length || state.run || recordedMode()) { box.hidden = true; box.innerHTML = ''; return; }
+  if (STATIC_DEMO || state.welcomeHidden || welcomeDismissed() || !state.cases.length || state.run || recordedMode()) { box.hidden = true; box.innerHTML = ''; return; }
   box.hidden = false;
   box.innerHTML = `<div class="welcome-text"><p><strong>Sample workspace.</strong> <span>${state.cases.length} synthetic incidents. Repairs are tested on disposable copies.</span></p>
     <details><summary>How it works</summary><p>It finds orders the retry wrote twice, proposes which to cancel with cited evidence, tests the fix on a disposable copy, and exports guarded SQL for a person to review. The source database is never changed.</p></details></div>
@@ -1995,6 +2397,7 @@ function markSelection() {
 
 async function act(action) {
   if (state.busy) return;
+  if (STATIC_DEMO || historicalRun(state.run)) { notice(READ_ONLY_NOTE); return; }
   const id = state.incident.id;
   Object.assign(state, {busy: true, busyAction: action}); notice(); render();
   try {
@@ -2016,7 +2419,7 @@ async function act(action) {
     else if (action === 'investigate') toast(run.status === 'stopped' ? 'Investigation stopped · evidence needed' : run.plan ? `Proposal ready · ${run.plan.cancellations.length} cancellations` : statusOf(run)[0], run.status === 'stopped' ? 'warn' : 'ok');
     else if (run.review) {
       const passed = run.review.checks.filter(c => c.passed).length;
-      toast(run.status === 'ready_for_review' ? `Rehearsed on a copy · ${passed}/${run.review.checks.length} checks passed` : `Checks failed at rehearsal · ${passed}/${run.review.checks.length} passed`, run.status === 'ready_for_review' ? 'ok' : 'error');
+      toast(run.status === 'ready_for_review' ? `Tested on a copy · ${passed}/${run.review.checks.length} checks passed` : `Checks failed on the copy · ${passed}/${run.review.checks.length} passed`, run.status === 'ready_for_review' ? 'ok' : 'error');
     }
   } catch (error) { notice(error.message); }
   finally {
@@ -2028,6 +2431,7 @@ async function act(action) {
 // Every artifact request goes through the server's freshness gate. A delayed failure updates
 // only the case and run it was started for, and names that case in the error.
 async function fetchArtifact(name) {
+  if (historicalRun(state.run)) throw demoError(READ_ONLY_NOTE, 405);
   const incidentId = state.incident.id, runId = state.run.id;
   const incidentTitle = state.incident.title || incidentId;
   setLoading(true);
@@ -2049,13 +2453,14 @@ async function fetchArtifact(name) {
 }
 
 async function download(name, button = $(`[data-download="${name}"]`)) {
+  if (historicalRun(state.run)) { notice(READ_ONLY_NOTE); return; }
   const runId = state.run.id;
   button?.setAttribute?.('aria-busy', 'true');
   try {
     const response = await fetchArtifact(name);
     const url = URL.createObjectURL(await response.blob()), a = document.createElement('a');
     a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url), 1000);
-    toast(`${name} downloaded · freshness check passed`);
+    toast(`${name} downloaded · files unchanged since testing`);
     if (state.run?.id === runId && (state.tab === 'checks' || state.tab === 'changes')) renderPanel();
   } finally { button?.removeAttribute?.('aria-busy'); }
 }
@@ -2076,12 +2481,14 @@ async function copyText(button, value, what) {
 }
 
 async function copySql(button) {
+  if (historicalRun(state.run)) { notice(READ_ONLY_NOTE); return; }
   const entry = state.sql.get(state.run?.id);
   if (entry?.status !== 'ok') return;
   await copyText(button, entry.text, 'repair.sql');
 }
 
 async function recheckExport() {
+  if (historicalRun(state.run)) { notice(READ_ONLY_NOTE); return; }
   const runId = state.run?.id;
   if (state.run?.status !== 'ready_for_review' || state.rechecking.has(runId)) return;
   // The button is replaced while the check runs; give focus back to it afterwards.
@@ -2092,7 +2499,7 @@ async function recheckExport() {
   try {
     const response = await fetchArtifact('report.json');
     await response.text();
-    toast('Freshness check passed · source, evidence and candidate unchanged');
+    toast('Files unchanged since testing: source, evidence and tested copy');
   } catch (error) { notice(error.message); }
   finally {
     state.rechecking.delete(runId);
@@ -2268,17 +2675,21 @@ function paletteCommands(query) {
     for (const r of recs) add('Recorded runs', `${recOutcome(r)[0]} · ${recordedShort(r.recorded_at)}`, `${r.model} · ${r.tool_calls} tool results`, 'history',
       () => { if (!recordedMode()) setSource('recorded'); return loadRecording(r.id); }, `recording ${r.outcome}`);
   }
-  // Offline actions exist only in script mode; recordings are never rehearsed, exported or rechecked.
+  // Offline actions exist only in script mode, and never for read-only history (the public demo, or a recorded
+  // baseline). Recordings are never rehearsed, exported or rechecked.
   if (state.incident && !state.busy && !recordedMode()) {
-    add('Actions', run ? 'New offline investigation' : 'Start offline investigation', 'Offline script · no model', run ? 'refresh-cw' : 'play', () => act('investigate'), 'investigate run start');
-    if (run?.status === 'proposed') add('Actions', 'Test repair on a copy', 'Rehearsal · copy only', 'flask-conical', () => act('rehearse'), 'rehearse test');
-    if (run?.status === 'ready_for_review') {
-      add('Actions', 'Recheck for export', 'Freshness check', 'refresh-cw', () => { setTab('checks'); return recheckExport(); }, 'recheck freshness');
-      for (const name of run.downloads) add('Actions', `Download ${name}`, 'Rechecks freshness first', 'download', () => download(name), 'export artifact');
+    if (!historicalRun(run)) {
+      add('Actions', run ? 'New offline investigation' : 'Start offline investigation', 'Offline script · no model', run ? 'refresh-cw' : 'play', () => act('investigate'), 'investigate run start');
+      if (run?.status === 'proposed') add('Actions', 'Test repair on a copy', 'Copy only', 'flask-conical', () => act('rehearse'), 'rehearse test');
+      if (run?.status === 'ready_for_review') {
+        add('Actions', 'Check files again', 'Files changed since testing?', 'refresh-cw', () => { setTab('checks'); return recheckExport(); }, 'recheck freshness');
+        for (const name of run.downloads) add('Actions', `Download ${name}`, 'Refused if files changed since testing', 'download', () => download(name), 'export artifact');
+      }
     }
     if (run) add('Actions', 'Copy run ID', run.id, 'copy', () => copyText(null, run.id, 'Run ID'));
   }
   for (const tab of TABS) add('Go to', TAB_META[tab][1], 'Tab', TAB_META[tab][0], () => setTab(tab, true), 'tab');
+  add('Go to', 'How we evaluated', 'Every recorded outcome and the limits', 'info', openEvaluation, 'evaluation results recorded runs failures limits');
   state.cases.forEach(c => add('Cases', c.title, caseStatus(c.id)[0], 'folder-open', () => goToCase(c.id), 'case incident'));
   if (!recordedMode()) for (const r of state.history.get(state.incident?.id) || []) add('Runs', `Run ${shortId(r.id)}`, `${statusOf(r)[0]} · started ${started(r.created_at)}`, 'history', () => loadRun(r.id), r.id);
   // "L28", "line 28" or "events.jsonl:L28" opens that exact evidence line.
@@ -2331,7 +2742,7 @@ function runPaletteItem(index) {
 document.addEventListener('click', event => {
   const details = $('#run-details');
   if (details?.open && !event.target.closest?.('#run-details')) details.open = false;
-  if (event.target.id === 'palette') { event.target.close(); return; } // backdrop click
+  if (event.target.id === 'palette' || event.target.id === 'evaluation') { event.target.close(); return; } // backdrop click
   if (event.target.closest?.('[data-close-nav]')) { closeNav(); return; } // drawer backdrop
   const option = event.target.closest?.('[data-palette-index]');
   if (option) { runPaletteItem(Number(option.dataset.paletteIndex)); return; }
@@ -2348,7 +2759,15 @@ document.addEventListener('click', event => {
   if (d.source) setSource(d.source, d.recording || null);
   else if (d.recording && d.recording !== state.recId) task = loadRecording(d.recording);
   if (d.navRail !== undefined) toggleRail();
-  if (d.stepFilter) { state.stepFilter = d.stepFilter; holdFocus(renderPanel); }
+  if (d.stepFilter) { resetReplay(); state.stepFilter = d.stepFilter; holdFocus(renderPanel); }
+  if (d.replayStart !== undefined) startReplay(1, true);
+  if (d.openEvaluation !== undefined) openEvaluation();
+  if (d.closeEvaluation !== undefined) $('#evaluation')?.close();
+  if (d.replayFrom) startReplay(Number(d.replayFrom), false);
+  if (d.replay === 'toggle') { if (state.replay?.playing) pauseReplay(); else playReplay(); }
+  if (d.replay === 'next') nextReplay();
+  if (d.replay === 'restart') startReplay(1, true);
+  if (d.replay === 'exit') exitReplay();
   if (d.expandSteps !== undefined) {
     const items = [...document.querySelectorAll('#content .timeline details')], open = items.some(x => !x.open);
     items.forEach(x => { x.open = open; });
@@ -2487,9 +2906,33 @@ document.addEventListener('pointerup', event => endSideDrag(event));
 document.addEventListener('pointercancel', event => endSideDrag(event, true));
 document.addEventListener('dblclick', event => { if (event.target.closest?.('.resizer')) resetSidebar(); });
 
-api('/api/incidents').then(async data => {
+// The public demo says so from the first paint, before its data loads: in the footer note at every width,
+// in the sidebar, and in the phone top bar.
+function showStaticLabel() {
+  const label = $('#demo-label');
+  if (label) label.hidden = false;
+  const foot = $('.side-footer-text');
+  if (foot) foot.textContent = STATIC_LABEL;
+  $('.side-footer')?.setAttribute('title', 'Synthetic cases and saved runs. Nothing runs again, nothing is exported, and no API is called.');
+  const note = $('.disclosure');
+  if (typeof note?.insertAdjacentHTML === 'function' && !note.querySelector('.demo-note')) note.insertAdjacentHTML('afterbegin', `<strong class="demo-note">${text(STATIC_LABEL)}.</strong> `);
+}
+
+// A refused or missing public dataset leaves a plain refusal on screen; nothing else is tried.
+function showStartFailure(error) {
+  notice(error.message);
+  if (!STATIC_DEMO) return;
+  $('#title').textContent = 'Recorded demo unavailable';
+  $('#content').removeAttribute('aria-busy');
+  $('#content').innerHTML = `<div class="callout stop">${text(error.message)}</div>
+    <p class="small muted">This page shows only its bundled recorded data. It made no API call and has no live fallback.</p>`;
+}
+
+if (STATIC_DEMO) showStaticLabel();
+const startup = api('/api/incidents').then(async data => {
   document.querySelectorAll('.palette-key').forEach(k => { k.textContent = paletteKeyLabel(); });
   state.cases = data.incidents;
+  if (STATIC_DEMO) state.demo = staticContract(await staticDataset());
   state.guide = !isNarrow() && guidePreferred();
   applyRail();
   // Restore each case's last recorded status from this server session, and each case's recording list
@@ -2498,5 +2941,5 @@ api('/api/incidents').then(async data => {
     refreshHistory(c.id).then(runs => runs[0] && !state.runs.has(c.id) ? api(`/api/runs/${encodeURIComponent(runs[0].id)}`).then(run => { state.runs.set(c.id, run); }) : null).catch(() => null),
     refreshRecordings(c.id)]));
   const target = parseHash();
-  await selectCase(target?.id || data.incidents[0].id, target?.tab || null);
-}).catch(error => notice(error.message));
+  await selectCase(target?.id || demoStartCase() || data.incidents[0].id, target?.tab || null);
+}).catch(showStartFailure);
