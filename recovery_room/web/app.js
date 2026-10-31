@@ -21,6 +21,8 @@ const state = {
   source: 'script', recordings: new Map(), recId: null, recording: null, recSeq: 0, stepFilter: 'all',
   // recDetails: full recordings fetched for the run comparison, keyed by case and recording ID.
   recDetails: new Map(),
+  // reconWaiting: cases whose timeline evidence is being read; each case starts and repaints its own.
+  reconWaiting: new Set(),
 };
 const escape = (value) => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const text = (value) => escape(value);
@@ -636,6 +638,28 @@ const ATTEMPT_LABEL = {'import-first': 'First import', 'import-retry-partial': '
 const RECON_FILES = ['events.jsonl', 'commit_receipts.csv'];
 const RECON_LANE = 30; // px per lane; the SVG uses the same units vertically
 
+// One CSV record per evidence line, read the way the engine reads receipts (Python's csv module,
+// strict): a quoted value keeps its commas, "" inside quotes is one quote, and only a comma may follow
+// a closing quote. A line the engine would reject returns null and draws no write.
+function csvCells(line) {
+  const cells = [];
+  let cell = '', mode = 'start'; // start of a field, inside an unquoted field, inside quotes, after quotes
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (mode === 'quoted') {
+      if (ch !== '"') cell += ch;
+      else if (line[i + 1] === '"') { cell += '"'; i++; }
+      else mode = 'closed';
+    } else if (ch === ',') { cells.push(cell); cell = ''; mode = 'start'; }
+    else if (mode === 'closed') return null;
+    else if (ch === '"' && mode === 'start') mode = 'quoted';
+    else { cell += ch; mode = 'field'; }
+  }
+  if (mode === 'quoted') return null; // a record must end on its own line
+  cells.push(cell);
+  return cells;
+}
+
 // The committed writes and incident markers in the evidence files, in commit order: commit_seq when
 // every write records one (split, out-of-order exports), otherwise file order. Nothing here decides what
 // repeats: that comes only from the engine's plan or a recording's review, passed in as pairs.
@@ -645,11 +669,13 @@ function evidenceWrites() {
   if (!files.length) return {writes: [], marks: [], lanes: []};
   const data = files.map(n => [n, fileData(n)]);
   if (data.some(([, d]) => !d)) {
-    if (!state.reconWaiting) {
-      state.reconWaiting = true;
-      const caseId = state.incident.id;
-      Promise.all(files.map(ensureFile)).then(() => { state.reconWaiting = false; if (state.incident?.id === caseId && state.tab === 'investigation') renderPanel(); })
-        .catch(() => { state.reconWaiting = false; });
+    const caseId = state.incident.id;
+    if (!state.reconWaiting.has(caseId)) {
+      state.reconWaiting.add(caseId);
+      Promise.all(files.map(ensureFile)).then(() => {
+        state.reconWaiting.delete(caseId);
+        if (state.incident?.id === caseId && state.tab === 'investigation') renderPanel();
+      }, () => { state.reconWaiting.delete(caseId); });
     }
     return null;
   }
@@ -660,8 +686,9 @@ function evidenceWrites() {
     for (const line of d.lines) {
       let row = null;
       if (name.endsWith('.csv')) {
-        const cells = line.text.split(',');
-        if (!header) { header = cells; continue; }
+        const cells = csvCells(line.text.replace(/\r$/, ''));
+        if (!header) { header = cells || []; continue; }
+        if (!cells || cells.length !== header.length) continue;
         row = Object.fromEntries(header.map((h, j) => [h, cells[j]]));
       } else {
         try { row = JSON.parse(line.text); } catch (_) { continue; }
@@ -700,7 +727,9 @@ const reconLabel = (w, lane, role) => {
 };
 
 // pairs: [{order_id: the repeated (cancelled) order, duplicate_of: the first write that stays}].
-function reconstructionView(pairs = null, {recorded = false, stopped = null} = {}) {
+// rehearsed: a rehearsal review exists, so the marked repeats were cancelled on the copy; otherwise they
+// are the proposal's targets and nothing has been cancelled yet.
+function reconstructionView(pairs = null, {recorded = false, stopped = null, rehearsed = false} = {}) {
   const model = evidenceWrites();
   const head = `<div class="recon-head"><h3 id="recon-title">What happened</h3><span class="caption">Committed writes in order, read from the evidence files</span></div>`;
   if (model === null) return `<section class="recon" aria-labelledby="recon-title">${head}${skeleton(3)}</section>`;
@@ -716,7 +745,8 @@ function reconstructionView(pairs = null, {recorded = false, stopped = null} = {
     repeat.add(r.x); kept.add(k.x); arcs.push([k, r]);
   }
   const top = (w) => laneOf.get(w.attempt) * RECON_LANE + 7, bottom = (w) => top(w) + RECON_LANE - 14;
-  const role = (w) => repeat.has(w.x) ? (recorded ? 'cancelled in this recording' : 'repeat · cancelled on the copy') : kept.has(w.x) ? 'first write · stays' : pairs ? 'untouched' : '';
+  const repeatRole = recorded ? 'Repeat · cancelled in this recording' : rehearsed ? 'Repeat · cancelled on the copy' : 'Repeat · proposed to cancel';
+  const role = (w) => repeat.has(w.x) ? repeatRole.toLowerCase() : kept.has(w.x) ? 'first write · stays' : pairs ? 'untouched' : '';
   const selectable = active().selectable;
   const ticks = writes.map(w => `<rect class="recon-tick ${repeat.has(w.x) ? 'repeat' : kept.has(w.x) ? 'kept' : ''}" data-i="${w.x}" ${selectable ? `data-key="order:${escape(w.order_id)}"` : ''} x="${w.x + 0.18}" y="${top(w)}" width="0.64" height="${RECON_LANE - 14}"><title>${text(reconLabel(w, w.attempt, role(w)))}</title></rect>`).join('');
   const curves = arcs.map(([k, r]) => {
@@ -740,14 +770,15 @@ function reconstructionView(pairs = null, {recorded = false, stopped = null} = {
     return `<li title="${escape(`${ATTEMPT_LABEL[l] || l} · ${notes}`)}"><strong class="lane-long">${text(ATTEMPT_LABEL[l] || l)}</strong><strong class="lane-short">${text(short)}</strong><span>${text(notes)}</span></li>`;
   }).join('');
   const legend = pairs
-    ? `<span><i class="kept"></i>First write · stays</span><span><i class="repeat"></i>${recorded ? 'Repeat · cancelled in this recording' : 'Repeat · cancelled on the copy'}</span><span><i></i>Untouched</span>`
+    ? `<span><i class="kept"></i>First write · stays</span><span><i class="repeat"></i>${repeatRole}</span><span><i></i>Untouched</span>`
     : '<span><i></i>Committed write</span>';
   const lostKey = marks.some(m => m.type === 'connection_lost') ? '<span><i class="lost"></i>Connection lost</span>' : '';
   const untouched = writes.length - repeat.size - kept.size;
   const lostCount = marks.filter(m => m.type === 'connection_lost').length;
   const summary = stopped ? `The script stopped instead of guessing: ${stopped} source events have no commit record${gaps.length ? ', where the log has a gap' : ''}.`
     : recorded && !pairs ? `This recording proposed no repair, so no writes are marked. ${writes.length} committed writes across ${lanes.length} ${lanes.length === 1 ? 'attempt' : 'attempts'}.`
-    : pairs ? `${recorded ? 'This recording’s review cancels' : 'The proposal cancels'} ${repeat.size} repeated write${repeat.size === 1 ? '' : 's'} and keeps the first write of each source event. ${untouched} other write${untouched === 1 ? ' is' : 's are'} untouched.`
+    : pairs && !recorded && !rehearsed ? `The proposal would cancel ${repeat.size} repeated write${repeat.size === 1 ? '' : 's'} and keep the first write of each source event. ${untouched} other write${untouched === 1 ? '' : 's'} would stay untouched. Nothing is cancelled until the rehearsal.`
+    : pairs ? `${recorded ? 'This recording’s review cancels' : 'On the copy, the repair cancelled'} ${repeat.size} repeated write${repeat.size === 1 ? '' : 's'} and ${recorded ? 'keeps' : 'kept'} the first write of each source event. ${untouched} other write${untouched === 1 ? ' is' : 's are'} untouched.`
     : `${writes.length} committed writes across ${lanes.length} ${lanes.length === 1 ? 'attempt' : 'attempts'}${lostCount ? `, with ${lostCount === 1 ? 'a lost connection' : `${lostCount} lost connections`}` : ''}${gaps.length ? ' and a gap in the commit log' : ''}. The investigation decides which writes repeat.`;
   const described = `${summary} Use the arrow keys to move between writes${selectable ? ' and Enter to open one' : ''}.`;
   return `<section class="recon" aria-labelledby="recon-title">${head}
@@ -778,7 +809,8 @@ function recDetail(caseId, id) {
 }
 
 const CMP_PHRASE = {
-  same: (e) => [`cancels the same ${e} writes as the script`, `cancel the same ${e} writes as the script`],
+  same: (e, rehearsed) => rehearsed ? [`cancels the same ${e} writes as the script`, `cancel the same ${e} writes as the script`]
+    : [`cancels the same ${e} writes the script targets`, `cancel the same ${e} writes the script targets`],
   differ: () => ['differs from the script', 'differ from the script'],
   stop: (asScript) => [`stopped instead of repairing${asScript}`, `stopped instead of repairing${asScript}`],
   incomplete: () => ['did not finish', 'did not finish'],
@@ -793,10 +825,10 @@ function runsCompare(model) {
   const caseId = state.incident.id, recs = list.list;
   const byOrder = new Map(model.writes.map(w => [w.order_id, w]));
   const run = state.run?.incident_id === caseId ? state.run : null;
-  const engine = run?.plan ? new Set(run.plan.cancellations.map(a => a.order_id)) : null;
+  const engine = run?.plan ? new Set(run.plan.cancellations.map(a => a.order_id)) : null, rehearsed = !!run?.review;
   const rows = [{label: 'Script run', current: !recordedMode(), attrs: 'data-source="script"', set: engine, script: true,
     line: engine ? '' : run?.status === 'stopped' ? 'stop' : '',
-    note: engine ? `cancels ${engine.size}` : run?.status === 'stopped' ? `stopped · ${run.missing_event_ids?.length ?? 0} events unmatched` : run ? statusOf(run)[0] : 'not investigated yet',
+    note: engine ? `${rehearsed ? 'cancels' : 'targets'} ${engine.size}` : run?.status === 'stopped' ? `stopped · ${run.missing_event_ids?.length ?? 0} events unmatched` : run ? statusOf(run)[0] : 'not investigated yet',
     short: engine ? `× ${engine.size}` : run?.status === 'stopped' ? 'stopped' : run ? statusOf(run)[0] : 'not run'}];
   const tally = {same: 0, differ: 0, repair: 0, stop: 0, incomplete: 0, error: 0, skipped: 0, loading: 0}, sizes = new Set();
   recs.forEach((r, i) => {
@@ -829,7 +861,7 @@ function runsCompare(model) {
   // One sentence that says what the rows show.
   const asScript = run?.status === 'stopped' ? ', as the script did' : '';
   const parts = [];
-  if (tally.same) parts.push([tally.same, ...CMP_PHRASE.same(engine.size)]);
+  if (tally.same) parts.push([tally.same, ...CMP_PHRASE.same(engine.size, rehearsed)]);
   if (tally.differ) parts.push([tally.differ, ...CMP_PHRASE.differ()]);
   if (tally.repair) parts.push(sizes.size === 1
     ? [tally.repair, `cancels ${[...sizes][0]} writes`, `cancel ${[...sizes][0]} writes each`]
@@ -845,29 +877,30 @@ function runsCompare(model) {
   if (!run && tally.repair) headline += ' Investigate the incident to compare them with the script.';
 
   const H = 24, n = Math.max(model.writes.length, 1);
-  let anyMissed = false, anyExtra = false;
+  let anyMissed = false, anyExtra = false, anyPlanned = false;
   const svgRows = rows.map((row, i) => {
     const y = i * H, band = `<rect class="recon-band${i % 2 ? ' alt' : ''}${row.current ? ' current' : ''}" x="0" y="${y}" width="${n}" height="${H}"/>`;
     if (!row.set) return `${band}<line class="cmp-line${row.line ? ` ${row.line}` : ''}" x1="0" x2="${n}" y1="${y + H / 2}" y2="${y + H / 2}"/>`;
     const marks = model.writes.map(w => {
       const mine = row.set.has(w.order_id), base = engine?.has(w.order_id);
       if (mine) {
-        const extra = !row.script && engine && !base;
-        anyExtra = anyExtra || extra;
-        return `<rect class="cmp-mark${extra ? ' extra' : ''}" x="${w.x + 0.18}" y="${y + 5}" width="0.64" height="${H - 10}"><title>${text(`${w.order_id} · ${row.label} cancels it${row.script || !engine ? '' : base ? ' · so does the script' : ' · the script keeps it'}`)}</title></rect>`;
+        const extra = !row.script && engine && !base, planned = row.script && !rehearsed;
+        anyExtra = anyExtra || extra; anyPlanned = anyPlanned || planned;
+        const says = planned ? 'the script targets it · not rehearsed yet' : `${row.label} cancels it${row.script || !engine ? '' : base ? (rehearsed ? ' · so does the script' : ' · the script targets it too') : ' · the script keeps it'}`;
+        return `<rect class="cmp-mark${extra ? ' extra' : ''}${planned ? ' planned' : ''}" x="${w.x + 0.18}" y="${y + 5}" width="0.64" height="${H - 10}"><title>${text(`${w.order_id} · ${says}`)}</title></rect>`;
       }
       if (!row.script && engine && base) {
         anyMissed = true;
-        return `<rect class="cmp-missed" x="${w.x + 0.22}" y="${y + 6}" width="0.56" height="${H - 12}"><title>${text(`${w.order_id} · the script cancels it · ${row.label} keeps it`)}</title></rect>`;
+        return `<rect class="cmp-missed" x="${w.x + 0.22}" y="${y + 6}" width="0.56" height="${H - 12}"><title>${text(`${w.order_id} · the script ${rehearsed ? 'cancels' : 'targets'} it · ${row.label} keeps it`)}</title></rect>`;
       }
       return '';
     }).join('');
     return band + marks;
   }).join('');
   const labels = rows.map(row => `<li><button class="compare-run${row.current ? ' current' : ''}" ${row.attrs} ${row.current ? 'aria-current="true"' : ''} title="${escape(`${row.label} · ${row.note}`)}"><strong>${text(row.label)}</strong><span class="cmp-long">${text(row.note)}</span><span class="cmp-short" aria-hidden="true">${text(row.short)}</span></button></li>`).join('');
-  const legend = `<span><i class="repeat"></i>Cancelled by that run</span>${anyMissed ? '<span><i class="missed"></i>Cancelled by the script, kept by that run</span>' : ''}${anyExtra ? '<span><i class="extra"></i>Not in the script’s plan</span>' : ''}<span><i class="line"></i>No repair</span>`;
+  const legend = `<span><i class="repeat"></i>Cancelled by that run</span>${anyPlanned ? '<span><i class="planned"></i>Script’s target · not rehearsed yet</span>' : ''}${anyMissed ? `<span><i class="missed"></i>${rehearsed ? 'Cancelled' : 'Targeted'} by the script, kept by that run</span>` : ''}${anyExtra ? '<span><i class="extra"></i>Not in the script’s plan</span>' : ''}<span><i class="line"></i>No repair</span>`;
   return `<div class="recon-compare">
-    <div class="recon-head"><h4 id="compare-title">Compared runs</h4><span class="caption">Which writes each run cancels, in the columns above · from each recording’s verified review</span></div>
+    <div class="recon-head"><h4 id="compare-title">Compared runs</h4><span class="caption">In the columns above · recordings from their verified reviews, the script from its ${rehearsed ? 'rehearsal' : 'proposal'}</span></div>
     <div class="recon-body"><ol class="recon-lanes compare-lanes" aria-labelledby="compare-title">${labels}</ol>
       <svg class="compare-svg" viewBox="0 0 ${n} ${rows.length * H}" height="${rows.length * H}" preserveAspectRatio="none" aria-hidden="true" focusable="false">${svgRows}</svg></div>
     <div class="recon-legend" aria-hidden="true">${legend}</div>
@@ -908,7 +941,7 @@ function investigationView() {
   const stop = stopped ? `<h3>Next useful step</h3><p class="small">Recover the committed-write logs for the missing source events, then investigate again. The source has not been changed.</p>
     <div class="row-head" id="missing-events" tabindex="-1"><h4>${run.missing_event_ids.length} source events without commit evidence</h4><span class="caption">Select one to find it in the evidence</span></div>
     <div class="id-grid">${run.missing_event_ids.map(id=>`<button class="id-chip mono" data-key="event:${escape(id)}" aria-selected="false">${text(id)}</button>`).join('')}</div>` : '';
-  const recon = reconstructionView(run.plan ? run.plan.cancellations : null, {stopped: stopped ? run.missing_event_ids.length : null});
+  const recon = reconstructionView(run.plan ? run.plan.cancellations : null, {stopped: stopped ? run.missing_event_ids.length : null, rehearsed: !!run.review});
   return `${result}${recon}${plan}${stop}${callsView(run.trace)}<details class="fold"><summary>Incident overview and source records</summary>${incidentOverview()}${sourceRecords()}</details>`;
 }
 

@@ -458,7 +458,7 @@ test('the timeline links repeats only from the given pairs and never invents one
   assert.equal((linked.match(/class="recon-tick repeat"/g) || []).length, 1);
   assert.equal((linked.match(/class="recon-tick kept"/g) || []).length, 1);
   assert.equal((linked.match(/class="recon-arc"/g) || []).length, 1); // the pair naming an unknown order is skipped
-  assert.match(linked, /The proposal cancels 1 repeated write and keeps the first write of each source event\. 2 other writes are untouched\./);
+  assert.match(linked, /The proposal would cancel 1 repeated write and keep the first write of each source event\. 2 other writes would stay untouched\. Nothing is cancelled until the rehearsal\./);
   assert.match(linked, /data-key="order:ord_c"/);
   assert.doesNotMatch(linked, /\bstyle=/);
 
@@ -480,7 +480,7 @@ test('a recording whose inputs differ draws the timeline without links to curren
 
 function compareState(app, {engine = ['ord_c', 'ord_d'], recs = [], details = {}, run = 'ready_for_review'} = {}) {
   evidenceState(app, {'events.jsonl': [write('import-first', 'ord_a'), write('import-first', 'ord_b'), write('import-retry', 'ord_c'), write('import-retry', 'ord_d')]});
-  app.state.run = run ? {id: 'run-a', incident_id: 'case-a', status: run, missing_event_ids: ['evt-1', 'evt-2'],
+  app.state.run = run ? {id: 'run-a', incident_id: 'case-a', status: run, missing_event_ids: ['evt-1', 'evt-2'], review: ['ready_for_review', 'failed_checks', 'blocked'].includes(run) ? {changes: []} : null,
     plan: engine ? {cancellations: engine.map(order_id => ({order_id, duplicate_of: 'ord_a', evidence_refs: []}))} : null} : null;
   app.state.recordings.set('case-a', {status: 'ok', list: recs});
   for (const [id, data] of Object.entries(details)) app.state.recDetails.set(`case-a:${id}`, {status: 'ok', data});
@@ -545,4 +545,69 @@ test('stops on both sides read as agreement, not as missing repairs', () => {
 test('no recordings means no comparison', () => {
   const app = harness();
   assert.equal(compareState(app, {recs: []}), '');
+});
+
+// ---------- Review fixes: case-scoped loading, proposals, quoted CSV ----------
+
+test('switching cases while the timeline evidence loads reads and repaints the new case', async () => {
+  const slowA = deferred(), requests = [];
+  const page = (lines) => json(true, {lines: lines.map((row, i) => ({ref: `events.jsonl:L${i + 1}`, text: JSON.stringify(row)})), total_lines: lines.length, next_line: null});
+  const app = harness(async url => {
+    requests.push(url);
+    return url.includes('/incidents/case-a/') ? slowA.promise : page([write('import-first', 'ord_b')]);
+  });
+  let painted = 0;
+  app.context.renderPanel = () => { painted++; };
+  app.state.tab = 'investigation';
+  app.state.incident = {id: 'case-a', artifacts: [{name: 'events.jsonl'}], orders: []};
+  assert.equal(app.evidenceWrites(), null);
+  app.state.incident = {id: 'case-b', artifacts: [{name: 'events.jsonl'}], orders: []};
+  assert.equal(app.evidenceWrites(), null);
+  assert.ok(requests.some(url => url.includes('/incidents/case-b/')), 'case B starts its own read while case A is still loading');
+  await new Promise(done => setTimeout(done, 0));
+  assert.equal(painted, 1, 'case B repaints when its evidence arrives');
+  assert.deepEqual(Array.from(app.evidenceWrites().writes, w => w.order_id), ['ord_b']);
+  slowA.resolve(page([write('import-first', 'ord_a')]));
+  await new Promise(done => setTimeout(done, 0));
+  assert.equal(painted, 1, 'a late case A response does not repaint case B');
+});
+
+test('a proposal shows targets; only a rehearsal shows cancellations on the copy', () => {
+  const app = harness();
+  evidenceState(app, {'events.jsonl': [write('import-first', 'ord_a'), write('import-retry', 'ord_c')]});
+  const pairs = [{order_id: 'ord_c', duplicate_of: 'ord_a'}];
+  const proposed = app.reconstructionView(pairs);
+  assert.match(proposed, /Repeat · proposed to cancel/);
+  assert.doesNotMatch(proposed, /cancelled on the copy/);
+  const rehearsed = app.reconstructionView(pairs, {rehearsed: true});
+  assert.match(rehearsed, /Repeat · cancelled on the copy/);
+  assert.match(rehearsed, /On the copy, the repair cancelled 1 repeated write and kept the first write of each source event\./);
+
+  // Compared runs keep the script's unrehearsed targets apart from recordings' verified cancellations.
+  const view = compareState(harness(), {run: 'proposed', recs: [{id: 'rec-a', outcome: 'repair', fixture_matches: true}],
+    details: {'rec-a': recording('rec-a', ['ord_c', 'ord_d'])}});
+  assert.match(view, /Script run<\/strong><span class="cmp-long">targets 2</);
+  assert.equal((view.match(/class="cmp-mark planned"/g) || []).length, 2);
+  assert.match(view, /Script’s target · not rehearsed yet/);
+  assert.match(view, /The recorded Meta run cancels the same 2 writes the script targets\./);
+  assert.match(view, /the script from its proposal/);
+});
+
+test('quoted CSV receipts keep their writes, commas and escaped quotes, with original line references', () => {
+  const app = harness();
+  evidenceState(app, {
+    'events.jsonl': [write('import-retry', 'ord_c', {commit_seq: 3})],
+    'commit_receipts.csv': [
+      '"type","attempt","event_id","order_id","movement_id","commit_seq"',
+      '"write_committed","import-first","evt-a","ord_a","mv ""a"", first",1',
+      'write_committed,import-first,evt-b,ord_b,"mv-b",2',
+      '"write_committed","import-first","evt-x","ord_x","mv-x"oops,4', // text after a closing quote: rejected
+      '"write_committed","import-first","evt-y","ord_y","unterminated,5', // unterminated quote: rejected
+    ],
+  });
+  const model = app.evidenceWrites();
+  assert.equal(model.bySeq, true);
+  assert.deepEqual(Array.from(model.writes, w => w.order_id), ['ord_a', 'ord_b', 'ord_c']);
+  assert.deepEqual(Array.from(model.writes, w => w.ref), ['commit_receipts.csv:L2', 'commit_receipts.csv:L3', 'events.jsonl:L1']);
+  assert.equal(model.writes[0].event_id, 'evt-a');
 });
