@@ -7,21 +7,27 @@ const vm = require('node:vm');
 
 const source = fs.readFileSync(path.join(__dirname, '../recovery_room/web/app.js'), 'utf8');
 
-function harness(handler) {
-  const nodes = new Map();
+function harness(handler, options = {}) {
+  const nodes = new Map(), intervals = [], cleared = [];
   const element = () => ({addEventListener() {}, setAttribute() {}, removeAttribute() {},
     focus() {}, scrollIntoView() {}, textContent: '', innerHTML: '', value: '', hidden: false});
   const context = {
     document: {
+      // options.static: the generated public copy of index.html, <html data-demo-mode="read-only">.
+      documentElement: {dataset: options.static ? {demoMode: 'read-only'} : {}},
       querySelector(selector) { if (!nodes.has(selector)) nodes.set(selector, element()); return nodes.get(selector); },
+      querySelectorAll() { return []; },
       addEventListener() {},
     },
-    window: {addEventListener() {}}, location: {hash: ''}, history: {replaceState() {}},
-    fetch: (url, options) => url === '/api/incidents' ? new Promise(() => {}) : handler(url, options),
+    window: {addEventListener() {}, ...(options.reducedMotion ? {matchMedia: (q) => ({matches: q.includes('reduce')})} : {})},
+    location: {hash: ''}, history: {replaceState() {}},
+    // Local startup's own index request never settles here, so each test drives the state it needs.
+    fetch: (url, opts) => !options.static && url === '/api/incidents' ? new Promise(() => {}) : handler(url, opts),
     setTimeout, clearTimeout, URL, renderCalls: 0,
+    setInterval: (fn) => { intervals.push(fn); return intervals.length; }, clearInterval: (id) => { cleared.push(id); }, intervals, cleared,
   };
   vm.createContext(context);
-  vm.runInContext(source + '\nrender = () => { globalThis.renderCalls++; };\nrenderPanel = () => {};\nglobalThis.subject = {state, download, reviewView, exportStatus, recheckExport, act, changesView, checksTab, sqlView, modeInfo, repairFlow, stockVisual, transition, packageView, lineContext, evidenceWrites, reconstructionView, runsCompare, checkContext, checksTab, demoDefault, validDemo, guardrailMoment, guardrailView, timelineItems, displayedSteps, evaluationData, evaluationView, renderActions};', context);
+  vm.runInContext(source + '\nrender = () => { globalThis.renderCalls++; };\nrenderPanel = () => {};\nglobalThis.subject = {state, download, reviewView, exportStatus, recheckExport, act, changesView, checksTab, sqlView, modeInfo, repairFlow, stockVisual, transition, packageView, lineContext, evidenceWrites, reconstructionView, runsCompare, checkContext, checksTab, demoDefault, staticContract, demoStartCase, guardrailMoment, guardrailView, timelineItems, displayedSteps, evaluationData, evaluationView, renderActions, replayControls, startReplay, playReplay, pauseReplay, nextReplay, sqlView, paletteCommands, loadSql, copySql, api, statusOf, stepsView, recCitations, startup, timerOn: () => replayTimer !== null};', context);
   return {context, nodes, ...context.subject};
 }
 
@@ -722,20 +728,31 @@ function recordedRun(list, extra = {}) {
     provenance: {model: 'muse-spark-1.3'}, review: null, ...extra};
 }
 
-test('a case opens on its newest recorded Meta run with matching inputs, and a contract pick only if it is listed', () => {
+test('a case opens on its newest recorded Meta run with matching inputs, and a dataset default only if it is usable', () => {
   const app = harness();
+  app.state.cases = [{id: 'case-a'}, {id: 'case-b'}];
   app.state.recordings.set('case-a', {status: 'ok', list: [
     {id: 'rec-new-other', fixture_matches: false}, {id: 'rec-mid', fixture_matches: true}, {id: 'rec-old', fixture_matches: true}]});
   assert.equal(app.demoDefault('case-a').id, 'rec-mid');
-  app.state.demo = app.validDemo({default_recording: {'case-a': 'rec-old'}});
+  assert.equal(app.demoStartCase(), null);
+  const pick = (recording_id, incident_id = 'case-a', source = 'recorded') => { app.state.demo = app.staticContract({defaults: {incident_id, source, recording_id}}); };
+  pick('rec-old');
   assert.equal(app.demoDefault('case-a').id, 'rec-old');
-  app.state.demo = app.validDemo({default_recording: {'case-a': 'rec-new-other'}}); // inputs differ: not used
+  assert.equal(app.demoStartCase(), 'case-a');
+  pick('rec-new-other'); // inputs differ: neither the recording nor its case is forced
   assert.equal(app.demoDefault('case-a').id, 'rec-mid');
-  app.state.demo = app.validDemo({default_recording: {'case-a': 'rec-unknown'}});
+  assert.equal(app.demoStartCase(), null);
+  pick('rec-unknown');
   assert.equal(app.demoDefault('case-a').id, 'rec-mid');
+  assert.equal(app.demoStartCase(), null);
+  pick('rec-old', 'case-missing');
+  assert.equal(app.demoStartCase(), null);
+  pick('rec-old', 'case-a', 'script'); // only a recorded default is understood
+  assert.equal(app.state.demo.defaults, null);
   assert.equal(app.demoDefault('case-none'), null);
-  assert.equal(app.validDemo('nonsense'), null);
-  assert.deepEqual(Array.from(Object.keys(app.validDemo({default_recording: {a: 1, b: 'x'}}).default_recording)), ['b']);
+  assert.equal(app.staticContract('nonsense').defaults, null);
+  app.state.recordings.set('case-b', {status: 'ok', list: [{id: 'rec-b'}]}); // an unknown match is not a match
+  assert.equal(app.demoDefault('case-b'), null);
 });
 
 test('the guardrail moment is the recorded rejection, the verbatim message and the accepted retry', () => {
@@ -794,7 +811,9 @@ test('How we evaluated counts every recorded outcome, keeps failures and states 
   assert.match(view, /<strong>4<\/strong> recorded runs on 2 cases/);
   assert.match(view, /Run 1 · Error/);
   assert.match(view, /Run 1 · Did not finish · inputs differ/);
-  assert.match(view, /The offline script solves all four of these cases/);
+  assert.match(view, /The offline script solves the supported cases: it proposes a repair where the evidence allows one/);
+  assert.match(view, /saved observations on authored development cases, not a success rate/);
+  assert.doesNotMatch(view, /all four|New format|frozen parser/);
   assert.match(view, /Failed runs stay in the count and in the list/);
   assert.match(view, /1 recording was made on inputs that differ/);
   assert.match(view, /Not run in this session/);
@@ -813,3 +832,367 @@ test('a recording offers its replay and the script baseline, never a test, SQL o
   assert.match(html, /data-source="script"/);
   assert.doesNotMatch(html, /data-download|data-action|data-recheck/);
 });
+
+// ---------- Codex review 3: replay completion, passing corrections, the public read-only demo ----------
+
+const tick = () => new Promise(done => setTimeout(done, 0));
+const plain = (v) => JSON.parse(JSON.stringify(v));
+const failing = (passedCount = 8) => ({passed: false, checks: Array.from({length: 10}, (_, i) => ({name: `check_${i}`, passed: i < passedCount}))});
+
+function replayApp(list, options) {
+  const app = harness(() => {}, options);
+  Object.assign(app.state, {source: 'recorded', tab: 'investigation', incident: {id: 'case-a'}, recording: recordedRun(list)});
+  return app;
+}
+const replayState = (app) => app.state.replay && plain(app.state.replay);
+
+test('a one-step replay completes at once, without a timer or recursion, and Play again and Restart repeat it', () => {
+  const app = replayApp([steps.say('The only saved step.')]);
+  app.startReplay(1, true);
+  assert.deepEqual(replayState(app), {recId: 'rec-a', cursor: 1, playing: false});
+  assert.equal(app.context.intervals.length, 0);
+  assert.equal(app.timerOn(), false);
+  const controls = app.replayControls(app.state.recording);
+  assert.match(controls, /Play again/);
+  assert.match(controls, /data-replay="next" disabled/);
+  assert.match(controls, /Step 1 of 1/);
+  app.playReplay(); // Play again
+  assert.deepEqual(replayState(app), {recId: 'rec-a', cursor: 1, playing: false});
+  app.startReplay(1, true); // Restart
+  app.nextReplay();
+  assert.deepEqual(replayState(app), {recId: 'rec-a', cursor: 1, playing: false});
+  assert.equal(app.context.intervals.length, 0);
+});
+
+test('a recording with no displayed steps offers no replay and starting one does nothing', () => {
+  const app = replayApp([]);
+  app.startReplay(1, true);
+  app.playReplay();
+  assert.equal(app.state.replay, null);
+  assert.equal(app.context.intervals.length, 0);
+  const controls = app.replayControls(app.state.recording);
+  assert.match(controls, /No saved steps/);
+  assert.doesNotMatch(controls, /data-replay=/);
+  app.renderActions();
+  assert.doesNotMatch(app.nodes.get('#header-actions').innerHTML, /data-replay-start/);
+});
+
+test('a multi-step replay advances one saved step per tick, ends, and plays again or restarts from step 1', () => {
+  const app = replayApp([steps.say('One.'), steps.call('c1', 'read_artifact'), steps.ok('c1'), steps.say('Three.')]);
+  app.startReplay(1, true);
+  assert.deepEqual(replayState(app), {recId: 'rec-a', cursor: 1, playing: true});
+  assert.equal(app.context.intervals.length, 1);
+  app.context.intervals[0]();
+  assert.equal(app.state.replay.cursor, 2);
+  app.context.intervals[0]();
+  assert.deepEqual(replayState(app), {recId: 'rec-a', cursor: 3, playing: false});
+  assert.equal(app.timerOn(), false);
+  assert.match(app.replayControls(app.state.recording), /Play again/);
+  app.playReplay(); // Play again: from step 1, playing
+  assert.deepEqual(replayState(app), {recId: 'rec-a', cursor: 1, playing: true});
+  app.pauseReplay();
+  app.nextReplay();
+  assert.deepEqual(replayState(app), {recId: 'rec-a', cursor: 2, playing: false});
+  app.playReplay(); // Play continues from the cursor
+  assert.deepEqual(replayState(app), {recId: 'rec-a', cursor: 2, playing: true});
+  app.startReplay(1, true); // Restart
+  assert.deepEqual(replayState(app), {recId: 'rec-a', cursor: 1, playing: true});
+  app.startReplay(9, false); // Replay from a step past the end stops at the last one
+  assert.deepEqual(replayState(app), {recId: 'rec-a', cursor: 3, playing: false});
+});
+
+test('replay controls are labelled buttons, and the replay scrolls without animation under reduced motion', () => {
+  for (const reduced of [true, false]) {
+    const app = replayApp([steps.say('One.'), steps.say('Two.')], {reducedMotion: reduced});
+    const behaviors = [];
+    app.context.document.querySelector('#recorded-steps').scrollIntoView = (o) => behaviors.push(o.behavior);
+    app.startReplay(1, false);
+    assert.deepEqual(behaviors, [reduced ? 'auto' : 'smooth']);
+    const controls = app.replayControls(app.state.recording);
+    assert.match(controls, /role="group" aria-label="Replay of the saved steps"/);
+    assert.match(controls, /<button class="secondary" data-replay="toggle" aria-pressed="false">.*<span>Play<\/span><\/button>/);
+    assert.match(controls, /<button class="secondary" data-replay="restart" >/);
+    assert.match(controls, /Not live: nothing runs again/);
+  }
+});
+
+test('a failed-check test on a copy is never the correction: the later passing test is, after it as a failed attempt', () => {
+  const app = harness();
+  const r = recordedRun([steps.call('c1', 'rehearse_repair'), steps.bad('c1', 'An order cannot duplicate itself.'),
+    steps.say('Fixing the linkage.'),
+    steps.call('c2', 'rehearse_repair'), steps.ok('c2', failing(8)),
+    steps.say('Two checks failed; retrying.'),
+    steps.call('c3', 'rehearse_repair'), steps.ok('c3', checksResult)]);
+  const m = app.guardrailMoment(r);
+  assert.equal(m.bad.n, 1);
+  assert.equal(m.fixed.n, 5);
+  assert.deepEqual(Array.from(m.between, i => i.n), [2, 3, 4]);
+  const view = app.guardrailView(r);
+  assert.match(view, /Proposed repair rejected by the local runtime<\/strong><blockquote class="g-quote">An order cannot duplicate itself\./);
+  assert.match(view, /Step 3<\/span><div><strong>Checks failed again<\/strong><p class="g-text">Tested on a copy: 8 of 10 checks passed, so the test did not pass\.<\/p>/);
+  assert.match(view, /Step 5<\/span><div><strong>Next proposed repair accepted<\/strong><p class="g-text">Tested on a copy: 10 of 10 checks passed\.<\/p>/);
+  // A failed-check result can itself be the first failure, even when its error flag is false.
+  const first = recordedRun([steps.call('c1', 'rehearse_repair'), steps.ok('c1', failing(9)), steps.call('c2', 'rehearse_repair'), steps.ok('c2', checksResult)]);
+  assert.match(app.guardrailView(first), /Step 1<\/span><div><strong>Proposed repair failed its checks on a copy<\/strong><p class="g-text">Tested on a copy: 9 of 10 checks passed/);
+  // A real recording's shape: an error-flagged rehearsal that lists checks reads as its check count.
+  const flagged = recordedRun([steps.call('c1', 'rehearse_repair'), {kind: 'tool_result', call_id: 'c1', result: failing(8), error: true},
+    steps.call('c2', 'rehearse_repair'), steps.ok('c2', checksResult)]);
+  assert.match(app.guardrailView(flagged), /rejected by the local runtime<\/strong><p class="g-text">Tested on a copy: 8 of 10 checks passed/);
+});
+
+test('without a passing test on a copy there is no success card, whatever the error flags say', () => {
+  const app = harness();
+  const never = recordedRun([steps.call('c1', 'rehearse_repair'), steps.bad('c1', 'Rejected.'),
+    steps.call('c2', 'rehearse_repair'), steps.ok('c2', failing(8)),
+    steps.call('c3', 'rehearse_repair'), steps.ok('c3', {passed: true, checks: []}),
+    steps.call('c4', 'rehearse_repair'), steps.ok('c4', {passed: true, checks: [{name: 'a', passed: true}, {name: 'b', passed: false}]}),
+    steps.call('c5', 'rehearse_repair'), steps.ok('c5', {checks: checksResult.checks}),
+    steps.call('c6', 'rehearse_repair'), steps.ok('c6', null)]);
+  assert.equal(app.guardrailMoment(never), null);
+  assert.equal(app.guardrailView(never), '');
+  assert.equal(app.guardrailMoment(recordedRun([steps.call('c1', 'rehearse_repair'), steps.ok('c1', failing(8))])), null);
+  // Reads and queries keep the error flag: a rejected read and its accepted retry are a moment.
+  const read = recordedRun([steps.call('c1', 'read_artifact'), steps.bad('c1', 'Unknown artifact.'), steps.call('c2', 'read_artifact'), steps.ok('c2', {lines: []})]);
+  assert.match(app.guardrailView(read), /File read rejected by the local runtime.*Next file read accepted<\/strong><p class="g-text">Accepted by the local runtime/);
+});
+
+// ---------- the public read-only demo (RR_STATIC_DEMO_V1) ----------
+
+const CAPS_OFF = {investigate: false, rehearse: false, export: false, live_model: false};
+const OFFLINE = 'offline_deterministic_engine_demo_NOT_a_model_run';
+function demoData(extra = {}) {
+  const listed = (id, incident, outcome, matches) => ({id, model: 'muse-spark-1.3', mode: 'live_meta_agent', recorded_at: '2026-10-31T19:54:54.905197Z',
+    outcome, summary: 'Saved summary.', tool_calls: 2, elapsed_seconds: 1.5, fixture_matches: matches});
+  const detail = (item, incident, list) => ({...item, incident_id: incident, citations_enabled: item.fixture_matches, steps: list, review: null,
+    provenance: {model: item.model, mode: item.mode, recorded_at: item.recorded_at, label: 'Recorded model run, not live'}});
+  const review = {passed: true, checks: checksResult.checks.map(c => ({...c, detail: 'ok'})), changes: [], preserved_orders: [], stock: [], cancellations: 0, before_active: 5, after_active: 5};
+  const baseline = (id, incident, status) => ({id, incident_id: incident, status, mode: OFFLINE, created_at: '2026-10-31T19:58:46.322584+00:00',
+    summary: 'Recorded.', plan: status === 'ready_for_review' ? {cancellations: []} : null, review: status === 'ready_for_review' ? review : null,
+    trace: [], downloads: [], read_only: true, review_observation: 'Recorded offline baseline; exports are disabled in the public demo.'});
+  const incident = (id, title) => ({id, title, scenario: id, mode: OFFLINE, artifacts: [{name: 'events.jsonl', bytes: 3}], orders: [], products: [], schema: [], note: {}, active_orders: 0});
+  const a1 = listed('rec-a1', 'case-a', 'stop', true), b1 = listed('rec-b1', 'case-b', 'repair', true), b2 = listed('rec-b2', 'case-b', 'repair', false);
+  return {
+    schema_version: 1, read_only: true, label: 'Recorded demo · No live API calls', capabilities: {...CAPS_OFF},
+    defaults: {incident_id: 'case-b', source: 'recorded', recording_id: 'rec-b1'},
+    api_get: {
+      '/api/incidents': {mode: 'recorded_read_only_demo', incidents: [{id: 'case-a', title: 'Case A', synthetic: true}, {id: 'case-b', title: 'Case B', synthetic: true}]},
+      '/api/incidents/case-a': incident('case-a', 'Case A'), '/api/incidents/case-b': incident('case-b', 'Case B'),
+      '/api/incidents/case-a/recordings': [a1], '/api/incidents/case-b/recordings': [b2, b1],
+      '/api/recordings/rec-a1': detail(a1, 'case-a', [steps.say('Stopping: evidence is missing.')]),
+      '/api/recordings/rec-b1': detail(b1, 'case-b', [steps.call('c1', 'rehearse_repair'), steps.bad('c1', 'Rejected.'), steps.call('c2', 'rehearse_repair'), steps.ok('c2', checksResult)]),
+      '/api/recordings/rec-b2': detail(b2, 'case-b', [steps.say('Other seed.')]),
+      '/api/runs?incident=case-a': {runs: [baseline('run-a', 'case-a', 'stopped')]}, '/api/runs?incident=case-b': {runs: [baseline('run-b', 'case-b', 'ready_for_review')]},
+      '/api/runs/run-a': baseline('run-a', 'case-a', 'stopped'), '/api/runs/run-b': baseline('run-b', 'case-b', 'ready_for_review'),
+    },
+    artifacts: {
+      'case-a': {'events.jsonl': {name: 'events.jsonl', total_lines: 3, lines: ['a', 'b', 'c'].map((t, i) => ({ref: `events.jsonl:L${i + 1}`, text: t}))}},
+      'case-b': {'events.jsonl': {name: 'events.jsonl', total_lines: 5, lines: [{ref: 'events.jsonl:L1', text: 'short'}]}},
+    },
+    evaluation: {scope: 'Public synthetic cases.', recording_count: 3, outcomes: {repair: 2, stop: 1}, interpretation: 'Observed outcomes, not a general success rate.',
+      story: {scope: 'Authored experiments, not blind holdouts.', configuration: {model: 'muse-spark-1.3'}, planned_attempts: 3, unattempted: [],
+        judgments: {correct_repair: 2, justified_stop: 1}, usage: {total_tokens: 805943},
+        attempts: [
+          {id: 'b-101', incident_id: 'case-b', seed: 101, outcome: 'repair', judgment: 'correct_repair', frozen_parser: 'unsupported_format', adapted_parser: 'correct_repair'},
+          {id: 'b-103', incident_id: 'case-b', seed: 103, outcome: 'repair', judgment: 'correct_repair', frozen_parser: 'unsupported_format', adapted_parser: 'correct_repair'},
+          {id: 'a-107', incident_id: 'case-a', seed: 107, outcome: 'stop', judgment: 'justified_stop', frozen_parser: 'unsupported_format', adapted_parser: 'justified_stop'}]}},
+    ...extra,
+  };
+}
+async function publicDemo(data = demoData()) {
+  const fetches = [];
+  const app = harness(async url => { fetches.push(url); return url === './demo-data.json' ? json(true, data) : json(false, {error: 'live API'}); }, {static: true});
+  await app.startup; await tick(); await tick();
+  return {app, fetches};
+}
+
+test('local startup is unchanged: no dataset is read and no demo label is shown', async () => {
+  const fetches = [];
+  const app = harness(async url => { fetches.push(url); return json(true, {}); });
+  await tick();
+  assert.deepEqual(fetches, []);
+  assert.equal(app.nodes.has('#demo-label'), false);
+  assert.equal(app.state.demo, null);
+});
+
+test('the public demo reads demo-data.json once and opens on its default case and matched recording, with no API request', async () => {
+  const {app, fetches} = await publicDemo();
+  assert.deepEqual(fetches, ['./demo-data.json']);
+  assert.equal(app.state.cases.length, 2);
+  assert.equal(app.state.incident.id, 'case-b');
+  assert.equal(app.state.source, 'recorded');
+  assert.equal(app.state.recId, 'rec-b1');
+  assert.equal(app.state.recording.id, 'rec-b1');
+  assert.equal(app.nodes.get('#demo-label').hidden, false);
+  assert.equal(app.nodes.get('.side-footer-text').textContent, 'Recorded demo · No live API calls');
+  assert.equal(app.nodes.get('#notice').hidden, true);
+});
+
+test('the public demo keeps a mismatched recording listed, warned and without current-case links', async () => {
+  const {app} = await publicDemo();
+  const listed = plain(app.state.recordings.get('case-b').list).map(r => [r.id, r.fixture_matches]);
+  assert.deepEqual(listed, [['rec-b2', false], ['rec-b1', true]]);
+  const other = await app.api('/api/recordings/rec-b2'), matched = await app.api('/api/recordings/rec-b1');
+  assert.equal(app.recCitations(other), false);
+  assert.equal(app.recCitations(matched), true);
+  assert.match(app.evaluationView(), /Run 2 · Repair, checks passed · inputs differ/);
+  // A default whose recording does not match is ignored: the first case opens on its own newest matching run.
+  const {app: second} = await publicDemo(demoData({defaults: {incident_id: 'case-b', source: 'recorded', recording_id: 'rec-b2'}}));
+  assert.equal(second.state.incident.id, 'case-a');
+  assert.equal(second.state.recording.id, 'rec-a1');
+});
+
+for (const [why, respond, pattern] of [
+  ['missing', async () => ({ok: false, status: 404, json: async () => ({})}), /The recorded demo data is missing \(HTTP 404\)/],
+  ['unreachable', async () => { throw new TypeError('offline'); }, /could not be read/],
+  ['not JSON', async () => ({ok: true, json: async () => { throw new SyntaxError('bad'); }}), /not valid JSON/],
+  ['not an object', async () => json(true, [1, 2]), /not a JSON object/],
+  ['another schema version', async () => json(true, demoData({schema_version: 2})), /only schema version 1/],
+  ['not read-only', async () => json(true, demoData({read_only: false})), /not marked read-only/],
+  ['granting a capability', async () => json(true, demoData({capabilities: {...CAPS_OFF, rehearse: true}})), /must turn off/],
+  ['granting an unknown capability', async () => json(true, demoData({capabilities: {...CAPS_OFF, upload: true}})), /must turn off/],
+  ['missing a capability', async () => json(true, demoData({capabilities: {investigate: false, rehearse: false, export: false}})), /must turn off/],
+  ['without responses', async () => json(true, demoData({api_get: {}})), /recorded responses are missing/],
+  ['without evidence', async () => json(true, demoData({artifacts: null})), /recorded responses are missing/],
+]) {
+  test(`the public demo refuses a dataset that is ${why}, once, with no other request`, async () => {
+    const fetches = [];
+    const app = harness(async url => { fetches.push(url); return respond(); }, {static: true});
+    await app.startup;
+    assert.deepEqual(fetches, ['./demo-data.json']);
+    assert.match(app.nodes.get('#notice').innerHTML, pattern);
+    assert.equal(app.nodes.get('#title').textContent, 'Recorded demo unavailable');
+    assert.match(app.nodes.get('#content').innerHTML, /made no API call and has no live fallback/);
+    assert.equal(app.state.cases.length, 0);
+    await assert.rejects(app.api('/api/incidents'), pattern); // the refusal is kept, never refetched
+    assert.deepEqual(fetches, ['./demo-data.json']);
+  });
+}
+
+test('the public demo answers exact recorded GETs and bounded evidence pages, and fails everything else', async () => {
+  const {app, fetches} = await publicDemo();
+  const copy = await app.api('/api/runs?incident=case-a');
+  copy.runs[0].status = 'changed'; // a copy: the page cannot change the dataset
+  assert.equal((await app.api('/api/runs?incident=case-a')).runs[0].status, 'stopped');
+  const status = (code) => (error) => error.status === code;
+  for (const path of ['/api/runs?incident=case-z', '/api/runs?incident=case-a&x=1', '/api/runs/run-b/artifacts/repair.sql', '/api/incidents/__proto__',
+    '/api/incidents/case-a/', '/api/recordings/rec-zz', '/api/incidents/case-a/artifacts/events.jsonl'])
+    await assert.rejects(app.api(path), status(404), path);
+  await assert.rejects(app.api('/api/incidents/case-a/investigate', true), (e) => e.status === 405 && /read-only/.test(e.message));
+  await assert.rejects(app.api('/api/runs/run-b/rehearse', true), status(405));
+  const page = (q, file = 'events.jsonl', c = 'case-a') => app.api(`/api/incidents/${c}/artifacts/${file}?${q}`);
+  assert.deepEqual(plain(await page('start_line=1&max_lines=2')),
+    {name: 'events.jsonl', total_lines: 3, lines: [{ref: 'events.jsonl:L1', text: 'a'}, {ref: 'events.jsonl:L2', text: 'b'}], next_line: 3});
+  assert.deepEqual(plain(await page('start_line=3&max_lines=200')), {name: 'events.jsonl', total_lines: 3, lines: [{ref: 'events.jsonl:L3', text: 'c'}], next_line: null});
+  assert.deepEqual(plain(await page('start_line=9&max_lines=5')).lines, []); // past the end: an empty last page, as locally
+  for (const bad of ['', 'start_line=0&max_lines=5', 'start_line=1&max_lines=201', 'start_line=1&max_lines=0', 'start_line=1&start_line=2',
+    'start_line=1&max_lines=5&x=1', 'start_line=-1', 'start_line=1.5', 'start_line=1&max_lines=', 'start_line=1&max_lines=5=6'])
+    await assert.rejects(page(bad), status(400), bad);
+  await assert.rejects(page('start_line=1&max_lines=5', 'repair.sql'), status(404));
+  await assert.rejects(page('start_line=1&max_lines=5', 'events.jsonl', 'case-z'), status(404));
+  await assert.rejects(page('start_line=1&max_lines=5', '%E0%A4%A'), status(404));
+  await assert.rejects(page('start_line=1&max_lines=5', 'events.jsonl', 'case-b'), status(404)); // stored lines incomplete
+  assert.deepEqual(fetches, ['./demo-data.json']);
+});
+
+test('the public demo blocks every test, file check, SQL, copy and download path, including direct helper calls', async () => {
+  const {app, fetches} = await publicDemo();
+  app.state.source = 'script';
+  const run = app.state.run;
+  assert.equal(run.id, 'run-b');
+  assert.equal(run.status, 'ready_for_review');
+  for (const call of [() => app.act('investigate'), () => app.act('rehearse'), () => app.download('repair.sql'), () => app.recheckExport(),
+    () => app.loadSql(), () => app.copySql(null)]) {
+    app.nodes.get('#notice').innerHTML = '';
+    await call();
+    assert.match(app.nodes.get('#notice').innerHTML, /read-only: it cannot investigate, test on a copy, check files, copy SQL or export/);
+  }
+  assert.deepEqual(fetches, ['./demo-data.json']);
+  assert.equal(app.state.busy, false);
+  assert.equal(app.state.sql.size, 0);
+  assert.equal(app.state.exportChecks.size, 0);
+  app.renderActions();
+  const head = app.nodes.get('#header-actions').innerHTML;
+  assert.doesNotMatch(head, /data-action|data-download|data-recheck/);
+  assert.match(head, /data-review-repair/);
+  assert.match(head, /data-source="recorded"/);
+  const labels = app.paletteCommands('').map(i => i.label);
+  assert.ok(!labels.some(l => /investigation|Test repair|Check files|Download/.test(l)), labels.join(' | '));
+  assert.ok(labels.includes('Copy run ID'));
+  assert.match(app.sqlView(), /No SQL in this demo/);
+  assert.doesNotMatch(app.sqlView(), /data-copy-sql|data-reload-sql/);
+  assert.doesNotMatch(app.checksTab(), /data-recheck-export/);
+  assert.match(app.checksTab(), /Recorded when this baseline was built, not a current check/);
+  assert.doesNotMatch(app.packageView(run), /data-download|data-recheck-export/);
+  assert.equal(app.exportStatus(run).label, 'No export in this demo');
+  assert.deepEqual(Array.from(app.statusOf(run)), ['Checks passed · recorded', 'ok']);
+  assert.match(app.stepsView(run), /not in this demo/);
+  assert.doesNotMatch(app.stepsView(run), /data-review-downloads/);
+  // A recording stays a replay with the script baseline beside it.
+  app.state.source = 'recorded';
+  app.renderActions();
+  assert.match(app.nodes.get('#header-actions').innerHTML, /data-replay-start/);
+});
+
+test('a server-marked read-only baseline is history in the local workbench too', async () => {
+  const requests = [];
+  const app = harness(async url => { requests.push(url); return json(true, {}); });
+  const past = {id: 'run-h', incident_id: 'case-a', status: 'ready_for_review', read_only: true, downloads: ['repair.sql'], review: null};
+  app.state.incident = {id: 'case-a'}; app.state.run = past;
+  await app.download('repair.sql');
+  await app.recheckExport();
+  await app.act('rehearse');
+  assert.deepEqual(requests, []);
+  assert.equal(app.exportStatus(past).label, 'No export in this demo');
+  assert.equal(app.statusOf({...past, read_only: false})[0], 'Ready for review'); // an ordinary local run keeps its label
+});
+
+test('How we evaluated reads the public dataset: listed outcomes, the locked inbox attempts and their limits', async () => {
+  const {app} = await publicDemo();
+  const e = app.evaluationData();
+  assert.deepEqual([e.total, e.repairs, e.stops, e.mismatched], [3, 2, 1, 1]);
+  const view = app.evaluationView();
+  assert.match(view, /<strong>3<\/strong> recorded runs on 2 cases/);
+  assert.match(view, /3 locked attempts with muse-spark-1\.3\. Judged independently: 2 correct repairs and 1 justified stop\. The adapted script reached the same result in every attempt\. The frozen parser refused the format in all 3\./);
+  assert.match(view, /<td>Case B · seed 101<\/td><td>Repair, checks passed<\/td><td>Correct repair<\/td><td>Correct repair<\/td><td>Refused: unsupported format<\/td>/);
+  assert.match(view, /805,943 tokens\. No cost is inferred\./);
+  assert.match(view, /the inbox format included once adapted/);
+  assert.match(view, /does not show that a model is needed\. These are authored development cases, not blind holdouts\./);
+  assert.match(view, /Dataset scope, as published: Public synthetic cases\. Observed outcomes, not a general success rate\./);
+  assert.match(view, /Checks passed · recorded/); // the baseline is historical, not "ready for review"
+  assert.doesNotMatch(view, /all four|Ready for review|\$/);
+});
+
+// The committed six-case dataset, when this checkout has it (or RR_DEMO_DATA names it).
+const demoFile = process.env.RR_DEMO_DATA ? path.resolve(process.env.RR_DEMO_DATA) : path.join(__dirname, '../examples/public-demo/demo-data.json');
+test('the published dataset opens on its matched inbox repair and keeps all 16 recordings and every outcome',
+  {skip: fs.existsSync(demoFile) ? false : 'no public dataset in this checkout'}, async () => {
+    const data = JSON.parse(fs.readFileSync(demoFile, 'utf8'));
+    const {app, fetches} = await publicDemo(data);
+    assert.deepEqual(fetches, ['./demo-data.json']);
+    assert.equal(app.state.cases.length, 6);
+    assert.equal(app.state.incident.id, data.defaults.incident_id);
+    assert.equal(app.state.recording.id, data.defaults.recording_id);
+    const e = app.evaluationData();
+    assert.deepEqual([e.total, e.repairs, e.stops, e.errors, e.incomplete, e.other], [16, 9, 4, 2, 1, 0]);
+    assert.ok(e.mismatched >= 1);
+    assert.match(app.evaluationView(), /2 correct repairs and 1 justified stop/);
+    const moment = app.guardrailMoment(app.state.recording);
+    assert.equal(moment.bad.step.name, 'rehearse_repair');
+    assert.equal(moment.fixed.res.result.passed, true);
+    for (const c of app.state.cases) {
+      for (const listed of app.state.recordings.get(c.id).list) {
+        const r = await app.api(`/api/recordings/${listed.id}`);
+        assert.ok(app.displayedSteps(r).length > 0, r.id);
+        if (r.fixture_matches !== true) assert.equal(app.recCitations({...r, incident_id: app.state.incident.id}), false, r.id);
+        const m = app.guardrailMoment(r);
+        if (m?.fixed.step.name === 'rehearse_repair') assert.equal(m.fixed.res.result.checks.every(x => x.passed === true), true, r.id);
+      }
+      for (const past of app.state.history.get(c.id)) assert.notEqual(app.statusOf(past)[0], 'Ready for review');
+    }
+    for (const [caseId, files] of Object.entries(data.artifacts)) for (const [name, file] of Object.entries(files)) {
+      let start = 1, lines = 0;
+      while (start) { const pg = await app.api(`/api/incidents/${caseId}/artifacts/${encodeURIComponent(name)}?start_line=${start}&max_lines=200`); lines += pg.lines.length; start = pg.next_line; }
+      assert.equal(lines, file.total_lines, `${caseId}/${name}`);
+    }
+    assert.deepEqual(fetches, ['./demo-data.json']);
+  });

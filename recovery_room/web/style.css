@@ -155,7 +155,7 @@ button.step:hover{background:var(--hover);color:var(--ink)}
 .step-dot .icon{width:12px;height:12px;stroke-width:2.5}
 .step-label{font-size:var(--fs-3);font-weight:500;color:var(--muted)}
 .step-sub{font-size:var(--fs-2);color:var(--faint)}
-.step.upcoming{opacity:.7}
+.step.upcoming,.step.off{opacity:.7}
 .step.done .step-dot{border-color:var(--accent-line);background:var(--accent-soft);color:var(--accent-ink)}
 .step.current .step-dot{border-color:var(--accent);background:var(--accent);color:var(--on-accent);box-shadow:0 0 0 3px var(--accent-soft)}
 .step.current .step-label,.step.open .step-label{color:var(--ink)}
@@ -499,6 +499,7 @@ table.fields td.after{background:var(--accent-soft);color:var(--accent-ink)}
 .ctx-body>.cite-line{border:1px solid var(--line);border-radius:var(--r-sm);background:var(--bg)}
 
 .disclosure{flex:none;padding:6px 24px 7px;border-top:1px solid var(--line-soft);font-size:var(--fs-1);line-height:1.4;color:var(--faint);opacity:.85}
+.disclosure .demo-note{color:var(--muted);font-weight:600}
 
 /* Recorded run: provenance banner, mismatch warning and the step timeline. */
 .rec-banner{display:flex;align-items:flex-start;gap:10px;margin:0 0 16px;padding:10px 14px;border:1px solid var(--rec-line);border-radius:var(--r-md);background:var(--rec-soft);color:var(--rec)}
@@ -590,6 +591,10 @@ details.tl-card>.tl-head:hover{background:var(--hover)}
 @keyframes toast-out{to{opacity:0;transform:translateY(6px) scale(.98)}}
 
 /* Command palette */
+.demo-label{flex:none;order:3;padding:2px 8px;border-radius:var(--r-pill);background:var(--raised);color:var(--muted);font-size:var(--fs-1);font-weight:500;white-space:nowrap}
+.demo-label[hidden]{display:none}
+@media (max-width:420px){ .demo-label-more{display:none} }
+.eval-story{margin:0 0 var(--s2);font-size:var(--fs-3);line-height:1.6}
 .palette-trigger{display:inline-flex;align-items:center;gap:8px;min-width:0;width:min(360px,40vw);margin-left:auto;padding:5px 6px 5px 10px;border-radius:var(--r-md);border:1px solid var(--line-2);background:var(--surface);color:var(--faint);font-size:var(--fs-3);text-align:left}
 .palette-trigger:hover{border-color:var(--line-3);color:var(--muted)}
 .palette-trigger>span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
