@@ -848,7 +848,9 @@ details.tl-card>.tl-head:hover{background:var(--hover)}
   /* The tab bar's parts join the page flow: the tabs stay sticky; the run source sits under them. */
   .tabbar{display:contents}
   .tabbar>.tabs{flex:none;border-bottom:1px solid var(--line)}
-  .tabbar>.source-switch{align-self:flex-start;margin:12px 16px 0}
+  .tabbar>.source-switch{align-self:flex-start;max-width:calc(100% - 32px);margin:12px 16px 0}
+  /* Phones use the short labels too; the mode label above already says offline. */
+  .source-switch .long{display:none}
   .flow-links{margin-left:0}
   .workspace.ctx-closed>.context{display:block}
   .tabs{padding:0 8px}
