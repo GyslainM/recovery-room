@@ -16,4 +16,4 @@ recovery-room = "recovery_room.cli:main"
 include = ["recovery_room*"]
 
 [tool.setuptools.package-data]
-recovery_room = ["web/*.html", "web/*.css", "web/*.js", "web/fonts/*.woff2", "web/fonts/OFL.txt"]
+recovery_room = ["web/*.html", "web/*.css", "web/*.js", "web/*.svg", "web/fonts/*.woff2", "web/fonts/OFL.txt"]

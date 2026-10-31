@@ -1421,7 +1421,7 @@ function reviewSummary(run, review) {
     ${ready?'':`<div class="callout stop">${text(run.summary)}</div>`}
     ${repairFlow(review, {run})}
     ${run.status==='blocked'?'<p class="caption">Export is blocked. Counts describe the earlier rehearsal snapshot; see the server’s reason above.</p>':''}
-    ${failed.length?`<div class="failed"><h3>Failed checks at rehearsal</h3><ul>${failed.map(c=>`<li><span class="group">${text(groupOf(c.name))}</span><strong>${text(checkName(c.name))}</strong><div class="check-detail">${text(c.detail)}</div></li>`).join('')}</ul></div>`:''}`;
+    ${failed.length?`<div class="failed"><h3>Failed checks at rehearsal</h3><ul>${failed.map(c=>`<li><span class="group">${text(groupOf(c.name))}</span><strong>${text(checkName(c.name))}</strong><div class="check-detail">${text(c.detail)}${diagSummary(c)?`<span class="check-diag">${text(diagSummary(c))}</span>`:''}</div></li>`).join('')}</ul></div>`:''}`;
 }
 
 // A quiet outcome graphic, built from the selected rehearsal's observations.
@@ -1570,7 +1570,7 @@ function checksView(checks) {
   return `<div class="check-groups">${groups.map(([label, list]) => {
     const ok = list.filter(c => c.passed).length;
     return `<div class="check-group ${ok<list.length?'has-fail':''}"><div class="check-group-head"><h4>${text(label)}</h4><span class="caption">${ok} / ${list.length} passed</span></div>
-      <ul class="checks">${list.map(c=>`<li class="sel ${c.passed?'':'fail'}" tabindex="0" data-key="check:${escape(c.name)}" aria-selected="false"><span class="check-icon ${c.passed?'':'cancelled'}" aria-hidden="true">${c.passed?'✓':'×'}</span><div><strong>${text(checkName(c.name))}</strong><span class="sr-only"> ${c.passed?'passed':'failed'}</span><div class="check-detail">${text(c.detail)}</div></div></li>`).join('')}</ul></div>`;
+      <ul class="checks">${list.map(c=>`<li class="sel ${c.passed?'':'fail'}" tabindex="0" data-key="check:${escape(c.name)}" aria-selected="false"><span class="check-icon ${c.passed?'':'cancelled'}" aria-hidden="true">${c.passed?'✓':'×'}</span><div><strong>${text(checkName(c.name))}</strong><span class="sr-only"> ${c.passed?'passed':'failed'}</span><div class="check-detail">${text(c.detail)}${diagSummary(c)?`<span class="check-diag">${text(diagSummary(c))}</span>`:''}</div></div></li>`).join('')}</ul></div>`;
   }).join('')}</div>`;
 }
 
@@ -1676,6 +1676,75 @@ function productContext(sku) {
 // "Show me" for a check: the related records from the same rehearsal review (current or recorded). The
 // server reports each check as pass/fail with one sentence, so these rows are derived in the browser from
 // the review's before/after records and say so; they are not the check's own computation.
+// The checker's own explanation of a check (bounded server data). Older recordings have none; their
+// checks fall back to the view derived from the review's before/after records.
+const hasDiagnostics = (check) => !!check?.diagnostics && Array.isArray(check.diagnostics.items);
+// How each part adds up to the expected value: opening + movements, or opening − active order quantity.
+const DIAG_PART_SIGN = {opening: 1, movements: 1, active_quantity: -1};
+const DIAG_RELATED = {active_order_ids: 'Active orders', recorded_order_ids: 'Recorded orders', added_movement_ids: 'Movements added', order_ids: 'Orders', movement_ids: 'Movements'};
+const signedNum = (n) => typeof n === 'number' ? `${n > 0 ? '+' : ''}${n}` : text(n ?? '—');
+const diagValue = (v) => v === null || v === undefined ? '—' : String(v);
+const productName = (sku) => state.incident?.products?.find(p => p.sku === sku)?.name || sku;
+
+function diagEntityText(e) {
+  if (e.table === 'products' && e.sku) return String(e.sku);
+  if (e.id) return `${e.id}${e.field ? ` · ${e.field}` : ''}`;
+  if (e.event_id) return String(e.event_id);
+  if (e.file) return String(e.file);
+  if (e.table) return String(e.table);
+  return Object.entries(e).map(([k, v]) => `${k} ${v}`).join(' · ');
+}
+
+function diagEntity(e) {
+  const link = (key, label) => active().selectable ? `<button class="link small mono" data-key="${escape(key)}">${text(label)}</button>` : `<span class="mono">${text(label)}</span>`;
+  const field = e.field ? ` <span class="caption">· ${text(e.field)}</span>` : '';
+  if (e.table === 'orders' && e.id) return `${link(`order:${e.id}`, e.id)}${field}`;
+  if (e.table === 'products' && e.sku) return active().selectable ? `<button class="link small" data-key="${escape(`product:${e.sku}`)}">${text(productName(e.sku))}</button>` : text(e.sku);
+  if (e.id) return `<span class="mono">${text(e.id)}</span>${field}`;
+  if (e.event_id || e.file) return `<span class="mono">${text(e.event_id || e.file)}</span>`;
+  return text(diagEntityText(e));
+}
+
+// One line for a failed check: its first exception (or product off by a difference), and how many more.
+function diagSummary(check) {
+  if (check.passed || !hasDiagnostics(check)) return '';
+  const d = check.diagnostics;
+  const off = d.listing === 'all' ? d.items.filter(i => typeof i.difference === 'number' && i.difference !== 0) : d.items;
+  if (!off.length) return '';
+  const first = off[0], more = (d.listing === 'all' ? off.length : d.total) - 1;
+  const diff = typeof first.difference === 'number' ? ` (${signedNum(first.difference)})` : '';
+  return `${diagEntityText(first.entity)}: expected ${diagValue(first.expected)}, observed ${diagValue(first.observed)}${diff}${more > 0 ? ` · ${more} more` : ''}`;
+}
+
+function diagnosticsView(check) {
+  const d = check.diagnostics, items = d.items;
+  const rule = `<p class="diag-rule">${icon('shield-check')}<span>${text(d.rule)}</span></p>`;
+  const more = d.truncated ? `<p class="caption">Showing ${items.length} of ${text(d.total)}; the checker lists at most ${items.length}.</p>` : '';
+  if (d.listing === 'all') {
+    const added = items.reduce((n, i) => n + (i.related?.added_movement_ids?.length || 0), 0);
+    // The parts behind each expected value, as a small sum under it (the rule above names them).
+    const sum = (parts) => {
+      const known = Object.entries(parts || {}).filter(([k, v]) => k in DIAG_PART_SIGN && typeof v === 'number');
+      if (!known.length) return '';
+      return known.map(([k, v], n) => { const value = v * DIAG_PART_SIGN[k]; return n === 0 ? String(value) : `${value < 0 ? '−' : '+'} ${Math.abs(value)}`; }).join(' ');
+    };
+    const rows = items.map(i => [diagEntity(i.entity),
+      `<span class="num">${text(diagValue(i.expected))}</span>${sum(i.parts) ? `<small class="diag-sum">${text(sum(i.parts))}</small>` : ''}`,
+      `<span class="num">${text(diagValue(i.observed))}</span>`, `<span class="num${i.difference ? ' cancelled' : ''}">${signedNum(i.difference)}</span>`]);
+    const off = items.filter(i => i.difference).length;
+    return `<h3>What the checker computed</h3>${rule}
+      ${table(['Product', 'Expected', 'Observed', 'Difference'], rows)}${more}
+      <p class="small">${text(off ? `${off} product${off === 1 ? '' : 's'} differ${off === 1 ? 's' : ''} from the rule.` : 'Every product matches the rule.')}${added ? text(` The repair added ${added} compensating movement${added === 1 ? '' : 's'}.`) : ''}</p>`;
+  }
+  if (!items.length) return `<h3>What the checker computed</h3>${rule}<p class="small">No exceptions: nothing broke this rule.</p>`;
+  const withDiff = items.some(i => typeof i.difference === 'number'), withRelated = items.some(i => i.related);
+  const related = (r) => r ? Object.entries(r).map(([k, ids]) => `<div class="diag-related"><span class="caption">${text(DIAG_RELATED[k] || k)}</span> ${ids.length ? ids.map(id => /order/.test(k) && active().selectable ? `<button class="link small mono" data-key="${escape(`order:${id}`)}">${text(id)}</button>` : `<span class="mono">${text(id)}</span>`).join(' ') : '<span class="caption">none</span>'}</div>`).join('') : '';
+  const rows = items.map(i => [diagEntity(i.entity), text(diagValue(i.expected)), `<span class="cancelled">${text(diagValue(i.observed))}</span>`,
+    ...(withDiff ? [`<span class="num">${signedNum(i.difference)}</span>`] : []), ...(withRelated ? [related(i.related)] : [])]);
+  return `<h3>What the checker found</h3>${rule}
+    ${table(['Record', 'Expected', 'Observed', ...(withDiff ? ['Difference'] : []), ...(withRelated ? ['Related'] : [])], rows)}${more}`;
+}
+
 function checkEvidence(name, review) {
   const derived = '<p class="caption">Derived from the rehearsal review’s before/after records, not from the check’s own computation.</p>';
   const link = (key, label) => active().selectable ? `<button class="link small" data-key="${escape(key)}">${text(label)}</button>` : text(label);
@@ -1720,7 +1789,7 @@ function checkContext(name) {
   return `<h2 class="ctx-title">${text(checkName(name))}</h2>
     <div class="ctx-status">${badge(check.passed ? 'Passed' : 'Failed', check.passed ? 'ok' : 'danger')}<span class="caption">${text(groupOf(name))} · ${source.recorded ? 'recorded at rehearsal' : 'observed at rehearsal'}</span></div>
     <p class="small">${text(check.detail)}</p><p class="caption mono">${text(name)}</p>
-    ${checkEvidence(name, source.review)}
+    ${hasDiagnostics(check) ? diagnosticsView(check) : checkEvidence(name, source.review)}
     <p class="small muted">${source.recorded ? text(state.recording?.review_observation || 'Recorded at rehearsal; not a current export check.') : 'Checks run on the rehearsal snapshot and cannot be edited by the plan. Export status is rechecked separately on every download.'}</p>`;
 }
 

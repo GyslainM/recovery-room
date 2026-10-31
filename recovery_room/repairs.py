@@ -10,7 +10,7 @@ from pathlib import Path
 import sqlite3
 import uuid
 
-from .checks import check_state
+from .checks import check_state, diagnostics
 from .db import TABLES, copy_database, fingerprint, snapshot
 from .fixtures import artifact_names, evidence_index, read_artifact
 
@@ -26,6 +26,30 @@ def evidence_fingerprint(incident: Path) -> str:
         digest.update(path.read_bytes())
         digest.update(b"\x00")
     return digest.hexdigest()
+
+
+def evidence_digests(incident: Path) -> dict[str, str]:
+    """Per-file digests of the same allowlisted evidence, to say which file changed (never shown as hashes)."""
+    digests = {}
+    for name in artifact_names(incident):
+        path = incident / "evidence" / name
+        if path.is_symlink() or path.resolve().parent != (incident / "evidence").resolve():
+            raise ValueError("Evidence files must remain inside the incident evidence directory.")
+        digests[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return digests
+
+
+def input_changes(kind: str, before: dict, now: dict) -> list[dict]:
+    """Which tables (source) or files (evidence) differ between two observations; values are never included."""
+    items = []
+    for key in sorted(set(before) | set(now)):
+        if key not in now:
+            items.append({"entity": {kind: key}, "expected": "unchanged since the rehearsal began", "observed": "missing"})
+        elif key not in before:
+            items.append({"entity": {kind: key}, "expected": "absent", "observed": "added"})
+        elif before[key] != now[key]:
+            items.append({"entity": {kind: key}, "expected": "unchanged since the rehearsal began", "observed": "changed"})
+    return items
 
 
 def normalize_plan(plan: dict) -> dict:
@@ -155,6 +179,7 @@ def execute_plan(path: Path, plan: dict) -> None:
 def rehearse(incident: Path, plan: dict, output: Path) -> dict:
     plan = normalize_plan(plan)
     evidence_hash = evidence_fingerprint(incident)
+    evidence_files = evidence_digests(incident)
     output.mkdir(parents=True, exist_ok=True)
     folder = output / f"rehearsal-{uuid.uuid4().hex[:12]}"
     folder.mkdir()
@@ -165,15 +190,25 @@ def rehearse(incident: Path, plan: dict, output: Path) -> dict:
     validate_evidence(incident, before, plan)
     execute_plan(candidate, plan)
     checks = check_state(incident, candidate, before, {a["order_id"] for a in plan["cancellations"]})
-    source_unchanged = snapshot(original) == before
+    source_now = snapshot(original)
+    source_unchanged = source_now == before
+    changed_tables = input_changes("table", before, source_now)
     checks.append({
         "name": "source_snapshot_unchanged", "passed": source_unchanged,
         "detail": "The original still matches the snapshot used for rehearsal; otherwise this plan is stale.",
+        "diagnostics": diagnostics("The source database matches the snapshot taken when the rehearsal began",
+                                   changed_tables or ([] if source_unchanged else [{"entity": {"table": "source database"},
+                                                      "expected": "unchanged since the rehearsal began", "observed": "changed"}])),
     })
+    evidence_unchanged = evidence_fingerprint(incident) == evidence_hash
+    changed_files = input_changes("file", evidence_files, evidence_digests(incident))
     checks.append({
         "name": "evidence_snapshot_unchanged",
-        "passed": evidence_fingerprint(incident) == evidence_hash,
+        "passed": evidence_unchanged,
         "detail": "The evidence files still match those used for the rehearsal.",
+        "diagnostics": diagnostics("Every evidence file matches the one read when the rehearsal began",
+                                   changed_files or ([] if evidence_unchanged else [{"entity": {"file": "evidence set"},
+                                                     "expected": "unchanged since the rehearsal began", "observed": "changed"}])),
     })
     after = snapshot(candidate)
     return {

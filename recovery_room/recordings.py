@@ -17,7 +17,7 @@ import re
 import sqlite3
 import uuid
 
-from .checks import check_state
+from .checks import check_state, public_diagnostics
 from .db import fingerprint, snapshot
 from .fixtures import artifact_names
 from .repairs import evidence_fingerprint, normalize_plan, validate_evidence
@@ -45,6 +45,27 @@ def _text(value: str, limit: int = 4096) -> str:
     value = _PATH.sub("[redacted path]", value)
     value = "".join(char for char in value if char in "\n\t" or ord(char) >= 32)
     return value if len(value) <= limit else value[:limit] + " [truncated]"
+
+
+def _redacted(value):
+    """Apply the recording text rules to every string inside already-bounded diagnostics."""
+    if isinstance(value, str):
+        return _text(value, 160)
+    if isinstance(value, list):
+        return [_redacted(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _redacted(item) for key, item in value.items()}
+    return value
+
+
+def _public_check(check: dict) -> dict:
+    """A recorded check keeps its known fields; diagnostics only when they fit the public bounds.
+    Older recordings have none, and none are recomputed or invented for them."""
+    public = {"name": check["name"], "passed": check["passed"], "detail": check["detail"]}
+    explained = public_diagnostics(check.get("diagnostics"))
+    if explained is not None:
+        public["diagnostics"] = _redacted(explained)
+    return public
 
 
 def _clean(value, depth=0):
@@ -449,6 +470,7 @@ class RecordingCatalog:
                                    for check in review["checks"])):
                         raise ValueError("Recorded repair review does not describe a passed rehearsal.")
                     bundle["review"] = {field:review[field] for field in REVIEW_FIELDS}
+                    bundle["review"]["checks"] = [_public_check(check) for check in review["checks"]]
                 final = bundle.get("final")
                 if not isinstance(final,dict) or final.get("outcome") != bundle["outcome"]:
                     raise ValueError("Recorded final outcome is inconsistent.")

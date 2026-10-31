@@ -21,7 +21,7 @@ function harness(handler) {
     setTimeout, clearTimeout, URL, renderCalls: 0,
   };
   vm.createContext(context);
-  vm.runInContext(source + '\nrender = () => { globalThis.renderCalls++; };\nrenderPanel = () => {};\nglobalThis.subject = {state, download, reviewView, exportStatus, recheckExport, act, changesView, checksTab, sqlView, modeInfo, repairFlow, stockVisual, transition, packageView, lineContext, evidenceWrites, reconstructionView, runsCompare};', context);
+  vm.runInContext(source + '\nrender = () => { globalThis.renderCalls++; };\nrenderPanel = () => {};\nglobalThis.subject = {state, download, reviewView, exportStatus, recheckExport, act, changesView, checksTab, sqlView, modeInfo, repairFlow, stockVisual, transition, packageView, lineContext, evidenceWrites, reconstructionView, runsCompare, checkContext, checksTab};', context);
   return {context, nodes, ...context.subject};
 }
 
@@ -610,4 +610,63 @@ test('quoted CSV receipts keep their writes, commas and escaped quotes, with ori
   assert.deepEqual(Array.from(model.writes, w => w.order_id), ['ord_a', 'ord_b', 'ord_c']);
   assert.deepEqual(Array.from(model.writes, w => w.ref), ['commit_receipts.csv:L2', 'commit_receipts.csv:L3', 'events.jsonl:L1']);
   assert.equal(model.writes[0].event_id, 'evt-a');
+});
+
+// ---------- Check diagnostics ----------
+
+function diagnosedRun(checks) {
+  const current = reviewRun('failed_checks');
+  current.review.passed = false;
+  current.review.checks = checks;
+  return current;
+}
+const ledger = (keyboard) => ({name: 'stock_matches_movement_ledger', passed: keyboard === 0, detail: 'Opening stock plus all recorded movements equals current stock.',
+  diagnostics: {rule: 'Stock on hand = opening stock + the sum of recorded movements', listing: 'all', total: 2, truncated: false, items: [
+    {entity: {table: 'products', sku: 'KEYBOARD'}, parts: {opening: 162, movements: 10}, expected: 172, observed: 172 + keyboard, difference: keyboard, related: {added_movement_ids: ['mov_1', 'mov_2']}},
+    {entity: {table: 'products', sku: 'MOUSE'}, parts: {opening: 164, movements: 0}, expected: 164, observed: 164, difference: 0}]}});
+
+test('a check with diagnostics shows what the checker computed, not a derived view', () => {
+  const app = harness();
+  app.state.incident = {id: 'case-a', products: [{sku: 'KEYBOARD', name: 'Keyboard'}, {sku: 'MOUSE', name: 'Mouse'}]};
+  app.state.run = diagnosedRun([ledger(2)]);
+  const view = app.checkContext('stock_matches_movement_ledger');
+  assert.match(view, /What the checker computed/);
+  assert.match(view, /Stock on hand = opening stock \+ the sum of recorded movements/);
+  assert.match(view, /<th scope="col">Product<\/th><th scope="col">Expected<\/th><th scope="col">Observed<\/th><th scope="col">Difference<\/th>/);
+  assert.match(view, /<small class="diag-sum">162 \+ 10<\/small>/);
+  assert.match(view, /<span class="num cancelled">\+2<\/span>/);
+  assert.match(view, /1 product differs from the rule\. The repair added 2 compensating movements\./);
+  assert.match(view, /data-key="product:KEYBOARD">Keyboard</);
+  assert.doesNotMatch(view, /Derived from the rehearsal review/);
+});
+
+test('failed checks state their first exception in one line', () => {
+  const app = harness();
+  app.state.incident = {id: 'case-a', products: []};
+  app.state.run = diagnosedRun([ledger(2), {name: 'unaffected_orders_preserved', passed: false, detail: 'Every untargeted order matches.',
+    diagnostics: {rule: 'r', listing: 'exceptions', total: 60, truncated: true, items: Array.from({length: 20}, (_, i) =>
+      ({entity: {table: 'orders', id: `ord_${i}`, field: 'customer'}, expected: `customer-${i}`, observed: 'someone-else'}))}}]);
+  const review = app.reviewView(), checks = app.checksTab();
+  for (const view of [review, checks]) {
+    assert.match(view, /KEYBOARD: expected 172, observed 174 \(\+2\)/);
+    assert.match(view, /ord_0 · customer: expected customer-0, observed someone-else · 59 more/);
+  }
+  const details = app.checkContext('unaffected_orders_preserved');
+  assert.match(details, /What the checker found/);
+  assert.match(details, /Showing 20 of 60/);
+  assert.match(details, /data-key="order:ord_0"/);
+});
+
+test('a recording without diagnostics keeps the derived view, and mismatched inputs get no links', () => {
+  const app = harness();
+  app.state.incident = {id: 'case-a', products: [{sku: 'KEYBOARD', name: 'Keyboard'}]};
+  app.state.run = diagnosedRun([{name: 'stock_matches_movement_ledger', passed: true, detail: 'Opening stock plus all recorded movements equals current stock.'}]);
+  app.state.run.review.stock = [{sku: 'KEYBOARD', name: 'Keyboard', before: 162, after: 172}];
+  assert.match(app.checkContext('stock_matches_movement_ledger'), /Derived from the rehearsal review/);
+
+  app.state.source = 'recorded';
+  app.state.recording = {incident_id: 'case-a', citations_enabled: false, review: {...diagnosedRun([ledger(0)]).review}};
+  const view = app.checkContext('stock_matches_movement_ledger');
+  assert.match(view, /What the checker computed/);
+  assert.doesNotMatch(view, /data-key=/);
 });

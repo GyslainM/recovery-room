@@ -195,6 +195,34 @@ class HTTPTests(WorkbenchCase):
             self.assertEqual(status, 200)
             self.assertEqual(body[:4], b"wOF2")
 
+    def test_favicon_is_a_same_origin_svg_with_the_existing_security_headers(self):
+        status, headers, body = self.request("/favicon.svg")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "image/svg+xml")
+        icon = Path(__file__).resolve().parents[1] / "recovery_room" / "web" / "favicon.svg"
+        self.assertEqual(body, icon.read_bytes())
+        self.assertTrue(body.startswith(b"<svg"))
+        for unsafe in (b"<script", b"href=", b"onload", b"<foreignObject", b"<image"):
+            self.assertNotIn(unsafe, body)
+        root_status, root_headers, root = self.request("/")
+        self.assertEqual(headers["Content-Security-Policy"], root_headers["Content-Security-Policy"])
+        self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
+        self.assertIn(b'<link rel="icon" href="/favicon.svg" type="image/svg+xml">', root)
+        self.assertNotIn(b'href="data:', root)
+
+    def test_favicon_allowlist_rejects_other_names_methods_and_origins(self):
+        for path in ("/favicon.ico", "/favicon.svg?v=1", "/favicon.svg/", "/FAVICON.svg",
+                     "/web/favicon.svg", "/%66avicon.svg", "/favicon.svg%00"):
+            with self.subTest(path=path):
+                status, _, body = self.request(path)
+                self.assertIn(status, (400, 404))
+                self.assertFalse(body.startswith(b"<svg"))
+        self.assertEqual(self.request("/favicon.svg", "POST", "{}", {"Content-Type": "application/json"})[0], 404)
+        self.assertEqual(self.request("/favicon.svg", "HEAD")[0], 501)
+        for headers in ({"Host": "other.example"}, {"Origin": "https://other.example"}, {"Sec-Fetch-Site": "cross-site"}):
+            with self.subTest(headers=headers):
+                self.assertEqual(self.request("/favicon.svg", headers=headers)[0], 403)
+
     def test_text_assets_and_json_keep_utf8_content_types(self):
         for path, mime in (("/", "text/html"), ("/app.js", "text/javascript"),
                            ("/style.css", "text/css"), ("/api/incidents", "application/json")):

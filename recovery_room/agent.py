@@ -164,7 +164,8 @@ class AgentTools:
             self.results[rehearsal_id] = result
             return {
                 "rehearsal_id": rehearsal_id, "passed": result["passed"],
-                "checks": result["checks"], "source_fingerprint": result["source_fingerprint"],
+                "checks": [{key: check[key] for key in ("name", "passed", "detail")} for check in result["checks"]],
+                "source_fingerprint": result["source_fingerprint"],
                 "status": "copy_only_requires_human_review",
             }
         raise ValueError("Unsupported tool name or arguments.")

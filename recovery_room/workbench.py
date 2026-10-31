@@ -34,7 +34,8 @@ DOWNLOADS = {"repair.sql": "application/sql", "plan.json": "application/json",
              "report.json": "application/json", "report.html": "text/html"}
 ASSETS = {"/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascript"),
           "/style.css": ("style.css", "text/css"),
-          "/fonts/InterVariable.woff2": ("fonts/InterVariable.woff2", "font/woff2")}
+          "/fonts/InterVariable.woff2": ("fonts/InterVariable.woff2", "font/woff2"),
+          "/favicon.svg": ("favicon.svg", "image/svg+xml")}
 RUN_SUMMARY_FIELDS = ("id", "incident_id", "status", "summary", "mode", "created_at")
 
 

@@ -449,6 +449,14 @@ mark{background:var(--warn-soft);color:var(--warn-ink);border-radius:2px;box-sha
 .check-icon{color:var(--accent-ink);font-weight:600}
 .check-icon.cancelled{color:var(--danger-ink)}
 .check-detail{margin-top:2px;font-size:12.5px;color:var(--faint)}
+.check-diag{display:block;margin-top:2px;font-variant-numeric:tabular-nums;color:var(--danger-ink)}
+/* The checker's own explanation, in Details */
+.diag-rule{display:flex;align-items:flex-start;gap:7px;margin:0 0 10px;font-size:12.5px;line-height:1.5;color:var(--muted)}
+.diag-rule .icon{flex:none;width:14px;height:14px;margin-top:2px;color:var(--faint)}
+.diag-related{line-height:1.7}
+.context .scroll-table th,.context .scroll-table td{padding:7px 8px}
+.diag-sum{display:block;font-size:11px;color:var(--faint);font-variant-numeric:tabular-nums;white-space:nowrap}
+.diag-related .caption{margin-right:4px}
 @media(min-width:901px){
   .checks li{grid-template-columns:16px minmax(180px,250px) minmax(0,1fr);align-items:baseline;padding:7px 8px}
   .checks li>div{display:contents}
