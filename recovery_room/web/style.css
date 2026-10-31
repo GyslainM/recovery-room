@@ -741,9 +741,32 @@ details.tl-card>.tl-head:hover{background:var(--hover)}
 .recon-legend i.repeat{background:var(--warn)}
 .recon-legend i.lost{width:0;border-left:2px dashed var(--danger-ink);border-radius:0;background:none}
 .recon-summary{margin:10px 0 0 156px;max-width:82ch;font-size:13.5px;line-height:1.55}
+/* Compared runs: the same columns as the timeline, one row per run. */
+.recon-compare{margin-top:20px;padding-top:16px;border-top:1px solid var(--line)}
+.recon-compare .recon-head h4{margin:0;font-size:13px;font-weight:600}
+.compare-lanes li{height:24px;padding-right:10px}
+.compare-run{display:flex;flex-direction:column;justify-content:center;width:100%;height:100%;min-width:0;padding:0 6px;margin-left:-6px;border-radius:var(--radius-sm);text-align:left;color:var(--ink);line-height:1.15}
+.compare-run:hover{background:var(--hover)}
+.compare-run.current{background:var(--raised)}
+.compare-run strong{overflow:hidden;text-overflow:ellipsis;font-size:12px;font-weight:600}
+.compare-run span{overflow:hidden;text-overflow:ellipsis;font-size:10.5px;color:var(--faint)}
+.compare-run.current span{color:var(--muted)}
+.compare-run .cmp-short{display:none}
+.compare-svg{display:block;width:100%;border-radius:var(--radius-sm)}
+.recon-band.current{fill:var(--hover)}
+.cmp-mark{fill:var(--warn)}
+.cmp-mark.extra{fill:var(--danger)}
+.cmp-missed{fill:none;stroke:var(--warn);stroke-width:1;stroke-opacity:.85;vector-effect:non-scaling-stroke}
+.cmp-line{stroke:var(--line-2);stroke-width:1;stroke-dasharray:2 3;vector-effect:non-scaling-stroke}
+.cmp-line.stop{stroke:var(--warn);stroke-opacity:.8}
+.cmp-line.error{stroke:var(--danger-ink);stroke-opacity:.75}
+.recon-legend i.missed{background:none;box-shadow:inset 0 0 0 1px var(--warn)}
+.recon-legend i.extra{background:var(--danger)}
+.recon-legend i.line{width:14px;height:0;border-top:1px dashed var(--faint);border-radius:0;background:none;vertical-align:3px}
 @media(max-width:560px){
   .recon-body{grid-template-columns:92px minmax(0,1fr)}
   .recon-lanes span{display:none}
+  .recon-lanes .compare-run .cmp-short{display:block}
   .recon-lanes .lane-long{display:none}
   .recon-lanes .lane-short{display:block}
   .recon-legend,.recon-summary{margin-left:0}

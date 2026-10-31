@@ -21,7 +21,7 @@ function harness(handler) {
     setTimeout, clearTimeout, URL, renderCalls: 0,
   };
   vm.createContext(context);
-  vm.runInContext(source + '\nrender = () => { globalThis.renderCalls++; };\nrenderPanel = () => {};\nglobalThis.subject = {state, download, reviewView, exportStatus, recheckExport, act, changesView, checksTab, sqlView, modeInfo, repairFlow, stockVisual, transition, packageView, lineContext, evidenceWrites, reconstructionView};', context);
+  vm.runInContext(source + '\nrender = () => { globalThis.renderCalls++; };\nrenderPanel = () => {};\nglobalThis.subject = {state, download, reviewView, exportStatus, recheckExport, act, changesView, checksTab, sqlView, modeInfo, repairFlow, stockVisual, transition, packageView, lineContext, evidenceWrites, reconstructionView, runsCompare};', context);
   return {context, nodes, ...context.subject};
 }
 
@@ -474,4 +474,75 @@ test('a recording whose inputs differ draws the timeline without links to curren
   const view = app.reconstructionView([{order_id: 'ord_b', duplicate_of: 'ord_a'}], {recorded: true});
   assert.doesNotMatch(view, /data-key=/);
   assert.doesNotMatch(view, /Enter to open one/);
+});
+
+// ---------- Compared runs ----------
+
+function compareState(app, {engine = ['ord_c', 'ord_d'], recs = [], details = {}, run = 'ready_for_review'} = {}) {
+  evidenceState(app, {'events.jsonl': [write('import-first', 'ord_a'), write('import-first', 'ord_b'), write('import-retry', 'ord_c'), write('import-retry', 'ord_d')]});
+  app.state.run = run ? {id: 'run-a', incident_id: 'case-a', status: run, missing_event_ids: ['evt-1', 'evt-2'],
+    plan: engine ? {cancellations: engine.map(order_id => ({order_id, duplicate_of: 'ord_a', evidence_refs: []}))} : null} : null;
+  app.state.recordings.set('case-a', {status: 'ok', list: recs});
+  for (const [id, data] of Object.entries(details)) app.state.recDetails.set(`case-a:${id}`, {status: 'ok', data});
+  return app.runsCompare(app.evidenceWrites());
+}
+const recording = (id, cancelled, extra = {}) => ({id, incident_id: 'case-a', fixture_matches: true, citations_enabled: true,
+  review: {changes: cancelled.map(order => ({before: {id: order}, after: {id: order}, duplicate_of: 'ord_a', evidence_refs: []}))}, ...extra});
+
+test('compared runs mark each run against the script only from plans and verified reviews', () => {
+  const app = harness();
+  const view = compareState(app, {
+    recs: [
+      {id: 'rec-same', outcome: 'repair', fixture_matches: true},
+      {id: 'rec-diff', outcome: 'repair', fixture_matches: true},
+      {id: 'rec-stop', outcome: 'stop', fixture_matches: true},
+      {id: 'rec-other', outcome: 'repair', fixture_matches: false},
+    ],
+    details: {'rec-same': recording('rec-same', ['ord_c', 'ord_d']), 'rec-diff': recording('rec-diff', ['ord_c', 'ord_b'])},
+  });
+  assert.match(view, /Script run<\/strong><span class="cmp-long">cancels 2</);
+  assert.match(view, /Meta run 4<\/strong><span class="cmp-long">same 2 as the script</);
+  assert.match(view, /Meta run 3<\/strong><span class="cmp-long">1 of 2 match · misses 1 · 1 not in the script</);
+  assert.match(view, /Meta run 2<\/strong><span class="cmp-long">stopped · no repair</);
+  assert.match(view, /Meta run 1<\/strong><span class="cmp-long">inputs differ · not compared</);
+  assert.equal((view.match(/class="cmp-mark extra"/g) || []).length, 1); // ord_b, which the script keeps
+  assert.equal((view.match(/class="cmp-missed"/g) || []).length, 1); // ord_d, which the differing run keeps
+  assert.match(view, /4 recorded Meta runs: 1 cancels the same 2 writes as the script, 1 differs from the script, 1 stopped instead of repairing and 1 was not compared\./);
+  assert.match(view, /data-recording="rec-other"/); // listed, so it can still be opened
+  assert.doesNotMatch(view, /\bstyle=/);
+});
+
+test('a recording is not compared when its own record says the inputs differ', () => {
+  const app = harness();
+  const view = compareState(app, {
+    recs: [{id: 'rec-a', outcome: 'repair', fixture_matches: true}],
+    details: {'rec-a': recording('rec-a', ['ord_c', 'ord_d'], {citations_enabled: false})},
+  });
+  assert.match(view, /Meta run 1<\/strong><span class="cmp-long">inputs differ · not compared</);
+  // Only the script's own two marks are drawn.
+  assert.equal((view.match(/class="cmp-mark"/g) || []).length, 2);
+  assert.match(view, /The recorded Meta run was not compared\./);
+});
+
+test('without a script run the rows show each recording and invite an investigation', () => {
+  const app = harness();
+  const view = compareState(app, {engine: null, run: null,
+    recs: [{id: 'rec-a', outcome: 'repair', fixture_matches: true}, {id: 'rec-b', outcome: 'repair', fixture_matches: true}],
+    details: {'rec-a': recording('rec-a', ['ord_c', 'ord_d']), 'rec-b': recording('rec-b', ['ord_c', 'ord_d'])}});
+  assert.match(view, /Script run<\/strong><span class="cmp-long">not investigated yet</);
+  assert.doesNotMatch(view, /cmp-missed|cmp-mark extra/);
+  assert.match(view, /All 2 recorded Meta runs cancel 2 writes each\. Investigate the incident to compare them with the script\./);
+});
+
+test('stops on both sides read as agreement, not as missing repairs', () => {
+  const app = harness();
+  const view = compareState(app, {engine: null, run: 'stopped', recs: [{id: 'rec-a', outcome: 'stop', fixture_matches: true}, {id: 'rec-b', outcome: 'stop', fixture_matches: true}]});
+  assert.match(view, /Script run<\/strong><span class="cmp-long">stopped · 2 events unmatched</);
+  assert.match(view, /All 2 recorded Meta runs stopped instead of repairing, as the script did\./);
+  assert.equal((view.match(/class="cmp-line stop"/g) || []).length, 3);
+});
+
+test('no recordings means no comparison', () => {
+  const app = harness();
+  assert.equal(compareState(app, {recs: []}), '');
 });

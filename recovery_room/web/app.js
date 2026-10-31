@@ -19,6 +19,8 @@ const state = {
   // Recorded model runs (read-only history). source is per case: 'script' (offline) or 'recorded'.
   // Recording IDs are kept apart from run IDs and never reach rehearse, SQL or download helpers.
   source: 'script', recordings: new Map(), recId: null, recording: null, recSeq: 0, stepFilter: 'all',
+  // recDetails: full recordings fetched for the run comparison, keyed by case and recording ID.
+  recDetails: new Map(),
 };
 const escape = (value) => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const text = (value) => escape(value);
@@ -744,6 +746,7 @@ function reconstructionView(pairs = null, {recorded = false, stopped = null} = {
   const untouched = writes.length - repeat.size - kept.size;
   const lostCount = marks.filter(m => m.type === 'connection_lost').length;
   const summary = stopped ? `The script stopped instead of guessing: ${stopped} source events have no commit record${gaps.length ? ', where the log has a gap' : ''}.`
+    : recorded && !pairs ? `This recording proposed no repair, so no writes are marked. ${writes.length} committed writes across ${lanes.length} ${lanes.length === 1 ? 'attempt' : 'attempts'}.`
     : pairs ? `${recorded ? 'This recording’s review cancels' : 'The proposal cancels'} ${repeat.size} repeated write${repeat.size === 1 ? '' : 's'} and keeps the first write of each source event. ${untouched} other write${untouched === 1 ? ' is' : 's are'} untouched.`
     : `${writes.length} committed writes across ${lanes.length} ${lanes.length === 1 ? 'attempt' : 'attempts'}${lostCount ? `, with ${lostCount === 1 ? 'a lost connection' : `${lostCount} lost connections`}` : ''}${gaps.length ? ' and a gap in the commit log' : ''}. The investigation decides which writes repeat.`;
   const described = `${summary} Use the arrow keys to move between writes${selectable ? ' and Enter to open one' : ''}.`;
@@ -752,7 +755,124 @@ function reconstructionView(pairs = null, {recorded = false, stopped = null} = {
       <svg class="recon-svg" data-count="${writes.length}" viewBox="0 0 ${n} ${height}" height="${height}" preserveAspectRatio="none" tabindex="0" role="group" aria-roledescription="timeline" aria-label="${escape(`Committed writes in commit order, ${lanes.length} lanes`)}" aria-describedby="recon-summary">${bands}${curves}${ticks}${lost}${ring}</svg></div>
     <div class="recon-legend" aria-hidden="true">${legend}${lostKey}</div>
     <p class="recon-summary" id="recon-summary">${text(summary)}<span class="sr-only"> ${text(described.slice(summary.length + 1))}</span></p>
-    <p class="sr-only" id="recon-live" aria-live="polite"></p></section>`;
+    <p class="sr-only" id="recon-live" aria-live="polite"></p>${runsCompare(model)}</section>`;
+}
+
+// Compared runs, under the timeline: one row per run on this case (the offline script, then each
+// recorded Meta run), marking the writes that run cancels in the same columns as the writes above.
+// The rows compare sets of order IDs taken only from the engine's plan and from each recording's own
+// verified review; nothing here decides what repeats. A recording whose inputs differ from this case,
+// or that has no verified review, is listed but never compared.
+function recDetail(caseId, id) {
+  const key = `${caseId}:${id}`;
+  if (!state.recDetails.has(key)) {
+    const entry = {status: 'loading', data: null};
+    state.recDetails.set(key, entry);
+    api(`/api/recordings/${encodeURIComponent(id)}`).then(data => { entry.status = 'ok'; entry.data = data; }, () => { entry.status = 'error'; })
+      .then(() => {
+        const pending = [...state.recDetails].some(([k, e]) => k.startsWith(`${caseId}:`) && e.status === 'loading');
+        if (!pending && state.incident?.id === caseId && state.tab === 'investigation') renderPanel();
+      });
+  }
+  return state.recDetails.get(key);
+}
+
+const CMP_PHRASE = {
+  same: (e) => [`cancels the same ${e} writes as the script`, `cancel the same ${e} writes as the script`],
+  differ: () => ['differs from the script', 'differ from the script'],
+  stop: (asScript) => [`stopped instead of repairing${asScript}`, `stopped instead of repairing${asScript}`],
+  incomplete: () => ['did not finish', 'did not finish'],
+  error: () => ['ended with an error', 'ended with an error'],
+  skipped: () => ['was not compared', 'were not compared'],
+  loading: () => ['is still loading', 'are still loading'],
+};
+
+function runsCompare(model) {
+  const list = recordedList();
+  if (list.status !== 'ok' || !list.list.length || !model?.writes?.length) return '';
+  const caseId = state.incident.id, recs = list.list;
+  const byOrder = new Map(model.writes.map(w => [w.order_id, w]));
+  const run = state.run?.incident_id === caseId ? state.run : null;
+  const engine = run?.plan ? new Set(run.plan.cancellations.map(a => a.order_id)) : null;
+  const rows = [{label: 'Script run', current: !recordedMode(), attrs: 'data-source="script"', set: engine, script: true,
+    line: engine ? '' : run?.status === 'stopped' ? 'stop' : '',
+    note: engine ? `cancels ${engine.size}` : run?.status === 'stopped' ? `stopped · ${run.missing_event_ids?.length ?? 0} events unmatched` : run ? statusOf(run)[0] : 'not investigated yet',
+    short: engine ? `× ${engine.size}` : run?.status === 'stopped' ? 'stopped' : run ? statusOf(run)[0] : 'not run'}];
+  const tally = {same: 0, differ: 0, repair: 0, stop: 0, incomplete: 0, error: 0, skipped: 0, loading: 0}, sizes = new Set();
+  recs.forEach((r, i) => {
+    const row = {label: `Meta run ${recs.length - i}`, current: recordedMode() && r.id === state.recId, attrs: `data-source="recorded" data-recording="${escape(r.id)}"`, set: null, line: ''};
+    rows.push(row);
+    row.short = 'not compared';
+    if (r.fixture_matches === false) { row.note = 'inputs differ · not compared'; tally.skipped++; return; }
+    if (r.outcome === 'stop') { Object.assign(row, {line: 'stop', note: 'stopped · no repair', short: 'stopped'}); tally.stop++; return; }
+    if (r.outcome === 'error') { Object.assign(row, {line: 'error', note: 'error · no repair', short: 'error'}); tally.error++; return; }
+    if (r.outcome === 'incomplete') { Object.assign(row, {line: 'error', note: 'did not finish', short: 'unfinished'}); tally.incomplete++; return; }
+    if (r.outcome !== 'repair') { row.note = `${recOutcome(r)[0]} · not compared`; tally.skipped++; return; }
+    const entry = recDetail(caseId, r.id), d = entry.data;
+    if (entry.status === 'loading') { Object.assign(row, {note: 'loading…', short: '…'}); tally.loading++; return; }
+    if (!d || !d.review || d.citations_enabled !== true || d.incident_id !== caseId || d.fixture_matches !== true) {
+      row.note = !d ? 'unavailable · not compared' : !d.review ? 'no verified review' : 'inputs differ · not compared'; tally.skipped++; return;
+    }
+    row.set = new Set(d.review.changes.map(c => c.before.id));
+    sizes.add(row.set.size);
+    const outside = [...row.set].filter(id => !byOrder.has(id)).length;
+    if (engine) {
+      const agree = [...row.set].filter(id => engine.has(id)).length, extra = row.set.size - agree, missed = engine.size - agree;
+      row.note = !extra && !missed ? `same ${row.set.size} as the script`
+        : [`${agree} of ${engine.size} match`, missed ? `misses ${missed}` : '', extra ? `${extra} not in the script` : ''].filter(Boolean).join(' · ');
+      row.short = !extra && !missed ? '= script' : 'differs';
+      tally[!extra && !missed ? 'same' : 'differ']++;
+    } else { Object.assign(row, {note: `cancels ${row.set.size}`, short: `× ${row.set.size}`}); tally.repair++; }
+    if (outside) row.note += ` · ${outside} outside the evidence`;
+  });
+
+  // One sentence that says what the rows show.
+  const asScript = run?.status === 'stopped' ? ', as the script did' : '';
+  const parts = [];
+  if (tally.same) parts.push([tally.same, ...CMP_PHRASE.same(engine.size)]);
+  if (tally.differ) parts.push([tally.differ, ...CMP_PHRASE.differ()]);
+  if (tally.repair) parts.push(sizes.size === 1
+    ? [tally.repair, `cancels ${[...sizes][0]} writes`, `cancel ${[...sizes][0]} writes each`]
+    : [tally.repair, 'proposes a repair', 'propose a repair']);
+  for (const key of ['stop', 'incomplete', 'error', 'skipped', 'loading']) if (tally[key]) parts.push([tally[key], ...CMP_PHRASE[key](asScript)]);
+  const total = recs.length;
+  let headline;
+  if (parts.length === 1 && parts[0][0] === total) headline = total === 1 ? `The recorded Meta run ${parts[0][1]}.` : `All ${total} recorded Meta runs ${parts[0][2]}.`;
+  else {
+    const phrases = parts.map(([k, one, many]) => `${k} ${k === 1 ? one : many}`);
+    headline = `${total} recorded Meta ${total === 1 ? 'run' : 'runs'}: ${phrases.length > 1 ? `${phrases.slice(0, -1).join(', ')} and ${phrases.at(-1)}` : phrases[0]}.`;
+  }
+  if (!run && tally.repair) headline += ' Investigate the incident to compare them with the script.';
+
+  const H = 24, n = Math.max(model.writes.length, 1);
+  let anyMissed = false, anyExtra = false;
+  const svgRows = rows.map((row, i) => {
+    const y = i * H, band = `<rect class="recon-band${i % 2 ? ' alt' : ''}${row.current ? ' current' : ''}" x="0" y="${y}" width="${n}" height="${H}"/>`;
+    if (!row.set) return `${band}<line class="cmp-line${row.line ? ` ${row.line}` : ''}" x1="0" x2="${n}" y1="${y + H / 2}" y2="${y + H / 2}"/>`;
+    const marks = model.writes.map(w => {
+      const mine = row.set.has(w.order_id), base = engine?.has(w.order_id);
+      if (mine) {
+        const extra = !row.script && engine && !base;
+        anyExtra = anyExtra || extra;
+        return `<rect class="cmp-mark${extra ? ' extra' : ''}" x="${w.x + 0.18}" y="${y + 5}" width="0.64" height="${H - 10}"><title>${text(`${w.order_id} · ${row.label} cancels it${row.script || !engine ? '' : base ? ' · so does the script' : ' · the script keeps it'}`)}</title></rect>`;
+      }
+      if (!row.script && engine && base) {
+        anyMissed = true;
+        return `<rect class="cmp-missed" x="${w.x + 0.22}" y="${y + 6}" width="0.56" height="${H - 12}"><title>${text(`${w.order_id} · the script cancels it · ${row.label} keeps it`)}</title></rect>`;
+      }
+      return '';
+    }).join('');
+    return band + marks;
+  }).join('');
+  const labels = rows.map(row => `<li><button class="compare-run${row.current ? ' current' : ''}" ${row.attrs} ${row.current ? 'aria-current="true"' : ''} title="${escape(`${row.label} · ${row.note}`)}"><strong>${text(row.label)}</strong><span class="cmp-long">${text(row.note)}</span><span class="cmp-short" aria-hidden="true">${text(row.short)}</span></button></li>`).join('');
+  const legend = `<span><i class="repeat"></i>Cancelled by that run</span>${anyMissed ? '<span><i class="missed"></i>Cancelled by the script, kept by that run</span>' : ''}${anyExtra ? '<span><i class="extra"></i>Not in the script’s plan</span>' : ''}<span><i class="line"></i>No repair</span>`;
+  return `<div class="recon-compare">
+    <div class="recon-head"><h4 id="compare-title">Compared runs</h4><span class="caption">Which writes each run cancels, in the columns above · from each recording’s verified review</span></div>
+    <div class="recon-body"><ol class="recon-lanes compare-lanes" aria-labelledby="compare-title">${labels}</ol>
+      <svg class="compare-svg" viewBox="0 0 ${n} ${rows.length * H}" height="${rows.length * H}" preserveAspectRatio="none" aria-hidden="true" focusable="false">${svgRows}</svg></div>
+    <div class="recon-legend" aria-hidden="true">${legend}</div>
+    <p class="recon-summary">${text(headline)}</p>
+  </div>`;
 }
 
 // Keyboard: one tab stop; arrows move between writes; Enter opens the order (same as clicking a tick).
@@ -825,6 +945,7 @@ async function refreshRecordings(caseId) {
   try {
     const list = await api(`/api/incidents/${encodeURIComponent(caseId)}/recordings`);
     state.recordings.set(caseId, {status: 'ok', list: Array.isArray(list) ? list : []});
+    for (const key of [...state.recDetails.keys()]) if (key.startsWith(`${caseId}:`)) state.recDetails.delete(key);
   } catch (error) {
     state.recordings.set(caseId, {status: 'error', list: previous?.list || [], error: error.message});
   }
@@ -840,6 +961,7 @@ async function loadRecording(id, {renderNow = true} = {}) {
   try {
     const detail = await api(`/api/recordings/${encodeURIComponent(id)}`);
     if (seq !== state.recSeq || state.incident?.id !== caseId) return;
+    state.recDetails.set(`${caseId}:${id}`, {status: 'ok', data: detail});
     transition(() => { if (seq === state.recSeq && state.incident?.id === caseId) { state.recording = detail; render(); } }, 'case');
   } catch (error) {
     if (seq !== state.recSeq || state.incident?.id !== caseId) return;
@@ -1048,7 +1170,7 @@ function recordedInvestigationView() {
     <div class="section-heading"><h2>${heading}</h2></div>
     <div class="callout ${tone === 'ok' ? 'success' : 'stop'}"><strong>Outcome</strong><br>${text(recordedConclusion(r, rejectedResults))}</div>
     ${compareView(r)}
-    ${recCitations(r) && r.review ? reconstructionView(r.review.changes.map(c => ({order_id: c.before.id, duplicate_of: c.duplicate_of})), {recorded: true}) : ''}
+    ${recCitations(r) ? reconstructionView(r.review ? r.review.changes.map(c => ({order_id: c.before.id, duplicate_of: c.duplicate_of})) : null, {recorded: true}) : ''}
     <div class="incident-facts run-numbers"><span><strong>${text(Number.isFinite(r.elapsed_seconds) ? `${Math.round(r.elapsed_seconds)} s` : '—')}</strong> elapsed, as reported</span><span><strong>${text(rejected)}</strong> rejected tool ${rejected === 1 ? 'result' : 'results'}</span><span><strong>${text(messages)}</strong> model ${messages === 1 ? 'message' : 'messages'}</span></div>
     <div class="folds">
       <details class="fold"><summary>Usage${usage.available ? text(` · ${fmtNum(usage.total_tokens)} tokens, as reported`) : ' · not recorded'}</summary><p class="small muted">${usage.available ? text(`Input ${fmtNum(usage.input_tokens)} (cached ${fmtNum(usage.cached_input_tokens)}) · output ${fmtNum(usage.output_tokens)}, which already includes ${fmtNum(usage.reasoning_tokens)} reasoning · ${fmtNum(usage.response_count)} responses with usage. No cost is shown.`) : 'This recording did not include usage totals.'}</p></details>
