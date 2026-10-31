@@ -623,7 +623,7 @@ function sourceRecords() {
 }
 
 function callsView(trace) {
-  return `<div class="row-head"><h3>Script trace</h3><span class="caption">${trace.length} local function calls, in order · not model reasoning or a replay of a model run</span></div>
+  return `<div class="row-head"><h3>Script trace</h3><span class="caption">${trace.length} local function calls, in order. Not model reasoning, and not a replay of a model run.</span></div>
     <ol class="calls">${trace.map((step,i)=>{
       const a = step.arguments || {};
       const arg = a.name ? `${a.name}${a.start_line ? ` · from L${a.start_line}` : ''}` : step.tool === 'query_database' ? (a.sql || '') : 'no arguments';
@@ -876,7 +876,7 @@ function runsCompare(model) {
   }
   if (!run && tally.repair) headline += ' Investigate the incident to compare them with the script.';
 
-  const H = 24, n = Math.max(model.writes.length, 1);
+  const H = RECON_LANE, n = Math.max(model.writes.length, 1);
   let anyMissed = false, anyExtra = false, anyPlanned = false;
   const svgRows = rows.map((row, i) => {
     const y = i * H, band = `<rect class="recon-band${i % 2 ? ' alt' : ''}${row.current ? ' current' : ''}" x="0" y="${y}" width="${n}" height="${H}"/>`;
@@ -900,7 +900,7 @@ function runsCompare(model) {
   const labels = rows.map(row => `<li><button class="compare-run${row.current ? ' current' : ''}" ${row.attrs} ${row.current ? 'aria-current="true"' : ''} title="${escape(`${row.label} · ${row.note}`)}"><strong>${text(row.label)}</strong><span class="cmp-long">${text(row.note)}</span><span class="cmp-short" aria-hidden="true">${text(row.short)}</span></button></li>`).join('');
   const legend = `<span><i class="repeat"></i>Cancelled by that run</span>${anyPlanned ? '<span><i class="planned"></i>Script’s target · not rehearsed yet</span>' : ''}${anyMissed ? `<span><i class="missed"></i>${rehearsed ? 'Cancelled' : 'Targeted'} by the script, kept by that run</span>` : ''}${anyExtra ? '<span><i class="extra"></i>Not in the script’s plan</span>' : ''}<span><i class="line"></i>No repair</span>`;
   return `<div class="recon-compare">
-    <div class="recon-head"><h4 id="compare-title">Compared runs</h4><span class="caption">In the columns above · recordings from their verified reviews, the script from its ${rehearsed ? 'rehearsal' : 'proposal'}</span></div>
+    <div class="recon-head"><h4 id="compare-title">Compared runs</h4><span class="caption">Lined up with the writes above. Recordings show their verified reviews; the script shows its ${rehearsed ? 'rehearsal' : 'proposal'}.</span></div>
     <div class="recon-body"><ol class="recon-lanes compare-lanes" aria-labelledby="compare-title">${labels}</ol>
       <svg class="compare-svg" viewBox="0 0 ${n} ${rows.length * H}" height="${rows.length * H}" preserveAspectRatio="none" aria-hidden="true" focusable="false">${svgRows}</svg></div>
     <div class="recon-legend" aria-hidden="true">${legend}</div>
@@ -934,8 +934,9 @@ function investigationView() {
   const {run} = state;
   if (!run) return `${incidentOverview()}${reconstructionView()}${sourceRecords()}`;
   const stopped = run.status === 'stopped';
-  const result = `<div class="section-heading"><h2>${stopped?'Evidence needed to continue':run.plan?'Proposed fix':'Investigation result'}</h2></div>
-    ${stopped || !run.plan ? `<div class="callout ${stopped?'stop':''}"><strong>${stopped?'No repair exported.':'What the script found'}</strong><br>${text(run.summary)}</div>` : ''}`;
+  // With a plan, the timeline below states the finding; only a stop or a run without a plan needs a heading.
+  const result = stopped || !run.plan ? `<div class="section-heading"><h2>${stopped ? 'Evidence needed to continue' : 'Investigation result'}</h2></div>
+    <div class="callout ${stopped?'stop':''}"><strong>${stopped?'No repair exported.':'What the script found'}</strong><br>${text(run.summary)}</div>` : '';
   const plan = run.plan ? `<div class="row-head"><h3>Proposed cancellations</h3>${badge(`${run.plan.cancellations.length} targets`)}</div>
     <p class="small muted">Keep the first recorded write for each source event. Each target cites both committed writes; select a row to inspect them.${run.status==='proposed'?' Next: rehearse on a disposable copy.':''}</p>${planTable(run.plan)}` : '';
   const stop = stopped ? `<h3>Next useful step</h3><p class="small">Recover the committed-write logs for the missing source events, then investigate again. The source has not been changed.</p>
@@ -1206,10 +1207,10 @@ function recordedInvestigationView() {
     ${recCitations(r) ? reconstructionView(r.review ? r.review.changes.map(c => ({order_id: c.before.id, duplicate_of: c.duplicate_of})) : null, {recorded: true}) : ''}
     <div class="incident-facts run-numbers"><span><strong>${text(Number.isFinite(r.elapsed_seconds) ? `${Math.round(r.elapsed_seconds)} s` : '—')}</strong> elapsed, as reported</span><span><strong>${text(rejected)}</strong> rejected tool ${rejected === 1 ? 'result' : 'results'}</span><span><strong>${text(messages)}</strong> model ${messages === 1 ? 'message' : 'messages'}</span></div>
     <div class="folds">
-      <details class="fold"><summary>Usage${usage.available ? text(` · ${fmtNum(usage.total_tokens)} tokens, as reported`) : ' · not recorded'}</summary><p class="small muted">${usage.available ? text(`Input ${fmtNum(usage.input_tokens)} (cached ${fmtNum(usage.cached_input_tokens)}) · output ${fmtNum(usage.output_tokens)}, which already includes ${fmtNum(usage.reasoning_tokens)} reasoning · ${fmtNum(usage.response_count)} responses with usage. No cost is shown.`) : 'This recording did not include usage totals.'}</p></details>
+      <details class="fold"><summary>${usage.available ? text(`Usage: ${fmtNum(usage.total_tokens)} tokens, as reported`) : 'Usage not recorded'}</summary><p class="small muted">${usage.available ? text(`Input ${fmtNum(usage.input_tokens)} (cached ${fmtNum(usage.cached_input_tokens)}) · output ${fmtNum(usage.output_tokens)}, which already includes ${fmtNum(usage.reasoning_tokens)} reasoning · ${fmtNum(usage.response_count)} responses with usage. No cost is shown.`) : 'This recording did not include usage totals.'}</p></details>
       <details class="fold model-summary"><summary>Model’s final summary · verbatim</summary><p class="tl-text">${text(r.final?.summary || r.summary || 'No summary recorded.')}</p></details>
     </div>
-    <h3 class="tl-title">Recorded steps <span class="caption">in order · nothing here runs again</span></h3>
+    <h3 class="tl-title">Recorded steps <span class="caption">In order. Nothing here runs again.</span></h3>
     <div class="tl-tools"><div class="segmented" role="group" aria-label="Filter steps">${filters.map(([key, name]) => `<button data-step-filter="${key}" aria-pressed="${state.stepFilter === key}">${text(name)}</button>`).join('')}</div><button class="link small" data-expand-steps>Expand all</button></div>
     <ol class="timeline">${timelineItems(r)}</ol>`;
 }
@@ -1479,9 +1480,9 @@ function diffView(review) {
       <label class="search">${icon('search')}<span class="sr-only">Search changed records</span><input id="change-search" type="search" placeholder="Search order, customer or product" value="${escape(state.changeQuery)}" autocomplete="off" spellcheck="false"><kbd aria-hidden="true">/</kbd></label>
       <label class="filter">Product <select id="change-filter"><option value="">All (${review.changes.length})</option>${skus.map(sku=>`<option value="${escape(sku)}" ${sku===state.filter?'selected':''}>${text(sku)} (${review.changes.filter(c=>c.before.sku===sku).length})</option>`).join('')}</select></label>
     </div>
-    <p class="table-note">The original purchase stays. Only the retry is cancelled; stock is returned with a compensating entry.</p>
+    <p class="table-note">${uniformStatus(review.changes) ? 'Each order below goes from active to cancelled on the copy. ' : ''}The original purchase stays. Only the retry is cancelled; stock is returned with a compensating entry.</p>
     <div id="change-table">${changesTable(review.changes)}</div>
-    <div class="group-head"><h4>Stock reconciliation</h4><span class="caption">Before → after rehearsal · bars start at zero</span></div>
+    <div class="group-head"><h4>Stock reconciliation</h4><span class="caption">Before and after the rehearsal. Bars start at zero.</span></div>
     ${table(['','Product','Stock on hand','Change','From cancellations'],review.stock.map(p=>{
       const delta = p.after - p.before, entry = byProduct.get(p.sku);
       return [`<span class="sym ${delta?'mod':'same'}">${delta?'~':'='}</span>`,`${text(p.name)} <span class="mono faint">${text(p.sku)}</span>`,stockVisual(p, Math.max(0, ...review.stock.flatMap(row => [row.before, row.after]))),`<span class="${delta>0?'positive':delta<0?'cancelled':''} num">${delta>0?'+':''}${text(delta)}</span>`,entry?`${entry.orders} orders · +${entry.units} units`:'—'];
@@ -1492,14 +1493,20 @@ function diffView(review) {
   </section>`;
 }
 
+// Every cancellation normally goes from active to cancelled; then that fact is one sentence above the table
+// instead of a column that repeats on every row. Any other change keeps the column.
+const uniformStatus = (changes) => changes.every(c => c.before.status === 'active' && c.after.status === 'cancelled');
+
 function changesTable(changes) {
-  const q = state.changeQuery.trim().toLowerCase();
+  const q = state.changeQuery.trim().toLowerCase(), uniform = uniformStatus(changes);
   const rows = changes.filter(c => (!state.filter || c.before.sku === state.filter) &&
     (!q || [c.before.id, c.before.customer, c.before.sku, c.duplicate_of].some(v => String(v).toLowerCase().includes(q))));
   if (!rows.length) return `<div class="log-empty">No changed records match.</div>`;
-  return table(['Purchase','Cancelled order','Status on copy','Keeps original','Evidence'],rows.map(c=>{
+  return table(['Purchase','Cancelled order',...(uniform ? [] : ['Status on copy']),'Keeps original','Evidence'],rows.map(c=>{
     const changed = Object.keys(c.before).filter(k => c.before[k] !== c.after[k]);
-    return [purchaseCell(c.before),`<span class="sym mod" title="${escape(changed.join(', '))} changed">~</span> ${idRef(c.before.id,'cancelled',q)}`,`<span class="before">${text(c.before.status)}</span> → <span class="after">${text(c.after.status)}</span>`,idRef(c.duplicate_of,'',q),citations({order_id:c.before.id,evidence_refs:c.evidence_refs||[],recorded_evidence_refs_text:c.recorded_evidence_refs_text})];
+    return [purchaseCell(c.before),`<span class="sym mod" title="${escape(changed.join(', '))} changed">~</span> ${idRef(c.before.id,'cancelled',q)}`,
+      ...(uniform ? [] : [`<span class="before">${text(c.before.status)}</span> → <span class="after">${text(c.after.status)}</span>`]),
+      idRef(c.duplicate_of,'',q),citations({order_id:c.before.id,evidence_refs:c.evidence_refs||[],recorded_evidence_refs_text:c.recorded_evidence_refs_text})];
   }),rows.map(c=>selAttrs(`order:${c.before.id}`)));
 }
 
@@ -1644,10 +1651,10 @@ function orderContext(id, focusRef) {
   const findIn = (oid) => review?.changes.find(c => c.before.id === oid)?.before || review?.preserved_orders.find(o => o.id === oid);
   const record = change?.before || (recorded ? findIn(id) : ordersById().get(id) || findIn(id));
   if (!record) return `<p class="muted">This record is not in the selected ${recorded ? 'recording' : 'incident'}.</p>`;
-  const when = recorded ? 'Recorded at rehearsal · not a current export check' : 'Engine before/after at rehearsal';
+  const when = recorded ? 'Recorded at rehearsal, not a current export check' : 'Engine before/after at rehearsal';
   let html = `<h2 class="mono ctx-title">${text(id)}</h2><p class="small muted">${purchase(record)}</p><button class="link small" data-copy-value="${escape(id)}" data-copy-what="Order ID">${icon('copy')}<span>Copy order ID</span></button>`;
   if (change) html += `<div class="ctx-status">${badge(recorded ? 'Changed on the recorded copy' : 'Changed on the copy', true)}<span class="caption">${when}</span></div>${fieldTable(change.before, change.after)}`;
-  else if (planned) html += `<div class="ctx-status">${badge('Proposed cancellation')}<span class="caption">Not rehearsed yet · current source values</span></div>${fieldTable(record)}`;
+  else if (planned) html += `<div class="ctx-status">${badge('Proposed cancellation')}<span class="caption">Not rehearsed yet. Current source values.</span></div>${fieldTable(record)}`;
   else if (review) html += `<div class="ctx-status">${badge('Unchanged at rehearsal', 'ok')}${laterIds(review).has(id)?badge('Later purchase'):''}</div>${fieldTable(record)}`;
   else html += `<div class="ctx-status">${badge('Source record')}</div>${fieldTable(record)}`;
   const link = change ? {refs: change.evidence_refs || [], text: change.recorded_evidence_refs_text, keep: change.duplicate_of} : planned ? {refs: planned.evidence_refs, keep: planned.duplicate_of} : null;
@@ -1668,7 +1675,7 @@ function productContext(sku) {
   if (!row) return `<p class="muted">No rehearsal data for this product.</p>`;
   const changes = review.changes.filter(c => c.before.sku === sku);
   return `<h2 class="ctx-title">${text(row.name)} <span class="mono faint">${text(sku)}</span></h2>
-    <div class="ctx-status">${badge(row.after !== row.before ? 'Changed on the copy' : 'Unchanged', row.after !== row.before)}<span class="caption">${source.recorded ? 'Recorded at rehearsal · not a current export check' : 'Engine before/after at rehearsal'}</span></div>
+    <div class="ctx-status">${badge(row.after !== row.before ? 'Changed on the copy' : 'Unchanged', row.after !== row.before)}<span class="caption">${source.recorded ? 'Recorded at rehearsal, not a current export check' : 'Engine before/after at rehearsal'}</span></div>
     ${fieldTable({sku, name: row.name, on_hand: row.before}, {sku, name: row.name, on_hand: row.after})}
     ${changes.length?`<h3>From ${changes.length} cancellations</h3><div class="id-grid">${changes.map(c=>`<button class="id-chip mono" data-key="order:${escape(c.before.id)}">${text(c.before.id)} · +${text(c.before.quantity)}</button>`).join('')}</div>`:''}`;
 }

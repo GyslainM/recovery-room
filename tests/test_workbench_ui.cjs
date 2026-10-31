@@ -590,7 +590,7 @@ test('a proposal shows targets; only a rehearsal shows cancellations on the copy
   assert.equal((view.match(/class="cmp-mark planned"/g) || []).length, 2);
   assert.match(view, /Script’s target · not rehearsed yet/);
   assert.match(view, /The recorded Meta run cancels the same 2 writes the script targets\./);
-  assert.match(view, /the script from its proposal/);
+  assert.match(view, /the script shows its proposal/);
 });
 
 test('quoted CSV receipts keep their writes, commas and escaped quotes, with original line references', () => {
