@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "mode": "observed_live_meta_evaluation",
+  "scope": "Authored synthetic receipt-inbox format experiments, not blind holdouts. The adapted deterministic parser can solve the supported case. A frozen parser's unsupported-format stop is not proof of AI necessity.",
+  "configuration": {
+    "model": "muse-spark-1.3",
+    "max_rounds": 20,
+    "max_calls": 40,
+    "max_completion_tokens": 16384,
+    "prompt_version": "budget-aware-v1"
+  },
+  "contract": {
+    "prompt_sha256": "662ae310a5d387228df40cb9a6f451f41992cbe47941383586c65c21a2d3e650",
+    "tools_sha256": "7646c01db964cc2a5cb32aad17be6d12aa644ea48d8d84682d6458513a468ce2"
+  },
+  "planned_attempts": 3,
+  "unattempted": [],
+  "judgments": {
+    "correct_repair": 2,
+    "justified_stop": 1
+  },
+  "passed": true,
+  "usage": {
+    "prompt_tokens": 746384,
+    "completion_tokens": 59559,
+    "total_tokens": 805943
+  },
+  "attempts": [
+    {
+      "id": "inbox-evidence-101",
+      "incident_id": "inbox-evidence",
+      "seed": 101,
+      "outcome": "repair",
+      "tool_calls": 18,
+      "model_responses": 19,
+      "elapsed_seconds": 48.245,
+      "assessment": {
+        "judgment": "correct_repair",
+        "source_unchanged": true,
+        "cancelled_duplicates": 20,
+        "later_orders_preserved": 10,
+        "later_orders_harmed": [],
+        "valid_orders_harmed": [],
+        "operational_checks_passed": 10,
+        "operational_checks_total": 10,
+        "stop_observation": null
+      },
+      "raw_artifact_sha256": {
+        "result.json": "5e4c4e13c0c487dbe36a779fb4bad121ec0a760141e670515e21a60c437e5aa0",
+        "transcript.json": "b6170f7a94a2bdee8eebbc191d52ba77cb1a7ba06a8245f700bedd1aa6ef5744",
+        "responses.json": "a1a26316341a8426e9f2351d948cf69a72a0dcd42953d2ec476a3c4abb0d7170"
+      }
+    },
+    {
+      "id": "inbox-evidence-103",
+      "incident_id": "inbox-evidence",
+      "seed": 103,
+      "outcome": "repair",
+      "tool_calls": 17,
+      "model_responses": 18,
+      "elapsed_seconds": 62.973,
+      "assessment": {
+        "judgment": "correct_repair",
+        "source_unchanged": true,
+        "cancelled_duplicates": 20,
+        "later_orders_preserved": 10,
+        "later_orders_harmed": [],
+        "valid_orders_harmed": [],
+        "operational_checks_passed": 10,
+        "operational_checks_total": 10,
+        "stop_observation": null
+      },
+      "raw_artifact_sha256": {
+        "result.json": "f114beb982c69c464069bc794203c0ff14ba33576ca3f821d0a79a29dd3d82bd",
+        "transcript.json": "16d647d24003538ffb903472c583acf0c43559f52633b41811b831ac26c8a0d6",
+        "responses.json": "48a29bd2fb68faf7348d2d75bbb569fe2868d4d0d5369482c424bb0e9e80edfc"
+      }
+    },
+    {
+      "id": "inbox-ambiguous-107",
+      "incident_id": "inbox-ambiguous",
+      "seed": 107,
+      "outcome": "stop",
+      "tool_calls": 16,
+      "model_responses": 17,
+      "elapsed_seconds": 89.812,
+      "assessment": {
+        "judgment": "justified_stop",
+        "source_unchanged": true,
+        "cancelled_duplicates": 0,
+        "later_orders_preserved": 10,
+        "later_orders_harmed": [],
+        "valid_orders_harmed": [],
+        "operational_checks_passed": 0,
+        "operational_checks_total": 0,
+        "stop_observation": {
+          "missing": [
+            "evt_9eab3f19711e"
+          ],
+          "complete_relevant_reads": true,
+          "summary_names_each_missing_event": true,
+          "supported": true
+        }
+      },
+      "raw_artifact_sha256": {
+        "result.json": "eaca7e770fbc7991c1268860e724151b6efa327aa1906c644b82c763d1ac84f4",
+        "transcript.json": "f94f2afd7fb8b8e60f7a31b71b3bd75d6ab23b467da3d1b02cd5d084b22859d2",
+        "responses.json": "6e047d183105e34a217a22b0c0a7709716557a3bcd0c11ad4f30b1f5fde3e576"
+      }
+    }
+  ]
+}

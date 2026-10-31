@@ -25,6 +25,13 @@ It has no live-model, mutation or export capability. Frontend integration and a
 tested deployment package are required before publishing; the local workbench
 server remains loopback-only.
 
+The [October 31 locked batch](docs/EVIDENCE_STORY_RESULTS.md) is now complete:
+two independently verified repairs and one justified stop on the new inbox
+format. The adapted script achieved the same outcomes. A committed
+[read-only dataset](examples/public-demo/demo-data.json) retains all 16 model
+attempts, including earlier errors/incomplete results, for Claude's static UI
+integration. No additional API calls are needed to view that dataset.
+
 ## Start here
 
 Python 3.11 or newer. No third-party runtime dependencies.
