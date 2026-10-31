@@ -21,7 +21,7 @@ function harness(handler) {
     setTimeout, clearTimeout, URL, renderCalls: 0,
   };
   vm.createContext(context);
-  vm.runInContext(source + '\nrender = () => { globalThis.renderCalls++; };\nrenderPanel = () => {};\nglobalThis.subject = {state, download, reviewView, exportStatus, recheckExport, act, changesView, checksTab, sqlView, modeInfo, repairFlow, stockVisual, transition, packageView, lineContext, evidenceWrites, reconstructionView, runsCompare, checkContext, checksTab};', context);
+  vm.runInContext(source + '\nrender = () => { globalThis.renderCalls++; };\nrenderPanel = () => {};\nglobalThis.subject = {state, download, reviewView, exportStatus, recheckExport, act, changesView, checksTab, sqlView, modeInfo, repairFlow, stockVisual, transition, packageView, lineContext, evidenceWrites, reconstructionView, runsCompare, checkContext, checksTab, demoDefault, validDemo, guardrailMoment, guardrailView, timelineItems, displayedSteps, evaluationData, evaluationView, renderActions};', context);
   return {context, nodes, ...context.subject};
 }
 
@@ -105,7 +105,7 @@ test('a blocked export does not claim that its source still matches the old snap
   assert.match(rendered, /Export unavailable/);
   assert.match(rendered, /Export is blocked/);
   assert.doesNotMatch(rendered, />Source matches the rehearsed snapshot</);
-  assert.match(rendered, /rehearsal snapshot/);
+  assert.match(rendered, /earlier test on a copy/);
 });
 
 test('a current review preserves observed counts and qualifies its earlier source check', () => {
@@ -115,7 +115,7 @@ test('a current review preserves observed counts and qualifies its earlier sourc
   assert.match(rendered, /80 → 60/);
   assert.match(rendered, /20<\/strong>/);
   assert.match(rendered, /10 \/ 10/);
-  assert.match(rendered, /Source unchanged at rehearsal/);
+  assert.match(rendered, /Source unchanged during the test/);
 });
 
 test('an unknown failed check remains visible rather than being dropped by grouping', () => {
@@ -132,7 +132,7 @@ test('a passing rehearsal does not claim current export availability', () => {
   const app = harness();
   const current = reviewRun('ready_for_review');
   app.state.run = current;
-  assert.equal(app.exportStatus(current).label, 'Passed at rehearsal · Recheck required');
+  assert.equal(app.exportStatus(current).label, 'Tested on a copy · check files before export');
   assert.notEqual(app.exportStatus(current).tone, 'ok');
   // Even a remembered successful check cannot override a server refusal.
   app.state.exportChecks.set(current.id, {ok: true, at: new Date(), artifact: 'report.json'});
@@ -149,13 +149,13 @@ test('explicit recheck waits for the guarded artifact route before showing a pas
   const pending = app.recheckExport();
   assert.equal(requests.length, 1);
   assert.equal(requests[0], '/api/runs/run-a/artifacts/report.json');
-  assert.equal(app.exportStatus(current).label, 'Rechecking current files…');
+  assert.equal(app.exportStatus(current).label, 'Checking files…');
   await app.recheckExport(); // duplicate clicks cannot create another request
   assert.equal(requests.length, 1);
   delayed.resolve({ok: true, text: async () => '{}'});
   await pending;
   assert.equal(app.state.rechecking.size, 0);
-  assert.equal(app.exportStatus(current).label, 'Freshness check passed');
+  assert.equal(app.exportStatus(current).label, 'Files unchanged since testing');
   assert.match(app.exportStatus(current).detail, /Every export is checked again/);
   assert.equal(app.state.run, current);
 });
@@ -203,7 +203,7 @@ test('a new rehearsal invalidates the previous freshness observation and cached 
   await app.act('rehearse');
   assert.equal(app.state.exportChecks.has(reviewed.id), false);
   assert.equal(app.state.sql.has(reviewed.id), false);
-  assert.equal(app.exportStatus(reviewed).label, 'Passed at rehearsal · Recheck required');
+  assert.equal(app.exportStatus(reviewed).label, 'Tested on a copy · check files before export');
 });
 
 test('a network failure during recheck cannot retain a previous green freshness label', async () => {
@@ -214,7 +214,7 @@ test('a network failure during recheck cannot retain a previous green freshness 
   await app.recheckExport();
   assert.equal(app.state.rechecking.size, 0);
   assert.equal(app.state.exportChecks.has(current.id), false);
-  assert.equal(app.exportStatus(current).label, 'Passed at rehearsal · Recheck required');
+  assert.equal(app.exportStatus(current).label, 'Tested on a copy · check files before export');
 });
 
 test('rechecks for different runs proceed independently instead of sharing one lock', async () => {
@@ -227,12 +227,12 @@ test('rechecks for different runs proceed independently instead of sharing one l
   app.state.incident = {id: 'case-b', title: 'Second case'}; app.state.run = second; app.state.runs.set('case-b', second);
   const b = app.recheckExport();
   assert.deepEqual(requests, ['/api/runs/run-a/artifacts/report.json', '/api/runs/run-b/artifacts/report.json']);
-  assert.equal(app.exportStatus(first).label, 'Rechecking current files…');
-  assert.equal(app.exportStatus(second).label, 'Rechecking current files…');
+  assert.equal(app.exportStatus(first).label, 'Checking files…');
+  assert.equal(app.exportStatus(second).label, 'Checking files…');
   for (const d of pending.values()) d.resolve({ok: true, text: async () => '{}'});
   await Promise.all([a, b]);
   assert.equal(app.state.rechecking.size, 0);
-  assert.equal(app.exportStatus(second).label, 'Freshness check passed');
+  assert.equal(app.exportStatus(second).label, 'Files unchanged since testing');
 });
 
 test('a run blocked before rehearsal points to a new investigation, never to rehearsing', () => {
@@ -241,7 +241,7 @@ test('a run blocked before rehearsal points to a new investigation, never to reh
     summary: 'The source changed since investigation. Start a new investigation and rehearsal.'};
   for (const view of [app.changesView, app.checksTab, app.sqlView]) {
     const rendered = view();
-    assert.match(rendered, /Rehearsal refused/);
+    assert.match(rendered, /Test on a copy refused/);
     assert.match(rendered, /The source changed since investigation/);
     assert.match(rendered, /new offline investigation/);
     assert.doesNotMatch(rendered, /Rehearse the proposal/);
@@ -282,9 +282,9 @@ test('a recorded outcome cannot imply a currently exportable package', () => {
   const app = harness();
   const rendered = app.repairFlow(reviewRun('ready_for_review').review,
     {recorded: true, run: reviewRun('ready_for_review')});
-  assert.match(rendered, /at recorded rehearsal/);
+  assert.match(rendered, /in the recorded test/);
   assert.match(rendered, /Read-only recording · no downloads/);
-  assert.doesNotMatch(rendered, /Package for human review|freshness checked on download/);
+  assert.doesNotMatch(rendered, /For human review|refused if files changed since testing/);
 });
 
 test('stock marks share a zero baseline and show the direction of observed changes', () => {
@@ -354,7 +354,7 @@ test('the repair package describes its files from the run and shows the pinned f
   assert.match(card, />f00d97029ad3</);
   assert.match(card, />dfab8cd5b0dd</);
   assert.match(card, /title="f00d97029ad379dc/);
-  assert.match(card, /Passed at rehearsal · Recheck required/);
+  assert.match(card, /Tested on a copy · check files before export/);
   assert.match(card, /data-recheck-export/);
   assert.doesNotMatch(card, /\bstyle=/);
 });
@@ -375,7 +375,7 @@ test('a refused or failed package offers no downloads and keeps the server reaso
   const unavailable = app.packageView(failed);
   assert.doesNotMatch(unavailable, /data-download|data-recheck-export/);
   assert.match(unavailable, /Unavailable/);
-  assert.match(unavailable, /Operational checks failed at rehearsal/);
+  assert.match(unavailable, /Checks failed on the copy/);
 });
 
 test('missing fingerprints are omitted rather than shown as placeholders', () => {
@@ -384,7 +384,7 @@ test('missing fingerprints are omitted rather than shown as placeholders', () =>
   delete current.source_fingerprint;
   app.state.run = current;
   const card = app.packageView(current);
-  assert.doesNotMatch(card, /Pinned at investigation/);
+  assert.doesNotMatch(card, /File hashes from the investigation/);
   assert.match(card, /data-recheck-export/);
 });
 
@@ -458,7 +458,7 @@ test('the timeline links repeats only from the given pairs and never invents one
   assert.equal((linked.match(/class="recon-tick repeat"/g) || []).length, 1);
   assert.equal((linked.match(/class="recon-tick kept"/g) || []).length, 1);
   assert.equal((linked.match(/class="recon-arc"/g) || []).length, 1); // the pair naming an unknown order is skipped
-  assert.match(linked, /The proposal would cancel 1 repeated write and keep the first write of each source event\. 2 other writes would stay untouched\. Nothing is cancelled until the rehearsal\./);
+  assert.match(linked, /The proposal would cancel 1 repeated write and keep the first write of each source event\. 2 other writes would stay untouched\. Nothing is cancelled until it is tested on a copy\./);
   assert.match(linked, /data-key="order:ord_c"/);
   assert.doesNotMatch(linked, /\bstyle=/);
 
@@ -500,7 +500,7 @@ test('compared runs mark each run against the script only from plans and verifie
     ],
     details: {'rec-same': recording('rec-same', ['ord_c', 'ord_d']), 'rec-diff': recording('rec-diff', ['ord_c', 'ord_b'])},
   });
-  assert.match(view, /Script run<\/strong><span class="cmp-long">cancels 2</);
+  assert.match(view, /Script baseline<\/strong><span class="cmp-long">cancels 2</);
   assert.match(view, /Meta run 4<\/strong><span class="cmp-long">same 2 as the script</);
   assert.match(view, /Meta run 3<\/strong><span class="cmp-long">1 of 2 match · misses 1 · 1 not in the script</);
   assert.match(view, /Meta run 2<\/strong><span class="cmp-long">stopped · no repair</);
@@ -529,7 +529,7 @@ test('without a script run the rows show each recording and invite an investigat
   const view = compareState(app, {engine: null, run: null,
     recs: [{id: 'rec-a', outcome: 'repair', fixture_matches: true}, {id: 'rec-b', outcome: 'repair', fixture_matches: true}],
     details: {'rec-a': recording('rec-a', ['ord_c', 'ord_d']), 'rec-b': recording('rec-b', ['ord_c', 'ord_d'])}});
-  assert.match(view, /Script run<\/strong><span class="cmp-long">not investigated yet</);
+  assert.match(view, /Script baseline<\/strong><span class="cmp-long">not investigated yet</);
   assert.doesNotMatch(view, /cmp-missed|cmp-mark extra/);
   assert.match(view, /All 2 recorded Meta runs cancel 2 writes each\. Investigate the incident to compare them with the script\./);
 });
@@ -537,7 +537,7 @@ test('without a script run the rows show each recording and invite an investigat
 test('stops on both sides read as agreement, not as missing repairs', () => {
   const app = harness();
   const view = compareState(app, {engine: null, run: 'stopped', recs: [{id: 'rec-a', outcome: 'stop', fixture_matches: true}, {id: 'rec-b', outcome: 'stop', fixture_matches: true}]});
-  assert.match(view, /Script run<\/strong><span class="cmp-long">stopped · 2 events unmatched</);
+  assert.match(view, /Script baseline<\/strong><span class="cmp-long">stopped · 2 events unmatched</);
   assert.match(view, /All 2 recorded Meta runs stopped instead of repairing, as the script did\./);
   assert.equal((view.match(/class="cmp-line stop"/g) || []).length, 3);
 });
@@ -586,7 +586,7 @@ test('a proposal shows targets; only a rehearsal shows cancellations on the copy
   // Compared runs keep the script's unrehearsed targets apart from recordings' verified cancellations.
   const view = compareState(harness(), {run: 'proposed', recs: [{id: 'rec-a', outcome: 'repair', fixture_matches: true}],
     details: {'rec-a': recording('rec-a', ['ord_c', 'ord_d'])}});
-  assert.match(view, /Script run<\/strong><span class="cmp-long">targets 2</);
+  assert.match(view, /Script baseline<\/strong><span class="cmp-long">targets 2</);
   assert.equal((view.match(/class="cmp-mark planned"/g) || []).length, 2);
   assert.match(view, /Script’s target · not rehearsed yet/);
   assert.match(view, /The recorded Meta run cancels the same 2 writes the script targets\./);
@@ -637,7 +637,7 @@ test('a check with diagnostics shows what the checker computed, not a derived vi
   assert.match(view, /<span class="num cancelled">\+2<\/span>/);
   assert.match(view, /1 listed product breaks the rule\. The repair added 2 compensating movements\./);
   assert.match(view, /data-key="product:KEYBOARD">Keyboard</);
-  assert.doesNotMatch(view, /Derived from the rehearsal review/);
+  assert.doesNotMatch(view, /Derived from the test’s before and after records/);
 });
 
 test('failed checks state their first exception in one line', () => {
@@ -662,7 +662,7 @@ test('a recording without diagnostics keeps the derived view, and mismatched inp
   app.state.incident = {id: 'case-a', products: [{sku: 'KEYBOARD', name: 'Keyboard'}]};
   app.state.run = diagnosedRun([{name: 'stock_matches_movement_ledger', passed: true, detail: 'Opening stock plus all recorded movements equals current stock.'}]);
   app.state.run.review.stock = [{sku: 'KEYBOARD', name: 'Keyboard', before: 162, after: 172}];
-  assert.match(app.checkContext('stock_matches_movement_ledger'), /Derived from the rehearsal review/);
+  assert.match(app.checkContext('stock_matches_movement_ledger'), /Derived from the test’s before and after records/);
 
   app.state.source = 'recorded';
   app.state.recording = {incident_id: 'case-a', citations_enabled: false, review: {...diagnosedRun([ledger(0)]).review}};
@@ -706,4 +706,110 @@ test('shortened related ID lists say so', () => {
   app.state.run = diagnosedRun([{name: 'source_events_applied_once', passed: false, detail: 'd', diagnostics: {rule: 'r', listing: 'exceptions', total: 1, truncated: false,
     items: [{entity: {event_id: 'evt-1'}, expected: 1, observed: 25, related: {active_order_ids: ids}, related_truncated: true}]}}]);
   assert.match(app.checkContext('source_events_applied_once'), /Lists shortened to their first 20 IDs/);
+});
+
+// ---------- Meta first: default run, replay, guardrail moment, evaluation ----------
+
+const steps = {
+  call: (id, name, args = {}) => ({kind: 'tool_call', call_id: id, name, arguments: args, has_result: true}),
+  ok: (id, result = {}) => ({kind: 'tool_result', call_id: id, result, error: false}),
+  bad: (id, message) => ({kind: 'tool_result', call_id: id, result: {error: message}, error: true}),
+  say: (words) => ({kind: 'assistant', text: words}),
+};
+const checksResult = {passed: true, checks: Array.from({length: 10}, (_, i) => ({name: `check_${i}`, passed: true}))};
+function recordedRun(list, extra = {}) {
+  return {id: 'rec-a', incident_id: 'case-a', outcome: 'repair', fixture_matches: true, citations_enabled: true, steps: list,
+    provenance: {model: 'muse-spark-1.3'}, review: null, ...extra};
+}
+
+test('a case opens on its newest recorded Meta run with matching inputs, and a contract pick only if it is listed', () => {
+  const app = harness();
+  app.state.recordings.set('case-a', {status: 'ok', list: [
+    {id: 'rec-new-other', fixture_matches: false}, {id: 'rec-mid', fixture_matches: true}, {id: 'rec-old', fixture_matches: true}]});
+  assert.equal(app.demoDefault('case-a').id, 'rec-mid');
+  app.state.demo = app.validDemo({default_recording: {'case-a': 'rec-old'}});
+  assert.equal(app.demoDefault('case-a').id, 'rec-old');
+  app.state.demo = app.validDemo({default_recording: {'case-a': 'rec-new-other'}}); // inputs differ: not used
+  assert.equal(app.demoDefault('case-a').id, 'rec-mid');
+  app.state.demo = app.validDemo({default_recording: {'case-a': 'rec-unknown'}});
+  assert.equal(app.demoDefault('case-a').id, 'rec-mid');
+  assert.equal(app.demoDefault('case-none'), null);
+  assert.equal(app.validDemo('nonsense'), null);
+  assert.deepEqual(Array.from(Object.keys(app.validDemo({default_recording: {a: 1, b: 'x'}}).default_recording)), ['b']);
+});
+
+test('the guardrail moment is the recorded rejection, the verbatim message and the accepted retry', () => {
+  const app = harness();
+  const r = recordedRun([steps.call('c1', 'read_artifact'), steps.ok('c1'),
+    steps.call('c2', 'rehearse_repair', {plan: {}}), steps.bad('c2', 'An order cannot duplicate itself.'),
+    steps.say('That draft was invalid; fixing the linkage.'),
+    steps.call('c3', 'rehearse_repair', {plan: {}}), steps.bad('c3', 'Evidence reference is not a committed-write record: source_orders.json:L15'),
+    steps.call('c4', 'query_database'), steps.ok('c4'),
+    steps.call('c5', 'rehearse_repair', {plan: {}}), steps.ok('c5', checksResult)]);
+  const m = app.guardrailMoment(r);
+  assert.equal(m.bad.n, 2);
+  assert.equal(m.fixed.n, 6);
+  assert.equal(m.between.length, 2);
+  assert.equal(m.others, 1);
+  const view = app.guardrailView(r);
+  assert.match(view, /Step 2<\/span><div><strong>Proposed repair rejected by the local runtime<\/strong><blockquote class="g-quote">An order cannot duplicate itself\.<\/blockquote>/);
+  assert.match(view, /The model’s next message, verbatim<\/strong><p class="g-text">That draft was invalid; fixing the linkage\.<\/p>/);
+  assert.match(view, /Rejected again<\/strong><blockquote class="g-quote">Evidence reference is not a committed-write record: source_orders\.json:L15/);
+  assert.match(view, /Next proposed repair accepted<\/strong><p class="g-text">Tested on a copy: 10 of 10 checks passed\.<\/p>/);
+  assert.match(view, /data-replay-from="2"/);
+  assert.match(view, /with 1 other step in between/);
+});
+
+test('no correction means no guardrail card, and nothing is invented', () => {
+  const app = harness();
+  const unresolved = recordedRun([steps.call('c1', 'rehearse_repair'), steps.bad('c1', 'Rejected.'), steps.say('Stopping.')]);
+  assert.equal(app.guardrailMoment(unresolved), null);
+  assert.equal(app.guardrailView(unresolved), '');
+  assert.equal(app.guardrailView(recordedRun([steps.call('c1', 'read_artifact'), steps.ok('c1')])), '');
+});
+
+test('a replay reveals saved steps up to its cursor in recorded order, ignoring filters', () => {
+  const app = harness();
+  const r = recordedRun([steps.call('c1', 'read_artifact'), steps.ok('c1'), steps.say('Reading.'), steps.call('c2', 'rehearse_repair'), steps.bad('c2', 'No.')]);
+  assert.equal(app.displayedSteps(r).length, 3);
+  app.state.stepFilter = 'messages';
+  app.state.replay = {recId: 'rec-a', cursor: 2, playing: false};
+  const listed = app.timelineItems(r);
+  assert.equal((listed.match(/<li data-seq=/g) || []).length, 3);
+  assert.match(listed, /<li data-seq="1" class=/);
+  assert.match(listed, /<li data-seq="2" aria-current="step" class=/);
+  assert.match(listed, /<li data-seq="3" hidden class=/);
+  app.state.replay = {recId: 'another', cursor: 1, playing: false}; // a replay of another recording does not apply
+  assert.equal((app.timelineItems(r).match(/<li data-seq=/g) || []).length, 1);
+});
+
+test('How we evaluated counts every recorded outcome, keeps failures and states the limitation', () => {
+  const app = harness();
+  app.state.cases = [{id: 'case-a', title: 'Case A'}, {id: 'case-b', title: 'Case B'}];
+  app.state.recordings.set('case-a', {status: 'ok', list: [{id: 'r2', outcome: 'repair', fixture_matches: true, model: 'muse-spark-1.3'}, {id: 'r1', outcome: 'error', fixture_matches: true, model: 'muse-spark-1.3'}]});
+  app.state.recordings.set('case-b', {status: 'ok', list: [{id: 'r4', outcome: 'stop', fixture_matches: true}, {id: 'r3', outcome: 'incomplete', fixture_matches: false}]});
+  const e = app.evaluationData();
+  assert.deepEqual([e.total, e.repairs, e.stops, e.errors, e.incomplete, e.mismatched], [4, 1, 1, 1, 1, 1]);
+  const view = app.evaluationView();
+  assert.match(view, /<strong>4<\/strong> recorded runs on 2 cases/);
+  assert.match(view, /Run 1 · Error/);
+  assert.match(view, /Run 1 · Did not finish · inputs differ/);
+  assert.match(view, /The offline script solves all four of these cases/);
+  assert.match(view, /Failed runs stay in the count and in the list/);
+  assert.match(view, /1 recording was made on inputs that differ/);
+  assert.match(view, /Not run in this session/);
+});
+
+test('a recording offers its replay and the script baseline, never a test, SQL or download', () => {
+  const app = harness();
+  app.state.incident = {id: 'case-a'};
+  app.state.source = 'recorded';
+  app.state.recording = recordedRun([steps.say('Hello.')]);
+  app.state.run = {id: 'run-a', incident_id: 'case-a', status: 'ready_for_review', downloads: ['repair.sql']};
+  app.renderActions();
+  const html = app.nodes.get('#header-actions').innerHTML;
+  assert.match(html, /data-replay-start/);
+  assert.match(html, /Replay recorded steps/);
+  assert.match(html, /data-source="script"/);
+  assert.doesNotMatch(html, /data-download|data-action|data-recheck/);
 });
