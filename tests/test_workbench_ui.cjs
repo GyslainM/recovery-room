@@ -27,7 +27,7 @@ function harness(handler, options = {}) {
     setInterval: (fn) => { intervals.push(fn); return intervals.length; }, clearInterval: (id) => { cleared.push(id); }, intervals, cleared,
   };
   vm.createContext(context);
-  vm.runInContext(source + '\nrender = () => { globalThis.renderCalls++; };\nrenderPanel = () => {};\nglobalThis.subject = {graphColumns, gitSegments, state, download, reviewView, exportStatus, recheckExport, act, changesView, checksTab, sqlView, modeInfo, repairFlow, stockVisual, transition, packageView, lineContext, evidenceWrites, reconstructionView, runsCompare, checkContext, checksTab, demoDefault, staticContract, demoStartCase, guardrailMoment, guardrailView, timelineItems, displayedSteps, evaluationData, evaluationView, renderActions, replayControls, startReplay, playReplay, pauseReplay, nextReplay, sqlView, paletteCommands, loadSql, copySql, api, statusOf, stepsView, recCitations, recordedConclusion, recordedChangesView, recordedChecksView, startup, timerOn: () => replayTimer !== null};', context);
+  vm.runInContext(source + '\nrender = () => { globalThis.renderCalls++; };\nrenderPanel = () => {};\nglobalThis.subject = {gitSegments, state, download, reviewView, exportStatus, recheckExport, act, changesView, checksTab, sqlView, modeInfo, repairFlow, stockVisual, transition, packageView, lineContext, evidenceWrites, reconstructionView, runsCompare, checkContext, checksTab, demoDefault, staticContract, demoStartCase, guardrailMoment, guardrailView, timelineItems, displayedSteps, evaluationData, evaluationView, renderActions, replayControls, startReplay, playReplay, pauseReplay, nextReplay, sqlView, paletteCommands, loadSql, copySql, api, statusOf, stepsView, recCitations, recordedConclusion, recordedChangesView, recordedChecksView, startup, timerOn: () => replayTimer !== null};', context);
   return {context, nodes, ...context.subject};
 }
 
@@ -581,8 +581,13 @@ test('compared runs mark each run against the script only from plans and verifie
   assert.match(view, /Meta run 3<\/strong><span class="cmp-long">1 of 2 match · misses 1 · 1 not in the script</);
   assert.match(view, /Meta run 2<\/strong><span class="cmp-long">stopped · no repair</);
   assert.match(view, /Meta run 1<\/strong><span class="cmp-long">inputs differ · not compared</);
-  assert.equal((view.match(/class="cmp-mark extra"/g) || []).length, 1); // ord_b, which the script keeps
-  assert.equal((view.match(/class="cmp-missed"/g) || []).length, 1); // ord_d, which the differing run keeps
+  assert.equal((view.match(/class="cmp-plus"/g) || []).length, 1); // ord_b, which the script keeps
+  assert.equal((view.match(/class="cmp-minus"/g) || []).length, 1); // ord_d, which the differing run keeps
+  assert.match(view, /<li class="cmp-plus"><span aria-hidden="true">\+<\/span><span class="mono">#2<\/span><span class="mono">ord_b<\/span><span>Meta run 3 cancels it; the script keeps it<\/span><\/li>/);
+  assert.match(view, /<li class="cmp-minus"><span aria-hidden="true">−<\/span><span class="mono">#4<\/span><span class="mono">ord_d<\/span><span>the script cancels it; Meta run 3 keeps it<\/span><\/li>/);
+  assert.match(view, /<details class="cmp-diff"><summary>2 differences<\/summary>/);
+  assert.match(view, /class="cmp-row same"><button[^>]*>.*?<span class="cmp-blocks" aria-hidden="true">(<i class="g"><\/i>){5}<\/span>2 of 2 match/);
+  assert.match(view, /class="cmp-row differ"><button[^>]*>.*?(<i class="g"><\/i>){3}(<i class="a"><\/i>){2}<\/span>1 of 2 match/);
   assert.match(view, /4 recorded Meta runs: 1 cancels the same 2 writes as the script, 1 differs from the script, 1 stopped instead of repairing and 1 was not compared\./);
   assert.match(view, /data-recording="rec-other"/); // listed, so it can still be opened
   assert.doesNotMatch(view, /\bstyle=/);
@@ -595,8 +600,8 @@ test('a recording is not compared when its own record says the inputs differ', (
     details: {'rec-a': recording('rec-a', ['ord_c', 'ord_d'], {citations_enabled: false})},
   });
   assert.match(view, /Meta run 1<\/strong><span class="cmp-long">inputs differ · not compared</);
-  // Only the script's own two marks are drawn.
-  assert.equal((view.match(/class="cmp-mark"/g) || []).length, 2);
+  // Nothing is compared, so there is no diffstat and no difference list.
+  assert.doesNotMatch(view, /cmp-blocks|cmp-plus|cmp-minus/);
   assert.match(view, /The recorded Meta run was not compared\./);
 });
 
@@ -606,7 +611,7 @@ test('without a script run the rows show each recording and invite an investigat
     recs: [{id: 'rec-a', outcome: 'repair', fixture_matches: true}, {id: 'rec-b', outcome: 'repair', fixture_matches: true}],
     details: {'rec-a': recording('rec-a', ['ord_c', 'ord_d']), 'rec-b': recording('rec-b', ['ord_c', 'ord_d'])}});
   assert.match(view, /Script baseline<\/strong><span class="cmp-long">not investigated yet</);
-  assert.doesNotMatch(view, /cmp-missed|cmp-mark extra/);
+  assert.doesNotMatch(view, /cmp-plus|cmp-minus|cmp-blocks/);
   assert.match(view, /All 2 recorded Meta runs cancel 2 writes each\. Investigate the incident to compare them with the script\./);
 });
 
@@ -615,7 +620,9 @@ test('stops on both sides read as agreement, not as missing repairs', () => {
   const view = compareState(app, {engine: null, run: 'stopped', recs: [{id: 'rec-a', outcome: 'stop', fixture_matches: true}, {id: 'rec-b', outcome: 'stop', fixture_matches: true}]});
   assert.match(view, /Script baseline<\/strong><span class="cmp-long">stopped · 2 events unmatched</);
   assert.match(view, /All 2 recorded Meta runs stopped instead of repairing, as the script did\./);
-  assert.equal((view.match(/class="cmp-line stop"/g) || []).length, 3);
+  assert.equal((view.match(/class="cmp-row [^"]*\bstop\b/g) || []).length, 3);
+  app.state.run.missing_event_ids = ['evt-1']; // one unmatched event is singular
+  assert.match(app.runsCompare(app.evidenceWrites()), /Script baseline<\/strong><span class="cmp-long">stopped · 1 event unmatched</);
 });
 
 test('no recordings means no comparison', () => {
@@ -663,8 +670,7 @@ test('a proposal shows targets; only a rehearsal shows cancellations on the copy
   const view = compareState(harness(), {run: 'proposed', recs: [{id: 'rec-a', outcome: 'repair', fixture_matches: true}],
     details: {'rec-a': recording('rec-a', ['ord_c', 'ord_d'])}});
   assert.match(view, /Script baseline<\/strong><span class="cmp-long">targets 2</);
-  assert.equal((view.match(/class="cmp-mark planned"/g) || []).length, 2);
-  assert.match(view, /Script’s target · not rehearsed yet/);
+  assert.match(view, /Script baseline<\/strong><span class="cmp-long">targets 2<\/span><span class="cmp-sub">not tested on a copy yet<\/span>/);
   assert.match(view, /The recorded Meta run cancels the same 2 writes the script targets\./);
   assert.match(view, /the script shows its proposal/);
 });
@@ -1347,15 +1353,16 @@ test('after a test on a copy, a copy branch forks from the latest state with the
   assert.match(rec, /<span class="muted">Opened read-only<\/span>/); // no source check recorded: no claim it stayed unchanged
 });
 
-test('compared runs keep one column per source event', () => {
+test('compared runs read as one line per run, and open that run', () => {
   const app = harness();
+  app.state.source = 'recorded'; app.state.recId = 'rec-a';
   const view = compareState(app, {details: {'rec-a': recording('rec-a', ['ord_c', 'ord_d'])}, recs: [{id: 'rec-a', outcome: 'repair', fixture_matches: true}]});
-  const model = app.evidenceWrites(), cols = app.graphColumns(model);
-  const xs = new Set(model.writes.map(w => cols.cx(w.col)));
-  const marks = [...view.matchAll(/class="cmp-mark[^"]*" x="([\d.]+)" y="[\d.]+" width="6"/g)].map(m => Number(m[1]) + 3);
-  assert.ok(marks.length >= 2);
-  assert.ok(marks.every(x => xs.has(x)), `${marks} within ${[...xs]}`);
-  assert.match(view, /One column per source event, in commit order\./);
+  assert.match(view, /<p class="cmp-headline">The recorded Meta run cancels the same 2 writes as the script\.<\/p>/);
+  assert.match(view, /<li class="cmp-row script"><button class="cmp-open" data-source="script"/);
+  assert.match(view, /<li class="cmp-row same current"><button class="cmp-open" data-source="recorded" data-recording="rec-a" aria-current="true"/);
+  assert.match(view, /<span class="cmp-here">on screen<\/span>/);
+  assert.match(view, /Each run against the script\./);
+  assert.doesNotMatch(view, /<svg class="compare-svg"|recon-scroll|cmp-mark/); // the old strip is gone
 });
 
 test('in the published cases every repeat names the commit it repeats, and the latest state carries the tested counts', () => {

@@ -855,24 +855,6 @@ const reconLabel = (w, lane, role) => {
   return `Commit ${w.commitLabel} · ${ATTEMPT_LABEL[lane] || lane}${o ? ` · ${o.customer} ${o.sku} × ${o.quantity}` : ''} · ${w.order_id}${role ? ` · ${role}` : ''}`;
 };
 
-// The graph's columns: one per source event, in the order each event was first committed, so every write of
-// the same event lines up across the attempt lanes, like the same change on two branches. Columns come only
-// from the evidence's event IDs; which write repeats still comes only from the plan or review (pairs).
-// A write without an event ID, or a second write of an event in the same lane, gets a column of its own.
-const GRAPH_STEP = 11, GRAPH_PAD = 24;
-function graphColumns(model) {
-  const byEvent = new Map(), taken = new Set();
-  let count = 0;
-  for (const w of model.writes) {
-    const prior = w.event_id ? byEvent.get(w.event_id) : undefined;
-    w.col = prior !== undefined && !taken.has(`${prior}:${w.attempt}`) ? prior : count++;
-    if (w.event_id && prior === undefined) byEvent.set(w.event_id, w.col);
-    taken.add(`${w.col}:${w.attempt}`);
-  }
-  count = Math.max(count, 1);
-  return {count, width: GRAPH_PAD + count * GRAPH_STEP + GRAPH_STEP, cx: (col) => GRAPH_PAD + col * GRAPH_STEP + GRAPH_STEP / 2};
-}
-
 // What happened, as a git log of the evidence, oldest first. The orders database is main. Each attempt's
 // consecutive committed writes form a branch that forks off main and merges back; a lost connection ends
 // its branch. An attempt with no commit records is a branch with nothing in it. A gap in the commit log
@@ -1076,22 +1058,22 @@ function runsCompare(model) {
   const byOrder = new Map(model.writes.map(w => [w.order_id, w]));
   const run = state.run?.incident_id === caseId ? state.run : null;
   const engine = run?.plan ? new Set(run.plan.cancellations.map(a => a.order_id)) : null, rehearsed = !!run?.review;
-  const rows = [{label: 'Script baseline', current: !recordedMode(), attrs: 'data-source="script"', set: engine, script: true,
+  const rows = [{label: 'Script baseline', current: !recordedMode(), attrs: 'data-source="script"', set: engine, script: true, sub: engine && !rehearsed ? 'not tested on a copy yet' : '',
     line: engine ? '' : run?.status === 'stopped' ? 'stop' : '',
-    note: engine ? `${rehearsed ? 'cancels' : 'targets'} ${engine.size}` : run?.status === 'stopped' ? `stopped · ${run.missing_event_ids?.length ?? 0} events unmatched` : run ? statusOf(run)[0] : 'not investigated yet',
+    note: engine ? `${rehearsed ? 'cancels' : 'targets'} ${engine.size}` : run?.status === 'stopped' ? `stopped · ${plural(run.missing_event_ids?.length ?? 0, 'event')} unmatched` : run ? statusOf(run)[0] : 'not investigated yet',
     short: engine ? `× ${engine.size}` : run?.status === 'stopped' ? 'stopped' : run ? statusOf(run)[0] : 'not run'}];
   const tally = {same: 0, differ: 0, repair: 0, stop: 0, incomplete: 0, error: 0, skipped: 0, loading: 0}, sizes = new Set();
   recs.forEach((r, i) => {
-    const row = {label: `Meta run ${recs.length - i}`, current: recordedMode() && r.id === state.recId, attrs: `data-source="recorded" data-recording="${escape(r.id)}"`, set: null, line: ''};
+    const row = {label: `Meta run ${recs.length - i}`, current: recordedMode() && r.id === state.recId, attrs: `data-source="recorded" data-recording="${escape(r.id)}"`, set: null, line: '', kind: 'skipped'};
     rows.push(row);
     row.short = 'not compared';
     if (r.fixture_matches === false) { row.note = 'inputs differ · not compared'; tally.skipped++; return; }
-    if (r.outcome === 'stop') { Object.assign(row, {line: 'stop', note: 'stopped · no repair', short: 'stopped'}); tally.stop++; return; }
-    if (r.outcome === 'error') { Object.assign(row, {line: 'error', note: 'error · no repair', short: 'error'}); tally.error++; return; }
-    if (r.outcome === 'incomplete') { Object.assign(row, {line: 'error', note: 'did not finish', short: 'unfinished'}); tally.incomplete++; return; }
+    if (r.outcome === 'stop') { Object.assign(row, {line: 'stop', note: 'stopped · no repair', short: 'stopped', kind: 'stop'}); tally.stop++; return; }
+    if (r.outcome === 'error') { Object.assign(row, {line: 'error', note: 'error · no repair', short: 'error', kind: 'error'}); tally.error++; return; }
+    if (r.outcome === 'incomplete') { Object.assign(row, {line: 'error', note: 'did not finish', short: 'unfinished', kind: 'error'}); tally.incomplete++; return; }
     if (r.outcome !== 'repair') { row.note = `${recOutcome(r)[0]} · not compared`; tally.skipped++; return; }
     const entry = recDetail(caseId, r.id), d = entry.data;
-    if (entry.status === 'loading') { Object.assign(row, {note: 'loading…', short: '…'}); tally.loading++; return; }
+    if (entry.status === 'loading') { Object.assign(row, {note: 'loading…', short: '…', kind: 'loading'}); tally.loading++; return; }
     if (!d || !d.review || d.citations_enabled !== true || d.incident_id !== caseId || d.fixture_matches !== true) {
       row.note = !d ? 'unavailable · not compared' : !d.review ? 'no verified review' : 'inputs differ · not compared'; tally.skipped++; return;
     }
@@ -1103,8 +1085,9 @@ function runsCompare(model) {
       row.note = !extra && !missed ? `same ${row.set.size} as the script`
         : [`${agree} of ${engine.size} match`, missed ? `misses ${missed}` : '', extra ? `${extra} not in the script` : ''].filter(Boolean).join(' · ');
       row.short = !extra && !missed ? '= script' : 'differs';
+      Object.assign(row, {kind: !extra && !missed ? 'same' : 'differ', agree});
       tally[!extra && !missed ? 'same' : 'differ']++;
-    } else { Object.assign(row, {note: `cancels ${row.set.size}`, short: `× ${row.set.size}`}); tally.repair++; }
+    } else { Object.assign(row, {note: `cancels ${row.set.size}`, short: `× ${row.set.size}`, kind: 'repair'}); tally.repair++; }
     if (outside) row.note += ` · ${outside} outside the evidence`;
   });
 
@@ -1126,35 +1109,32 @@ function runsCompare(model) {
   }
   if (!run && tally.repair) headline += ' Investigate the incident to compare them with the script.';
 
-  const H = RECON_LANE, cols = graphColumns(model), n = cols.width;
-  let anyMissed = false, anyExtra = false, anyPlanned = false;
-  const svgRows = rows.map((row, i) => {
-    const y = i * H, band = `<rect class="recon-band${i % 2 ? ' alt' : ''}${row.current ? ' current' : ''}" x="0" y="${y}" width="${n}" height="${H}"/>`;
-    if (!row.set) return `${band}<line class="cmp-line${row.line ? ` ${row.line}` : ''}" x1="0" x2="${n}" y1="${y + H / 2}" y2="${y + H / 2}"/>`;
-    const marks = model.writes.map(w => {
-      const mine = row.set.has(w.order_id), base = engine?.has(w.order_id);
-      if (mine) {
-        const extra = !row.script && engine && !base, planned = row.script && !rehearsed;
-        anyExtra = anyExtra || extra; anyPlanned = anyPlanned || planned;
-        const says = planned ? 'the script targets it · not rehearsed yet' : `${row.label} cancels it${row.script || !engine ? '' : base ? (rehearsed ? ' · so does the script' : ' · the script targets it too') : ' · the script keeps it'}`;
-        return `<rect class="cmp-mark${extra ? ' extra' : ''}${planned ? ' planned' : ''}" x="${cols.cx(w.col) - 3}" y="${y + 5}" width="6" height="${H - 10}" rx="1"><title>${text(`${w.order_id} · ${says}`)}</title></rect>`;
-      }
-      if (!row.script && engine && base) {
-        anyMissed = true;
-        return `<rect class="cmp-missed" x="${cols.cx(w.col) - 2.5}" y="${y + 6}" width="5" height="${H - 12}" rx="1"><title>${text(`${w.order_id} · the script ${rehearsed ? 'cancels' : 'targets'} it · ${row.label} keeps it`)}</title></rect>`;
-      }
-      return '';
-    }).join('');
-    return band + marks;
+  // One line per run against the script, like comparing branches: a verdict, a five-block diffstat and, for a
+  // run that differs, the orders it cancels that the script keeps (+) and the reverse (−), numbered as in the
+  // log above. Only plans and verified reviews are compared; nothing here decides what repeats.
+  const ICON = {same: 'circle-check', differ: 'circle-alert', stop: 'ban', error: 'circle-x', skipped: 'info', loading: 'loader-circle', repair: 'circle-check'};
+  const blocks = (row) => {
+    if (row.kind !== 'same' && row.kind !== 'differ') return '';
+    const good = row.kind === 'same' ? 5 : Math.min(4, Math.round(5 * row.agree / (Math.max(engine.size, row.set.size) || 1)));
+    return `<span class="cmp-stat"><span class="cmp-blocks" aria-hidden="true">${'<i class="g"></i>'.repeat(good)}${'<i class="a"></i>'.repeat(5 - good)}</span>${text(`${row.agree} of ${engine.size} match`)}</span>`;
+  };
+  const diff = (row) => {
+    if (row.kind !== 'differ') return '';
+    const at = (id) => byOrder.get(id)?.x ?? Infinity, order = (ids) => ids.sort((a, b) => at(a) - at(b));
+    const plus = order([...row.set].filter(id => !engine.has(id))), minus = order([...engine].filter(id => !row.set.has(id)));
+    const line = (sign, cls, id, says) => { const w = byOrder.get(id);
+      return `<li class="${cls}"><span aria-hidden="true">${sign}</span><span class="mono">${w ? `#${text(w.commitLabel)}` : '—'}</span><span class="mono">${text(compactId(id))}</span><span>${text(says)}</span></li>`; };
+    const n = plus.length + minus.length;
+    return `<details class="cmp-diff"><summary>${text(`${n} ${n === 1 ? 'difference' : 'differences'}`)}</summary><ul>${plus.map(id => line('+', 'cmp-plus', id, `${row.label} cancels it; the script keeps it${byOrder.has(id) ? '' : ' · not in the evidence'}`)).join('')}${minus.map(id => line('−', 'cmp-minus', id, `the script ${rehearsed ? 'cancels' : 'targets'} it; ${row.label} keeps it`)).join('')}</ul></details>`;
+  };
+  const items = rows.map(row => {
+    const kind = row.script ? `script${row.line === 'stop' ? ' stop' : ''}` : row.kind;
+    const ic = row.script ? 'git-compare' : ICON[row.kind] || 'info';
+    return `<li class="cmp-row ${kind}${row.current ? ' current' : ''}"><button class="cmp-open" ${row.attrs}${row.current ? ' aria-current="true"' : ''} title="${escape(`Open ${row.label}`)}"><span class="cmp-icon" aria-hidden="true">${icon(ic, row.kind === 'loading' ? 'spin' : '')}</span><strong>${text(row.label)}</strong><span class="cmp-long">${text(row.note)}</span>${row.sub ? `<span class="cmp-sub">${text(row.sub)}</span>` : ''}${blocks(row)}${row.current ? '<span class="cmp-here">on screen</span>' : ''}</button>${diff(row)}</li>`;
   }).join('');
-  const labels = rows.map(row => `<li><button class="compare-run${row.current ? ' current' : ''}" ${row.attrs} ${row.current ? 'aria-current="true"' : ''} title="${escape(`${row.label} · ${row.note}`)}"><strong>${text(row.label)}</strong><span class="cmp-long">${text(row.note)}</span><span class="cmp-short" aria-hidden="true">${text(row.short)}</span></button></li>`).join('');
-  const legend = `<span><i class="repeat"></i>Cancelled by that run</span>${anyPlanned ? '<span><i class="planned"></i>Script’s target · not rehearsed yet</span>' : ''}${anyMissed ? `<span><i class="missed"></i>${rehearsed ? 'Cancelled' : 'Targeted'} by the script, kept by that run</span>` : ''}${anyExtra ? '<span><i class="extra"></i>Not in the script’s plan</span>' : ''}<span><i class="line"></i>No repair</span>`;
   return `<div class="recon-compare">
-    <div class="recon-head"><h4 id="compare-title">Compared runs</h4><span class="caption">One column per source event, in commit order. Recordings show their verified reviews; the script shows its ${rehearsed ? 'test on a copy' : 'proposal'}.</span></div>
-    <div class="recon-body"><ol class="recon-lanes compare-lanes" aria-labelledby="compare-title">${labels}</ol>
-      <div class="recon-scroll"><svg class="compare-svg" viewBox="0 0 ${n} ${rows.length * H}" width="${n}" height="${rows.length * H}" aria-hidden="true" focusable="false">${svgRows}</svg></div></div>
-    <div class="recon-legend" aria-hidden="true">${legend}</div>
-    <p class="recon-summary">${text(headline)}</p>
+    <div class="recon-head"><h4 id="compare-title">Compared runs</h4><span class="caption">Each run against the script. Recordings show their verified reviews; the script shows its ${rehearsed ? 'test on a copy' : 'proposal'}.</span></div>
+    <div class="cmp-box"><p class="cmp-headline">${text(headline)}</p><ol class="cmp-list" aria-labelledby="compare-title">${items}</ol></div>
   </div>`;
 }
 
@@ -3063,12 +3043,6 @@ document.addEventListener('pointerover', event => pairHighlight(event.target.clo
 document.addEventListener('focusin', event => pairHighlight(event.target.closest?.('.gl-commits > li') || null));
 // A commit group the person opens or closes stays that way when the panel repaints.
 document.addEventListener('toggle', event => { const d = event.target; if (d?.classList?.contains('gl-group')) state.reconOpen.set(d.dataset.group, d.open); }, true);
-// On narrow screens the graph and the compared runs scroll sideways together, so their columns stay aligned.
-document.addEventListener('scroll', event => {
-  const box = event.target;
-  if (!box?.classList?.contains('recon-scroll')) return;
-  box.closest('.recon')?.querySelectorAll('.recon-scroll').forEach(o => { if (o !== box && o.scrollLeft !== box.scrollLeft) o.scrollLeft = box.scrollLeft; });
-}, true);
 document.addEventListener('pointerup', event => endSideDrag(event));
 document.addEventListener('pointercancel', event => endSideDrag(event, true));
 document.addEventListener('dblclick', event => { if (event.target.closest?.('.resizer')) resetSidebar(); });
