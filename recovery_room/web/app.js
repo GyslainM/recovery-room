@@ -1660,7 +1660,6 @@ function recordedChangesView() {
     : `This attempt ended as ${r.outcome}; no repair package was selected.`, r.outcome === 'stop' ? 'ban' : 'circle-x')}`;
   const review = r.review;
   return `${recBanner(r, true, true)}
-    <div class="section-heading"><h2>Recorded repair review</h2></div>
     ${repairFlow(review, {recorded: true})}
     ${diffView(review)}
     <p class="caption">Read-only history. To produce exportable SQL, run the offline script and test its repair on a copy.</p>`;
@@ -1669,21 +1668,18 @@ function recordedChangesView() {
 function recordedChecksView() {
   const r = state.recording;
   if (!r) return recordedPending();
+  const noExport = exportRow('Export', 'Not available for recordings', 'Recordings have no downloads. Exports come only from a current offline test, and each one is refused if files changed since testing.');
   if (!r.review) {
     const test = lastRecordedTest(r);
     if (!test) return `${recBanner(r, true)}${emptyState('No recorded check results available', 'This recording has no selected repair review or complete test results to display. Its saved steps remain available.', 'shield-check')}`;
-    const v = test.res.result, passed = v.checks.filter(c => c.passed).length;
-    return `${recBanner(r, true)}<div class="section-heading"><h2>Recorded checks from an attempted repair</h2></div>
-      <div class="callout ${v.passed ? 'success' : 'stop'}"><strong>${passed} / ${v.checks.length} checks passed</strong><br>Saved results from step ${test.n}. No repair was selected for review; these results provide no export.</div>
-      ${table(['Check', 'Recorded result', 'Explanation'], v.checks.map(c => [text(c.name.replaceAll('_', ' ')), c.passed ? 'Passed' : 'Failed', text(c.detail)]))}`;
+    const v = test.res.result;
+    return `${recBanner(r, true)}
+      ${checksSummary(v.checks, {where: 'the recorded copy', passed: v.passed, caption: `Saved results from step ${test.n}, an attempted repair. No repair was selected for review; these results provide no export.`, foot: noExport})}
+      ${checksView(v.checks, {selectable: false})}`;
   }
-  const review = r.review, passed = review.checks.filter(c => c.passed).length;
+  const review = r.review;
   return `${recBanner(r, true, true)}
-    <div class="section-heading"><h2>Recorded operational checks</h2></div>
-    <div class="status-cards">
-      <div class="status-card ${review.passed ? 'ok' : 'danger'}"><span class="eyebrow">In the recorded test</span><strong>${passed} / ${review.checks.length} checks passed</strong><span class="caption">${text(r.review_observation || '')}</span></div>
-      <div class="status-card"><span class="eyebrow">Export</span><strong>Not available for recordings</strong><span class="caption">Recordings have no downloads. Exports come only from a current offline test, and each one is refused if files changed since testing.</span></div>
-    </div>
+    ${checksSummary(review.checks, {where: 'the recorded copy', passed: review.passed, caption: r.review_observation || 'Saved with this recording.', foot: noExport})}
     ${checksView(review.checks)}`;
 }
 
@@ -1856,45 +1852,49 @@ function changesView() {
 
 function reviewView() {
   const run = state.run, review = run.review;
-  return `${reviewSummary(run, review)}${diffView(review)}${packageView(run)}`;
-}
-
-function reviewSummary(run, review) {
-  const ready = run.status === 'ready_for_review';
-  const failed = review.checks.filter(c => !c.passed);
-  return `<div class="section-heading"><h2>${ready?'Test result on a copy':'Export unavailable'}</h2></div>
-    ${ready?'':`<div class="callout stop">${text(run.summary)}</div>`}
+  return `${run.status === 'ready_for_review' ? '' : `<div class="section-heading"><h2>Export unavailable</h2></div><div class="callout stop">${text(run.summary)}</div>`}
     ${repairFlow(review, {run})}
-    ${run.status==='blocked'?'<p class="caption">Export is blocked. Counts describe the earlier test on a copy; see the server’s reason above.</p>':''}
-    ${failed.length?`<div class="failed"><h3>Checks that failed on the copy</h3><ul>${failed.map(c=>`<li><span class="group">${text(groupOf(c.name))}</span><strong>${text(checkName(c.name))}</strong><div class="check-detail">${text(c.detail)}${diagSummary(c)?`<span class="check-diag">${text(diagSummary(c))}</span>`:''}</div></li>`).join('')}</ul></div>`:''}`;
+    ${run.status === 'blocked' ? '<p class="caption">Export is blocked. Counts describe the earlier test on a copy; see the server’s reason above.</p>' : ''}
+    ${diffView(review)}${packageView(run)}`;
 }
 
-// A quiet outcome graphic, built from the selected rehearsal's observations.
-// The bar counts changed and preserved records, not deleted orders or a live source.
+// "All 10 checks passed on the copy" or "2 of 10 checks failed on the copy", from the listed checks.
+function checksTitle(checks, where) {
+  const total = checks.length, failed = checks.filter(c => !c.passed).length;
+  if (!total) return `No checks were recorded on ${where}`;
+  if (failed) return `${failed} of ${total} ${total === 1 ? 'check' : 'checks'} failed on ${where}`;
+  return `${total === 1 ? 'The check' : `All ${total} checks`} passed on ${where}`;
+}
+const checksOk = (passed, checks) => passed === true && checks.length > 0 && checks.every(c => c.passed);
+
+// The review at a glance, from the selected test's own observations: whether its checks passed, what it
+// cancelled, what it left untouched and how stock moved. Failed checks are listed here too. The bar counts
+// changed and preserved records, not deleted orders or a live source.
 function repairFlow(review, {run = null, recorded = false} = {}) {
-  const passed = review.checks.filter(c => c.passed).length, total = review.checks.length;
+  const where = recorded ? 'the recorded copy' : 'the copy', ok = checksOk(review.passed, review.checks);
   const sourceCheck = review.checks.find(c => c.name === 'source_snapshot_unchanged');
-  const sourceNote = sourceCheck ? (sourceCheck.passed ? 'Source unchanged during the test' : 'Source changed during the test') : 'Source opened read-only';
+  const sourceNote = sourceCheck ? (sourceCheck.passed ? 'Source unchanged during the test.' : 'Source changed during the test.') : 'Source opened read-only.';
   const changed = review.cancellations, preserved = review.untargeted_preserved;
   const known = [changed, preserved].every(n => Number.isSafeInteger(n) && n >= 0) && changed + preserved > 0;
   const portion = known ? changed / (changed + preserved) * 100 : 0;
-  const pkg = recorded ? 'Read-only recording · no downloads'
-    : run?.status === 'ready_for_review' ? 'For human review · refused if files changed since testing'
-    : run?.status === 'blocked' ? 'Export blocked' : 'Export unavailable · checks failed';
-  const pkgTone = recorded ? '' : run?.status === 'ready_for_review' ? 'ok' : run?.status === 'blocked' ? 'warn' : 'danger';
-  return `<section class="repair-outcome" aria-label="${recorded ? 'Recorded outcome of the test on a copy' : 'Outcome of the test on a copy'}">
-    <div class="outcome-numbers"><div><span class="eyebrow">Active orders on the ${recorded ? 'recorded ' : ''}copy</span>
-      <strong class="outcome-total">${text(review.before_active)} → ${text(review.after_active)}</strong>
-      <p><strong>${text(changed)}</strong> duplicate orders cancelled. Order history retained.</p></div>
-      <div class="outcome-preserved"><strong>${text(preserved)}</strong><span>orders left untouched</span><small>including ${text(`${review.checkout_preserved} / ${review.checkout_total}`)} later purchases intact</small></div></div>
+  const moved = (review.stock || []).filter(p => p.after !== p.before), restocked = moved.length > 0 && moved.every(p => p.after > p.before);
+  const stat = (value, label, tone = '') => `<div class="rv-stat ${tone}"><strong>${text(value)}</strong><span>${text(label)}</span></div>`;
+  const failed = review.checks.filter(c => !c.passed);
+  return `<section class="rv-box rv-summary" aria-labelledby="rv-title">
+    <div class="rv-box-head"><span class="rv-state ${ok ? 'ok' : 'danger'}" aria-hidden="true">${icon(ok ? 'circle-check' : 'circle-x')}</span>
+      <div class="rv-title"><h2 id="rv-title">${text(checksTitle(review.checks, where))}</h2>
+        <p class="caption">${text(`${sourceNote} Changes were made only on ${recorded ? 'the recorded test copy' : 'a disposable copy'}.`)}${recorded ? ' Read-only recording · no downloads.' : run && historicalRun(run) ? ' Recorded when this baseline was built, not a current check.' : ''}</p></div>
+      ${review.checks.length ? '<button class="link small" data-tab="checks">View checks</button>' : ''}</div>
+    <div class="rv-stats">
+      ${stat(`${review.before_active} → ${review.after_active}`, 'active orders')}
+      ${stat(changed, `${changed === 1 ? 'order' : 'orders'} cancelled, history kept`, 'mod')}
+      ${stat(preserved, `${preserved === 1 ? 'order' : 'orders'} left untouched`, 'keep')}
+      ${stat(`${review.checkout_preserved} / ${review.checkout_total}`, 'later purchases intact', 'keep')}
+      ${moved.length ? stat(moved.length, restocked ? `${moved.length === 1 ? 'product' : 'products'} restocked` : `${moved.length === 1 ? 'product' : 'products'} with stock changed`) : ''}
+    </div>
     ${known ? `<figure class="impact" aria-label="${text(`${changed} cancelled orders and ${preserved} unchanged orders in the test on a copy`)}">
       <svg class="impact-track" viewBox="0 0 100 7" preserveAspectRatio="none" aria-hidden="true"><rect class="impact-changed" x="0" y="0" width="${portion}" height="7"/><rect class="impact-preserved" x="${portion}" y="0" width="${100 - portion}" height="7"/></svg></figure>` : ''}
-    <ol class="outcome-path" aria-label="${recorded ? 'Recorded repair path' : 'Repair path'}">
-      <li class="path-step src">${icon('database')}<span><strong>Source database</strong><small>${text(sourceNote)}</small></span></li>
-      <li class="path-step copy">${icon('flask-conical')}<span><strong>${recorded ? 'Recorded test copy' : 'Disposable copy'}</strong><small>${recorded ? 'changes were made only here' : 'changes are made only here'}</small></span></li>
-      <li class="path-step ${review.passed ? 'ok' : 'danger'}">${icon(review.passed ? 'shield-check' : 'circle-x')}<span><strong>Independent checks</strong><small>${passed} / ${total} passed ${recorded ? 'in the recorded test' : 'on the copy'}</small></span></li>
-      <li class="path-step pkg ${pkgTone}">${icon(recorded ? 'history' : 'package')}<span><strong>${recorded ? 'No repair package' : 'Repair package'}</strong><small>${text(pkg)}</small></span></li>
-    </ol>
+    ${failed.length ? `<div class="rv-fails"><h3>Failed on ${text(where)}</h3>${checksView(failed)}</div>` : ''}
   </section>`;
 }
 
@@ -1904,6 +1904,19 @@ function stockVisual(product, maximum) {
   if (![product.before, product.after, maximum].every(Number.isFinite) || Math.min(product.before, product.after) < 0 || maximum <= 0 || maximum < Math.max(product.before, product.after)) return numeric;
   const before = product.before / maximum * 100, after = product.after / maximum * 100;
   return `<div class="stock-visual">${numeric}<svg class="stock-track" viewBox="0 0 100 7" preserveAspectRatio="none" aria-hidden="true"><rect class="stock-base" x="0" y="0" width="${Math.min(before, after)}" height="7"/><rect class="stock-delta ${after < before ? 'negative' : ''}" x="${Math.min(before, after)}" y="0" width="${Math.abs(after - before)}" height="7"/><line x1="${after}" x2="${after}" y1="0" y2="7"/></svg></div>`;
+}
+
+// One collapsible subject of the review, like a file in a diff: a symbol, a name and its count, then rows.
+const reviewFile = (id, sym, title, count, body) => `<details class="rv-box rv-file" id="${id}" open>
+    <summary>${icon('chevron-right', 'chev')}<span class="sym ${sym === '~' ? 'mod' : 'same'}" aria-hidden="true">${sym}</span><h3>${text(title)}</h3><span class="rv-count">${text(count)}</span></summary>
+    ${body}</details>`;
+
+// Kept orders: the status column appears only when the rows differ; otherwise it is said once above.
+function keptTable(rows) {
+  const same = rows.length > 1 && rows.every(o => o.status === rows[0].status);
+  if (!same) return orderTable(rows);
+  return `<p class="table-note">Every order here is ${text(rows[0].status)} after the test.</p>${table(['Purchase', 'Order', 'Source reference'],
+    rows.map(o => [purchaseCell(o), idRef(o.id), `<span class="mono">${text(o.source_reference || '—')}</span>`]), rows.map(o => selAttrs(`order:${o.id}`)))}`;
 }
 
 function diffView(review) {
@@ -1917,24 +1930,25 @@ function diffView(review) {
     entry.orders += 1; entry.units += change.before.quantity;
     byProduct.set(change.before.sku, entry);
   }
-  return `<section class="diff" aria-labelledby="diff-title">
-    <div class="diff-head"><h3 id="diff-title">Order changes</h3><span class="caption">On the disposable copy</span></div>
-    <div class="diff-tools">
-      <div class="diff-counts"><span>${review.changes.length} orders</span><span>${stockChanged.length} stock rows</span><span>${review.preserved_orders.length} preserved</span></div>
+  const n = review.changes.length, kept = review.preserved_orders.length;
+  const cancelled = reviewFile('rv-cancelled', '~', 'Cancelled on the copy', `${n} ${n === 1 ? 'order' : 'orders'}`, `
+    <div class="rv-file-tools">
       <label class="search">${icon('search')}<span class="sr-only">Search changed records</span><input id="change-search" type="search" placeholder="Search order, customer or product" value="${escape(state.changeQuery)}" autocomplete="off" spellcheck="false"><kbd aria-hidden="true">/</kbd></label>
-      <label class="filter">Product <select id="change-filter"><option value="">All (${review.changes.length})</option>${skus.map(sku=>`<option value="${escape(sku)}" ${sku===state.filter?'selected':''}>${text(sku)} (${review.changes.filter(c=>c.before.sku===sku).length})</option>`).join('')}</select></label>
+      <label class="filter">Product <select id="change-filter"><option value="">All (${n})</option>${skus.map(sku=>`<option value="${escape(sku)}" ${sku===state.filter?'selected':''}>${text(sku)} (${review.changes.filter(c=>c.before.sku===sku).length})</option>`).join('')}</select></label>
     </div>
-    <p class="table-note">${uniformStatus(review.changes) ? 'Each order below goes from active to cancelled on the copy. ' : ''}The original purchase stays. Only the retry is cancelled; stock is returned with a compensating entry.</p>
-    <div id="change-table">${changesTable(review.changes)}</div>
-    <div class="group-head"><h4>Stock reconciliation</h4><span class="caption">Before and after the test on a copy. Bars start at zero.</span></div>
+    <p class="table-note">${uniformStatus(review.changes) ? 'Each order below goes from active to cancelled on the copy. ' : ''}Only the repeated write is cancelled: each row names the original order that stays and the evidence lines that show the repeat. Stock is returned with a compensating entry.</p>
+    <div id="change-table">${changesTable(review.changes)}</div>`);
+  const stock = reviewFile('rv-stock', stockChanged.length ? '~' : '=', 'Stock', `${stockChanged.length} of ${review.stock.length} ${review.stock.length === 1 ? 'product' : 'products'} changed`, `
+    <p class="table-note">Before and after the test on a copy. Bars start at zero.</p>
     ${table(['','Product','Stock on hand','Change','From cancellations'],review.stock.map(p=>{
       const delta = p.after - p.before, entry = byProduct.get(p.sku);
       return [`<span class="sym ${delta?'mod':'same'}">${delta?'~':'='}</span>`,`${text(p.name)} <span class="mono faint">${text(p.sku)}</span>`,stockVisual(p, Math.max(0, ...review.stock.flatMap(row => [row.before, row.after]))),`<span class="${delta>0?'positive':delta<0?'cancelled':''} num">${delta>0?'+':''}${text(delta)}</span>`,entry?`${entry.orders} orders · +${entry.units} units`:'—'];
-    }),review.stock.map(p=>selAttrs(`product:${p.sku}`)))}
-    <div class="group-head"><h4>preserved work</h4><span class="caption">Later purchases in this synthetic case. On the copy, ${text(review.checkout_preserved)} of ${text(review.checkout_total)} remained unchanged.</span></div>
-    ${orderTable(checkout)}
-    <details class="fold"><summary>Other untouched records · ${others.length}</summary>${orderTable(others)}</details>
-  </section>`;
+    }),review.stock.map(p=>selAttrs(`product:${p.sku}`)))}`);
+  const keep = reviewFile('rv-kept', '=', 'Kept', `${kept} ${kept === 1 ? 'order' : 'orders'} unchanged`, `
+    <div class="group-head"><h4>Later purchases</h4><span class="caption">In this synthetic case. On the copy, ${text(review.checkout_preserved)} of ${text(review.checkout_total)} remained unchanged.</span></div>
+    ${keptTable(checkout)}
+    <details class="fold"><summary>Other untouched records · ${others.length}</summary>${keptTable(others)}</details>`);
+  return `<div class="rv-files">${cancelled}${stock}${keep}</div>`;
 }
 
 // Every cancellation normally goes from active to cancelled; then that fact is one sentence above the table
@@ -2003,27 +2017,42 @@ function exportStatus(run) {
   return {label: statusOf(run)[0], tone: '', detail: run.summary};
 }
 
+// The checks summary: whether they passed, where they were observed, and the export state beneath.
+function checksSummary(checks, {where, passed, caption, foot = ''}) {
+  const ok = checksOk(passed, checks);
+  return `<section class="rv-box rv-summary" aria-labelledby="checks-title">
+    <div class="rv-box-head"><span class="rv-state ${ok ? 'ok' : 'danger'}" aria-hidden="true">${icon(ok ? 'circle-check' : 'circle-x')}</span>
+      <div class="rv-title"><h2 id="checks-title">${text(checksTitle(checks, where))}</h2><p class="caption">${text(caption)}</p></div></div>
+    ${foot}
+  </section>`;
+}
+
+const exportRow = (eyebrow, label, detail, tone = '', action = '') => `<div class="rv-box-row ${tone}"><div><span class="eyebrow">${text(eyebrow)}</span><strong>${text(label)}</strong><span class="caption">${text(detail)}</span></div>${action}</div>`;
+
 function checksTab() {
   const run = state.run, review = run?.review;
   if (!review) return noReview(run, 'independent checks');
-  const passed = review.checks.filter(c => c.passed).length, meta = state.runMeta.get(run.id) || {}, exp = exportStatus(run), past = historicalRun(run);
-  return `<div class="section-heading"><h2>Independent operational checks</h2></div>
-    <div class="status-cards">
-      <div class="status-card ${review.passed?'ok':'danger'}"><span class="eyebrow">On the copy</span><strong>${passed} / ${review.checks.length} checks passed</strong><span class="caption">${past ? 'Recorded when this baseline was built, not a current check' : `Observed on the tested copy${meta.rehearsedAt?` · result received ${time(meta.rehearsedAt)} on this page`:''}`}</span></div>
-      <div class="status-card ${exp.tone}"><span class="eyebrow">${past ? 'Export' : 'Files since testing'}</span><strong>${text(exp.label)}</strong><span class="caption">${text(exp.detail)}</span>${run.status==='ready_for_review' && !past?`<button class="secondary" data-recheck-export ${state.rechecking.has(run.id)?'disabled aria-busy="true"':''}>${state.rechecking.has(run.id)?`${icon('loader-circle','spin')}<span>Checking files…</span>`:`${icon('refresh-cw')}<span>Check files again</span>`}</button>`:''}</div>
-    </div>
+  const meta = state.runMeta.get(run.id) || {}, exp = exportStatus(run), past = historicalRun(run), busy = state.rechecking.has(run.id);
+  const recheck = run.status === 'ready_for_review' && !past
+    ? `<button class="secondary" data-recheck-export ${busy ? 'disabled aria-busy="true"' : ''}>${busy ? `${icon('loader-circle', 'spin')}<span>Checking files…</span>` : `${icon('refresh-cw')}<span>Check files again</span>`}</button>` : '';
+  const caption = past ? 'Recorded when this baseline was built, not a current check.'
+    : `Independent operational checks, observed on the tested copy${meta.rehearsedAt ? `. Result received ${time(meta.rehearsedAt)} on this page` : ''}.`;
+  return `${checksSummary(review.checks, {where: 'the copy', passed: review.passed, caption, foot: exportRow(past ? 'Export' : 'Files since testing', exp.label, exp.detail, exp.tone, recheck)})}
     ${checksView(review.checks)}`;
 }
 
-function checksView(checks) {
-  const known = new Set(CHECK_GROUPS.flatMap(([, names]) => names));
-  const groups = [...CHECK_GROUPS.map(([label, names]) => [label, checks.filter(c => names.includes(c.name))]),
-    ['Other checks', checks.filter(c => !known.has(c.name))]].filter(([, list]) => list.length);
-  return `<div class="check-groups">${groups.map(([label, list]) => {
-    const ok = list.filter(c => c.passed).length;
-    return `<div class="check-group ${ok<list.length?'has-fail':''}"><div class="check-group-head"><h4>${text(label)}</h4><span class="caption">${ok} / ${list.length} passed</span></div>
-      <ul class="checks">${list.map(c=>`<li class="sel ${c.passed?'':'fail'}" tabindex="0" data-key="check:${escape(c.name)}" aria-selected="false"><span class="check-icon ${c.passed?'':'cancelled'}" aria-hidden="true">${c.passed?'✓':'×'}</span><div><strong>${text(checkName(c.name))}</strong><span class="sr-only"> ${c.passed?'passed':'failed'}</span><div class="check-detail">${text(c.detail)}${diagSummary(c)?`<span class="check-diag">${text(diagSummary(c))}</span>`:''}</div></div></li>`).join('')}</ul></div>`;
-  }).join('')}</div>`;
+// One check: its result, name and group, and the checker's own detail. A failure also shows its first
+// exception; the Details panel has the full diagnostics. Saved results outside a review are not selectable.
+function checkRow(c, selectable) {
+  const diag = diagSummary(c);
+  return `<li class="${selectable ? 'sel' : ''} ${c.passed ? '' : 'fail'}"${selectable ? ` tabindex="0" data-key="check:${escape(c.name)}" aria-selected="false"` : ''}><span class="check-icon ${c.passed ? '' : 'cancelled'}" aria-hidden="true">${c.passed ? '✓' : '×'}</span><div class="check-main"><div class="check-line"><strong>${text(checkName(c.name))}</strong><span class="sr-only"> ${c.passed ? 'passed' : 'failed'}</span><span class="check-tag">${text(groupOf(c.name))}</span></div><div class="check-detail">${text(c.detail)}${diag ? `<span class="check-diag">${text(diag)}</span>` : ''}</div></div></li>`;
+}
+
+// Failures first, then the usual group order. One flat list, so the arrow keys move through every check.
+function checksView(checks, {selectable = true} = {}) {
+  const rank = (c) => { const i = CHECK_GROUPS.findIndex(([label]) => label === groupOf(c.name)); return i === -1 ? CHECK_GROUPS.length : i; };
+  const sorted = [...checks].sort((a, b) => (Number(!!a.passed) - Number(!!b.passed)) || (rank(a) - rank(b)));
+  return `<ul class="checks check-list">${sorted.map(c => checkRow(c, selectable)).join('')}</ul>`;
 }
 
 /* ---------- SQL ---------- */

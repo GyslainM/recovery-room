@@ -288,7 +288,7 @@ test('a recorded outcome cannot imply a currently exportable package', () => {
   const app = harness();
   const rendered = app.repairFlow(reviewRun('ready_for_review').review,
     {recorded: true, run: reviewRun('ready_for_review')});
-  assert.match(rendered, /in the recorded test/);
+  assert.match(rendered, /passed on the recorded copy/);
   assert.match(rendered, /Read-only recording · no downloads/);
   assert.doesNotMatch(rendered, /For human review|refused if files changed since testing/);
 });
@@ -545,9 +545,15 @@ test('the real stopped inbox recording keeps its failed checks visible without c
   assert.doesNotMatch(conclusion, /nothing was rehearsed|without proposing|source_fingerprint|rehearsal_id/);
   assert.match(app.recordedChangesView(), /saved results are in Checks/);
   const checks = app.recordedChecksView();
-  assert.match(checks, /8 \/ 10 checks passed/);
-  assert.match(checks, /source evidence complete<\/td><td>Failed/);
-  assert.match(checks, /source events applied once<\/td><td>Failed/);
+  assert.match(checks, /2 of 10 checks failed on the recorded copy/);
+  // The two failures lead the list, marked failed; saved results outside a review are not selectable.
+  const rows = checks.match(/<li class="[^"]*">.*?<\/li>/g) || [];
+  assert.equal(rows.length, 10);
+  assert.match(rows[0], /class=" fail".*Source evidence complete.*failed/);
+  assert.match(rows[1], /class=" fail".*Source events applied once.*failed/);
+  assert.ok(rows.slice(2).every(row => /✓/.test(row) && !/fail/.test(row)));
+  assert.doesNotMatch(checks, /data-key="check:/);
+  assert.match(checks, /Not available for recordings/);
   assert.doesNotMatch(checks, /No checks in this recording|data-download|data-recheck-export/);
   assert.equal(app.guardrailView(r), '');
 });
@@ -1266,3 +1272,78 @@ test('the published dataset opens on its matched inbox repair and keeps all 16 r
     }
     assert.deepEqual(fetches, ['./demo-data.json']);
   });
+
+// ---------- Changes and Checks as review boxes ----------
+
+const publicData = () => JSON.parse(fs.readFileSync(path.join(__dirname, '../examples/public-demo/demo-data.json'), 'utf8'));
+const strip = (html) => html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+
+test('the Changes summary and sections take every count from the review, including the 40-cancellation case', () => {
+  const data = publicData();
+  for (const caseId of ['multiple-retries', 'import-retry']) {
+    const app = harness();
+    const runId = data.api_get[`/api/runs?incident=${caseId}`].runs[0].id, run = data.api_get[`/api/runs/${runId}`], review = run.review;
+    app.state.incident = data.api_get[`/api/incidents/${caseId}`];
+    app.state.run = run;
+    const view = app.reviewView(), words = strip(view);
+    const cancelled = review.changes.length, moved = review.stock.filter(p => p.after !== p.before).length;
+    assert.match(words, new RegExp(`All ${review.checks.length} checks passed on the copy`));
+    assert.match(words, new RegExp(`${review.before_active} → ${review.after_active} active orders`));
+    assert.match(words, new RegExp(` ${review.cancellations} orders cancelled, history kept`));
+    assert.match(words, new RegExp(` ${review.untargeted_preserved} orders left untouched`));
+    assert.match(words, new RegExp(`${review.checkout_preserved} / ${review.checkout_total} later purchases intact`));
+    assert.match(words, new RegExp(`Cancelled on the copy ${cancelled} orders`));
+    assert.match(words, new RegExp(`Stock ${moved} of ${review.stock.length} products changed`));
+    assert.match(words, new RegExp(`Kept ${review.preserved_orders.length} orders unchanged`));
+    assert.equal((app.reviewView().match(/<tr [^>]*data-key="order:[^"]*"/g) || []).length, cancelled + review.preserved_orders.length);
+    // A historical baseline says so; nothing offers a download.
+    assert.match(words, /Recorded when this baseline was built, not a current check/);
+    assert.doesNotMatch(view, /data-download|data-recheck-export/);
+    if (caseId === 'multiple-retries') assert.deepEqual([cancelled, review.cancellations, review.before_active, review.after_active], [40, 40, 100, 60]);
+  }
+});
+
+test('the checks list puts failures first in one flat list, under one summary with the export state', () => {
+  const app = harness();
+  app.state.incident = {id: 'case-a', products: []};
+  app.state.run = diagnosedRun([{name: 'database_integrity', passed: true, detail: 'ok'}, ledger(2),
+    {name: 'source_events_applied_once', passed: true, detail: 'ok'}, {name: 'zzz_custom_rule', passed: false, detail: 'Custom failure'}]);
+  app.state.run.status = 'failed_checks';
+  const view = app.checksTab();
+  assert.match(view, /<h2 id="checks-title">2 of 4 checks failed on the copy<\/h2>/);
+  assert.match(strip(view), /Files since testing Unavailable Checks failed on the copy, so nothing can be exported\./);
+  assert.equal((view.match(/<ul class="checks check-list">/g) || []).length, 1);
+  const names = [...view.matchAll(/<strong>([^<]+)<\/strong><span class="sr-only"> (passed|failed)<\/span><span class="check-tag">([^<]+)</g)].map(m => `${m[2]}:${m[1]}:${m[3]}`);
+  assert.deepEqual(names, ['failed:Stock matches movement ledger:Stock', 'failed:Zzz custom rule:Other checks',
+    'passed:Database integrity:Database', 'passed:Source events applied once:Source evidence']);
+  assert.match(view, /KEYBOARD: expected 172, observed 174 \(\+2\)/);
+  assert.doesNotMatch(view, /data-recheck-export/);
+  // The failures also lead the Changes summary, selectable for their details.
+  assert.match(app.reviewView(), /<div class="rv-fails"><h3>Failed on the copy<\/h3><ul class="checks check-list"><li class="sel fail" tabindex="0" data-key="check:stock_matches_movement_ledger"/);
+});
+
+test('kept orders state a shared status once instead of repeating it in a column', () => {
+  const data = publicData(), app = harness();
+  const runId = data.api_get['/api/runs?incident=multiple-retries'].runs[0].id;
+  app.state.incident = data.api_get['/api/incidents/multiple-retries'];
+  app.state.run = data.api_get[`/api/runs/${runId}`];
+  const kept = app.reviewView().split('id="rv-kept"')[1];
+  assert.match(kept, /Every order here is active after the test\./);
+  assert.doesNotMatch(kept, /<th scope="col">Status<\/th>/);
+  app.state.run = {...app.state.run, review: {...app.state.run.review, preserved_orders: [
+    {...app.state.run.review.preserved_orders[0]}, {...app.state.run.review.preserved_orders[1], status: 'cancelled'}]}};
+  assert.match(app.reviewView().split('id="rv-kept"')[1], /<th scope="col">Status<\/th>/);
+});
+
+test('a mismatched recording keeps its recorded review without current-case links', () => {
+  const data = publicData(), app = harness();
+  const listed = data.api_get['/api/incidents/inbox-evidence/recordings'].find(r => r.fixture_matches === false);
+  app.state.incident = data.api_get['/api/incidents/inbox-evidence'];
+  app.state.source = 'recorded';
+  app.state.recording = data.api_get[`/api/recordings/${listed.id}`];
+  const view = app.recordedChangesView();
+  assert.match(view, /passed on the recorded copy/);
+  assert.match(view, /Read-only recording · no downloads/);
+  assert.doesNotMatch(view, /class="citation"|data-download/);
+  assert.match(view, /class="mono ref-text"/);
+});
