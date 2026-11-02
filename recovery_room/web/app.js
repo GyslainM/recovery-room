@@ -23,6 +23,8 @@ const state = {
   recDetails: new Map(),
   // reconWaiting: cases whose timeline evidence is being read; each case starts and repaints its own.
   reconWaiting: new Set(),
+  // reconOpen: which commit groups in What happened the person opened or closed, by case, source and group.
+  reconOpen: new Map(),
   // sourceChosen: the person picked script or recorded; until then each case opens on its recorded Meta run.
   // replay: {recId, cursor, playing} while the saved steps of the open recording are being replayed.
   // demo: the public read-only demo's dataset defaults and evaluation notes (see staticContract).
@@ -853,54 +855,159 @@ const reconLabel = (w, lane, role) => {
   return `Commit ${w.commitLabel} · ${ATTEMPT_LABEL[lane] || lane}${o ? ` · ${o.customer} ${o.sku} × ${o.quantity}` : ''} · ${w.order_id}${role ? ` · ${role}` : ''}`;
 };
 
+// What happened, as a git log of the evidence, oldest first. The orders database is main. Each attempt's
+// consecutive committed writes form a branch that forks off main and merges back; a lost connection ends
+// its branch. An attempt with no commit records is a branch with nothing in it. A gap in the commit log
+// is shown on its attempt's branch (the evidence names the attempt), or on main when no branch has it.
+function gitSegments(model) {
+  const items = [...model.writes.map(w => ({w, at: w.x})), ...model.marks.filter(m => m.type === 'connection_lost').map(m => ({m, at: m.x - 0.5}))].sort((a, b) => a.at - b.at);
+  const out = [];
+  let cur = null;
+  const close = () => { if (cur) out.push(cur); cur = null; };
+  for (const it of items) {
+    if (it.w) {
+      if (!cur || cur.attempt !== it.w.attempt) { close(); cur = {attempt: it.w.attempt, writes: [], lost: [], gaps: []}; }
+      cur.writes.push(it.w);
+    } else {
+      if (!cur || cur.attempt !== it.m.attempt) { close(); cur = {attempt: it.m.attempt, writes: [], lost: [], gaps: []}; }
+      cur.lost.push(it.m);
+      close();
+    }
+  }
+  close();
+  for (const m of model.marks.filter(mk => mk.type === 'log_gap')) {
+    const home = [...out].reverse().find(seg => seg.attempt === m.attempt);
+    if (home) home.gaps.push(m); else out.push({gap: m});
+  }
+  return out;
+}
+
+const GL_MERGE = '<svg class="gl-curve merge" viewBox="0 0 52 18" aria-hidden="true" focusable="false"><path d="M36 0C36 12,14 6,14 18"/></svg>';
+const GL_FORK = '<svg class="gl-curve fork" viewBox="0 0 52 18" aria-hidden="true" focusable="false"><path d="M14 0C14 12,36 6,36 18"/></svg>';
+const GL_BOLT = '<svg class="gl-bolt" viewBox="0 0 10 16" aria-hidden="true" focusable="false"><path d="M6 1L2 8h5l-4 7"/></svg>';
+
 // pairs: [{order_id: the repeated (cancelled) order, duplicate_of: the first write that stays}].
 // rehearsed: a rehearsal review exists, so the marked repeats were cancelled on the copy; otherwise they
-// are the proposal's targets and nothing has been cancelled yet.
+// are the proposal's targets and nothing has been cancelled yet. Which write repeats, and the tie to its
+// original, come only from these pairs; the copy branch appears only once a test on a copy exists.
 function reconstructionView(pairs = null, {recorded = false, stopped = null, rehearsed = false} = {}) {
   const model = evidenceWrites();
-  const head = `<div class="recon-head"><h3 id="recon-title">What happened</h3><span class="caption">Committed writes in order, read from the evidence files</span></div>`;
+  const head = `<div class="recon-head"><h3 id="recon-title">What happened</h3><span class="caption">Each attempt’s committed writes, oldest first, read from the evidence files</span></div>`;
   if (model === null) return `<section class="recon" aria-labelledby="recon-title">${head}${skeleton(3)}</section>`;
   if (model.error) return `<section class="recon" aria-labelledby="recon-title">${head}<p class="callout stop">${text(model.error)}</p></section>`;
   const {writes, marks, lanes} = model;
   if (!writes.length && !marks.length) return '';
-  const n = Math.max(writes.length, 1), height = Math.max(lanes.length, 1) * RECON_LANE;
-  const laneOf = new Map(lanes.map((l, i) => [l, i]));
   const byOrder = new Map(writes.map(w => [w.order_id, w]));
-  const kept = new Set(), repeat = new Set(), arcs = [];
+  const kept = new Set(), repeat = new Set(), originalOf = new Map(), copiesOf = new Map();
   for (const p of pairs || []) {
     const r = byOrder.get(p.order_id), k = byOrder.get(p.duplicate_of);
     if (!r || !k) continue;
-    repeat.add(r.x); kept.add(k.x); arcs.push([k, r]);
+    repeat.add(r.x); kept.add(k.x); originalOf.set(r.x, k);
+    copiesOf.set(k.x, [...(copiesOf.get(k.x) || []), r.x]);
   }
-  const top = (w) => laneOf.get(w.attempt) * RECON_LANE + 7, bottom = (w) => top(w) + RECON_LANE - 14;
+  const found = pairs && (rehearsed || recorded) && repeat.size ? active().review : null;
+  const review = found && Array.isArray(found.checks) && Number.isFinite(found.before_active) && Number.isFinite(found.after_active) ? found : null;
+  const proposal = pairs && !recorded && !rehearsed && repeat.size > 0;
   const repeatRole = recorded ? 'Repeat · cancelled in this recording' : rehearsed ? 'Repeat · cancelled on the copy' : 'Repeat · proposed to cancel';
   const role = (w) => repeat.has(w.x) ? repeatRole.toLowerCase() : kept.has(w.x) ? 'first write · stays' : pairs ? 'untouched' : '';
-  const selectable = active().selectable;
-  const ticks = writes.map(w => `<rect class="recon-tick ${repeat.has(w.x) ? 'repeat' : kept.has(w.x) ? 'kept' : ''}" data-i="${w.x}" ${selectable ? `data-key="order:${escape(w.order_id)}"` : ''} x="${w.x + 0.18}" y="${top(w)}" width="0.64" height="${RECON_LANE - 14}"><title>${text(reconLabel(w, w.attempt, role(w)))}</title></rect>`).join('');
-  const curves = arcs.map(([k, r]) => {
-    const xk = k.x + 0.5, xr = r.x + 0.5;
-    if (laneOf.get(k.attempt) === laneOf.get(r.attempt)) { const y = top(k); return `<path class="recon-arc" d="M${xk} ${y} C${xk} ${y - 10}, ${xr} ${y - 10}, ${xr} ${y}"/>`; }
-    const y1 = bottom(k), y2 = top(r), mid = (y1 + y2) / 2;
-    return `<path class="recon-arc" d="M${xk} ${y1} C${xk} ${mid}, ${xr} ${mid}, ${xr} ${y2}"/>`;
+  const selectable = active().selectable, orders = ordersById(), past = recorded || historicalRun(state.run);
+  const tag = (t, cls = '') => `<span class="gl-tag${cls ? ` ${cls}` : ''}">${text(t)}</span>`;
+  const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+  const commit = (w) => {
+    const o = orders.get(w.order_id), k = originalOf.get(w.x), partners = k ? [k.x] : copiesOf.get(w.x) || [];
+    const tone = repeat.has(w.x) ? ' repeat' : kept.has(w.x) ? ' kept' : '';
+    const pill = k ? `<span class="recon-arc" title="${escape(`Same source event as commit ${k.commitLabel}, ${k.order_id}, which stays`)}">repeat of #${text(k.commitLabel)}</span>`
+      : kept.has(w.x) ? '<span class="gl-pill kept">first write · stays</span>' : pairs ? '<span class="gl-pill">untouched</span>' : '';
+    const attrs = `data-i="${w.x}"${partners.length ? ` data-pair="${partners.join(' ')}"` : ''}${selectable ? ` data-key="order:${escape(w.order_id)}" tabindex="0" aria-selected="false"` : ''}`;
+    return `<li class="recon-tick${tone}" ${attrs} title="${escape(reconLabel(w, w.attempt, role(w)))}"><i class="gl-dot" aria-hidden="true"></i><span class="mono">#${text(w.commitLabel)}</span><span class="mono gl-id">${text(compactId(w.order_id))}</span>${o ? `<span class="muted">${text(`${o.customer} · ${o.sku} × ${o.quantity}`)}</span>` : ''}${pill}<span class="gl-meta mono">${text(w.ref)}</span></li>`;
+  };
+
+  // In a branch with marked commits, a run of four or more unmarked ones folds into one row, so the
+  // repeats and the originals they repeat stay together on screen. The folded commits stay in the list.
+  const commits = (list) => {
+    if (!list.some(w => repeat.has(w.x) || kept.has(w.x))) return list.map(commit).join('');
+    const out = [];
+    for (let i = 0; i < list.length;) {
+      let j = i;
+      while (j < list.length && !repeat.has(list[j].x) && !kept.has(list[j].x)) j++;
+      if (j - i >= 4) {
+        const run = list.slice(i, j), first = run[0].commitLabel, last = run[run.length - 1].commitLabel;
+        out.push(`<li class="gl-more"><details><summary class="gl-fold"><span class="gl-chev" aria-hidden="true">${icon('chevron-right')}</span><span>${text(`${run.length} ${pairs ? 'untouched' : ''} commits`.replace('  ', ' '))}</span><span class="gl-meta mono">${text(`#${first}–${last}`)}</span></summary><ol class="gl-commits">${run.map(commit).join('')}</ol></details></li>`);
+        i = j;
+      } else { if (j === i) j = i + 1; out.push(...list.slice(i, j).map(commit)); i = j; }
+    }
+    return out.join('');
+  };
+
+  // The rows in order: main, then each branch (and its merge), then the copy branch or the proposal.
+  const segs = gitSegments(model), entries = [{kind: 'main', role: 'base'}];
+  for (const seg of segs) {
+    if (seg.gap) { entries.push({kind: 'gap', mark: seg.gap}); continue; }
+    entries.push({kind: 'branch', seg});
+    // A branch with commits merges back; an empty one just ends, and main carries on unchanged.
+    entries.push({kind: 'main', role: seg.writes.length ? 'merge' : 'idle', seg});
+  }
+  const headAt = entries.map(e => e.kind).lastIndexOf('main');
+  if (review) entries.push({kind: 'copy'}, {kind: 'main', role: 'after'});
+  else if (proposal) entries.push({kind: 'proposal'}, {kind: 'main', role: 'after'});
+  else if (entries[entries.length - 1].kind !== 'main') entries.push({kind: 'main', role: 'after'});
+  const lastMain = entries.map(e => e.kind).lastIndexOf('main');
+  const branchy = (e) => e && (e.kind === 'branch' || e.kind === 'copy' || e.kind === 'proposal');
+  let total = 0;
+  const passed = review ? review.checks.filter(ch => ch.passed).length : 0;
+  const ok = review && review.passed === true && review.checks.length > 0 && passed === review.checks.length;
+  const src = review?.checks.find(ch => ch.name === 'source_snapshot_unchanged');
+
+  const unknown = segs.some(seg => !seg.gap && !seg.writes.length);
+  const rows = entries.map((e, i) => {
+    if (e.kind === 'main') {
+      const prev = entries[i - 1], merge = prev?.kind === 'branch' && prev.seg.writes.length > 0, fork = branchy(entries[i + 1]);
+      if (e.role === 'merge') total += e.seg.writes.length;
+      const cls = `${i === 0 ? ' first' : ''}${i === lastMain ? ' last' : ''}`;
+      // Plain labels: the database never had branches, so no main, HEAD or merge. "latest" marks the database's
+      // state after the last attempt: the review's active orders, or the writes the evidence records.
+      const latest = i === headAt && (e.role === 'merge' || e.role === 'idle')
+        ? `${tag('latest', 'head')}<span class="muted">${text(review ? `${review.before_active} active orders` : `${plural(total, 'recorded write')} in the evidence${unknown ? ' · some outcomes unknown' : ''}`)}</span>` : '';
+      const what = e.role === 'base' ? '<strong>orders-db</strong><span class="muted">before the first committed write in the evidence</span>'
+        : e.role === 'idle' ? `<strong>orders-db</strong>${tag(e.seg.attempt)}<span class="muted">Commit records unavailable · outcome unknown</span>${latest}`
+        : e.role === 'merge' ? `${tag(e.seg.attempt)}<span>ended</span><span class="muted">${text(plural(e.seg.writes.length, 'recorded write'))}</span>${latest}`
+        : review ? `<strong>orders-db</strong><span class="muted">${text(src ? (src.passed ? 'Unchanged during the test' : 'Changed during the test') : 'Opened read-only')}</span>`
+        : proposal ? '<strong>orders-db</strong><span class="muted">Unchanged: nothing is cancelled until it is tested on a copy</span>'
+        : '<strong>orders-db</strong>';
+      return `<li class="gl-row gl-main${cls}">${merge ? GL_MERGE : ''}${fork ? GL_FORK : ''}<i class="gl-dot" aria-hidden="true"></i><span class="gl-msg">${what}</span></li>`;
+    }
+    if (e.kind === 'gap') return `<li class="gl-row gl-main gl-gap${i === lastMain ? ' last' : ''}"><i class="gl-dot" aria-hidden="true"></i><span class="gl-msg"><strong>Gap in the commit log</strong>${e.mark.detail ? `<span class="muted">${text(e.mark.detail)}</span>` : ''}</span></li>`;
+    if (e.kind === 'copy') {
+      const n = repeat.size;
+      return `<li class="gl-row gl-on gl-copy"><span class="gl-dot gl-x" aria-hidden="true">${icon('x')}</span><span class="gl-msg">${tag(past ? 'recorded-test-copy' : 'test-copy')}<strong>${text(`Cancel ${plural(n, 'repeated write')}`)}</strong><span class="muted">${past ? 'in the recorded test on a copy' : 'on a disposable copy'}</span></span></li>
+        <li class="gl-row gl-on stop gl-result ${ok ? 'ok' : 'danger'}"><i class="gl-dot" aria-hidden="true"></i><span class="gl-msg"><strong>${text(`${review.before_active} → ${review.after_active} active orders`)}</strong><span class="gl-checks">${text(`${passed} of ${review.checks.length} checks passed`)}</span><span class="muted">Not applied to orders-db</span></span></li>`;
+    }
+    if (e.kind === 'proposal') return `<li class="gl-row gl-on stop gl-proposal"><i class="gl-dot" aria-hidden="true"></i><span class="gl-msg">${tag('proposal')}<strong>${text(`Would cancel ${plural(repeat.size, 'repeated write')}`)}</strong><span class="muted">Not tested on a copy yet</span></span></li>`;
+    // A branch: its header (a fold when it has commits), its commits, and a lost connection if one ended it.
+    const {seg} = e, n = seg.writes.length, label = ATTEMPT_LABEL[seg.attempt] || seg.attempt;
+    const reps = seg.writes.filter(w => repeat.has(w.x)), keeps = seg.writes.filter(w => kept.has(w.x));
+    const of = reps.map(w => originalOf.get(w.x).commitLabel), range = (a) => a.length ? (Math.min(...a) === Math.max(...a) ? `#${Math.min(...a)}` : `#${Math.min(...a)}–${Math.max(...a)}`) : '';
+    const numeric = of.every(Number.isFinite);
+    const pills = `${reps.length ? `<span class="gl-pill repeat">${text(`${plural(reps.length, 'repeat')}${numeric ? ` of ${range(of)}` : ''}`)}</span>` : ''}${keeps.length ? `<span class="gl-pill kept">${text(`${plural(keeps.length, 'first write')} kept`)}</span>` : ''}${pairs && n - reps.length - keeps.length > 0 ? `<span class="gl-pill">${text(`${n - reps.length - keeps.length} untouched`)}</span>` : ''}`;
+    const labels = seg.writes.map(w => w.commitLabel), span = n ? (n === 1 ? `#${labels[0]}` : `#${labels[0]}–${labels[n - 1]}`) : '';
+    const tone = reps.length ? ' repeat' : keeps.length ? ' kept' : '';
+    const ends = !n; // nothing was committed, so nothing merges back: the branch stops at its last row
+    const headInner = `<i class="gl-dot" aria-hidden="true"></i><span class="gl-msg">${n ? `<span class="gl-chev" aria-hidden="true">${icon('chevron-right')}</span>` : ''}${tag(seg.attempt)}<strong>${text(label)}</strong><span class="muted">${n ? text(plural(n, 'write')) : 'no commit records'}</span>${pills}</span>${span ? `<span class="gl-meta mono">${text(span)}</span>` : ''}`;
+    const gapRows = seg.gaps.map((m, j) => `<div class="gl-row gl-on gl-gap${ends && !seg.lost.length && j === seg.gaps.length - 1 ? ' stop' : ''}"><i class="gl-dot" aria-hidden="true"></i><span class="gl-msg"><strong>Gap in the commit log</strong>${m.detail ? `<span class="muted">${text(m.detail)}</span>` : ''}</span></div>`).join('');
+    const lost = gapRows + seg.lost.map((m, j) => `<div class="gl-row gl-on gl-lost${ends && j === seg.lost.length - 1 ? ' stop' : ''}">${GL_BOLT}<span class="gl-msg"><strong>Connection lost</strong>${m.detail ? `<span class="muted">${text(m.detail)}</span>` : ''}</span></div>`).join('');
+    if (!n) return `<li class="gl-branch"><div class="gl-row gl-on gl-head${lost ? '' : ' stop'}">${headInner}</div>${lost}</li>`;
+    const key = `${state.incident.id}:${recordedMode() ? 'rec' : 'script'}:${i}`;
+    const open = state.reconOpen.has(key) ? state.reconOpen.get(key) : reps.length > 0;
+    return `<li class="gl-branch"><details class="gl-group" data-group="${escape(key)}"${open ? ' open' : ''}><summary class="gl-row gl-on gl-head${tone}">${headInner}</summary><ol class="gl-commits">${commits(seg.writes)}</ol></details>${lost}</li>`;
   }).join('');
-  const lost = marks.filter(m => m.type === 'connection_lost' && laneOf.has(m.attempt))
-    .map(m => `<line class="recon-lost" x1="${m.x}" x2="${m.x}" y1="${laneOf.get(m.attempt) * RECON_LANE + 3}" y2="${laneOf.get(m.attempt) * RECON_LANE + RECON_LANE - 3}"><title>Connection lost · ${text(ATTEMPT_LABEL[m.attempt] || m.attempt)}</title></line>`).join('');
+
   const gaps = marks.filter(m => m.type === 'log_gap');
-  const bands = lanes.map((l, i) => `<rect class="recon-band${i % 2 ? ' alt' : ''}" x="0" y="${i * RECON_LANE}" width="${n}" height="${RECON_LANE}"/>`).join('');
-  const activeIndex = Number.isInteger(state.reconActive) && state.reconActive < writes.length ? state.reconActive : null;
-  const ring = activeIndex === null ? '' : (() => { const w = writes[activeIndex]; return `<rect class="recon-ring" x="${w.x + 0.04}" y="${top(w) - 3}" width="0.92" height="${RECON_LANE - 8}"/>`; })();
-  const laneRows = lanes.map(l => {
-    const count = writes.filter(w => w.attempt === l).length;
-    const notes = [count ? `${count} write${count === 1 ? '' : 's'}` : 'no commit records',
-      marks.some(m => m.type === 'connection_lost' && m.attempt === l) ? 'connection lost' : '',
-      gaps.some(m => m.attempt === l) ? 'log gap' : ''].filter(Boolean).join(' · ');
-    const short = l === 'web-checkout' ? 'Checkouts' : ATTEMPT_LABEL[l] || l;
-    return `<li title="${escape(`${ATTEMPT_LABEL[l] || l} · ${notes}`)}"><strong class="lane-long">${text(ATTEMPT_LABEL[l] || l)}</strong><strong class="lane-short">${text(short)}</strong><span>${text(notes)}</span></li>`;
-  }).join('');
   const legend = pairs
     ? `<span><i class="kept"></i>First write · stays</span><span><i class="repeat"></i>${repeatRole}</span><span><i></i>Untouched</span>`
     : '<span><i></i>Committed write</span>';
-  const lostKey = marks.some(m => m.type === 'connection_lost') ? '<span><i class="lost"></i>Connection lost</span>' : '';
+  const lostKey = marks.some(m => m.type === 'connection_lost') ? `<span>${GL_BOLT.replace('gl-bolt', 'legend-bolt')}Connection lost</span>` : '';
+  const copyKey = review ? `<span><span class="legend-x">${icon('x')}</span>Cancelled on the ${past ? 'recorded ' : ''}copy</span>` : '';
   const untouched = writes.length - repeat.size - kept.size;
   const lostCount = marks.filter(m => m.type === 'connection_lost').length;
   const summary = stopped ? `The script stopped instead of guessing: ${stopped} source events have no commit record${gaps.length ? ', where the log has a gap' : ''}.`
@@ -908,13 +1015,10 @@ function reconstructionView(pairs = null, {recorded = false, stopped = null, reh
     : pairs && !recorded && !rehearsed ? `The proposal would cancel ${repeat.size} repeated write${repeat.size === 1 ? '' : 's'} and keep the first write of each source event. ${untouched} other write${untouched === 1 ? '' : 's'} would stay untouched. Nothing is cancelled until it is tested on a copy.`
     : pairs ? `${recorded ? 'This recording’s review cancels' : 'On the copy, the repair cancelled'} ${repeat.size} repeated write${repeat.size === 1 ? '' : 's'} and ${recorded ? 'keeps' : 'kept'} the first write of each source event. ${untouched} other write${untouched === 1 ? ' is' : 's are'} untouched.`
     : `${writes.length} committed writes across ${lanes.length} ${lanes.length === 1 ? 'attempt' : 'attempts'}${lostCount ? `, with ${lostCount === 1 ? 'a lost connection' : `${lostCount} lost connections`}` : ''}${gaps.length ? ' and a gap in the commit log' : ''}. The investigation decides which writes repeat.`;
-  const described = `${summary} Use the arrow keys to move between writes${selectable ? ' and Enter to open one' : ''}.`;
   return `<section class="recon" aria-labelledby="recon-title">${head}
-    <div class="recon-body"><ol class="recon-lanes" aria-hidden="true">${laneRows}</ol>
-      <svg class="recon-svg" data-count="${writes.length}" viewBox="0 0 ${n} ${height}" height="${height}" preserveAspectRatio="none" tabindex="0" role="group" aria-roledescription="timeline" aria-label="${escape(`Committed writes in commit order, ${lanes.length} lanes`)}" aria-describedby="recon-summary">${bands}${curves}${ticks}${lost}${ring}</svg></div>
-    <div class="recon-legend" aria-hidden="true">${legend}${lostKey}</div>
-    <p class="recon-summary" id="recon-summary">${text(summary)}<span class="sr-only"> ${text(described.slice(summary.length + 1))}</span></p>
-    <p class="sr-only" id="recon-live" aria-live="polite"></p>${runsCompare(model)}</section>`;
+    <ol class="gl" aria-label="${escape(`Commit history, ${plural(writes.length, 'committed write')} across ${plural(lanes.length, 'attempt')}, oldest first`)}">${rows}</ol>
+    <div class="recon-legend graph-legend" aria-hidden="true">${legend}${lostKey}${copyKey}</div>
+    <p class="recon-summary gl-summary" id="recon-summary">${text(summary)}${selectable ? '<span class="sr-only"> Open a branch to list its commits; select a commit to open its order.</span>' : ''}</p>${runsCompare(model)}</section>`;
 }
 
 // Compared runs, under the timeline: one row per run on this case (the offline script, then each
@@ -954,22 +1058,22 @@ function runsCompare(model) {
   const byOrder = new Map(model.writes.map(w => [w.order_id, w]));
   const run = state.run?.incident_id === caseId ? state.run : null;
   const engine = run?.plan ? new Set(run.plan.cancellations.map(a => a.order_id)) : null, rehearsed = !!run?.review;
-  const rows = [{label: 'Script baseline', current: !recordedMode(), attrs: 'data-source="script"', set: engine, script: true,
+  const rows = [{label: 'Script baseline', current: !recordedMode(), attrs: 'data-source="script"', set: engine, script: true, sub: engine && !rehearsed ? 'not tested on a copy yet' : '',
     line: engine ? '' : run?.status === 'stopped' ? 'stop' : '',
-    note: engine ? `${rehearsed ? 'cancels' : 'targets'} ${engine.size}` : run?.status === 'stopped' ? `stopped · ${run.missing_event_ids?.length ?? 0} events unmatched` : run ? statusOf(run)[0] : 'not investigated yet',
+    note: engine ? `${rehearsed ? 'cancels' : 'targets'} ${engine.size}` : run?.status === 'stopped' ? `stopped · ${plural(run.missing_event_ids?.length ?? 0, 'event')} unmatched` : run ? statusOf(run)[0] : 'not investigated yet',
     short: engine ? `× ${engine.size}` : run?.status === 'stopped' ? 'stopped' : run ? statusOf(run)[0] : 'not run'}];
   const tally = {same: 0, differ: 0, repair: 0, stop: 0, incomplete: 0, error: 0, skipped: 0, loading: 0}, sizes = new Set();
   recs.forEach((r, i) => {
-    const row = {label: `Meta run ${recs.length - i}`, current: recordedMode() && r.id === state.recId, attrs: `data-source="recorded" data-recording="${escape(r.id)}"`, set: null, line: ''};
+    const row = {label: `Meta run ${recs.length - i}`, current: recordedMode() && r.id === state.recId, attrs: `data-source="recorded" data-recording="${escape(r.id)}"`, set: null, line: '', kind: 'skipped'};
     rows.push(row);
     row.short = 'not compared';
     if (r.fixture_matches === false) { row.note = 'inputs differ · not compared'; tally.skipped++; return; }
-    if (r.outcome === 'stop') { Object.assign(row, {line: 'stop', note: 'stopped · no repair', short: 'stopped'}); tally.stop++; return; }
-    if (r.outcome === 'error') { Object.assign(row, {line: 'error', note: 'error · no repair', short: 'error'}); tally.error++; return; }
-    if (r.outcome === 'incomplete') { Object.assign(row, {line: 'error', note: 'did not finish', short: 'unfinished'}); tally.incomplete++; return; }
+    if (r.outcome === 'stop') { Object.assign(row, {line: 'stop', note: 'stopped · no repair', short: 'stopped', kind: 'stop'}); tally.stop++; return; }
+    if (r.outcome === 'error') { Object.assign(row, {line: 'error', note: 'error · no repair', short: 'error', kind: 'error'}); tally.error++; return; }
+    if (r.outcome === 'incomplete') { Object.assign(row, {line: 'error', note: 'did not finish', short: 'unfinished', kind: 'error'}); tally.incomplete++; return; }
     if (r.outcome !== 'repair') { row.note = `${recOutcome(r)[0]} · not compared`; tally.skipped++; return; }
     const entry = recDetail(caseId, r.id), d = entry.data;
-    if (entry.status === 'loading') { Object.assign(row, {note: 'loading…', short: '…'}); tally.loading++; return; }
+    if (entry.status === 'loading') { Object.assign(row, {note: 'loading…', short: '…', kind: 'loading'}); tally.loading++; return; }
     if (!d || !d.review || d.citations_enabled !== true || d.incident_id !== caseId || d.fixture_matches !== true) {
       row.note = !d ? 'unavailable · not compared' : !d.review ? 'no verified review' : 'inputs differ · not compared'; tally.skipped++; return;
     }
@@ -981,8 +1085,9 @@ function runsCompare(model) {
       row.note = !extra && !missed ? `same ${row.set.size} as the script`
         : [`${agree} of ${engine.size} match`, missed ? `misses ${missed}` : '', extra ? `${extra} not in the script` : ''].filter(Boolean).join(' · ');
       row.short = !extra && !missed ? '= script' : 'differs';
+      Object.assign(row, {kind: !extra && !missed ? 'same' : 'differ', agree});
       tally[!extra && !missed ? 'same' : 'differ']++;
-    } else { Object.assign(row, {note: `cancels ${row.set.size}`, short: `× ${row.set.size}`}); tally.repair++; }
+    } else { Object.assign(row, {note: `cancels ${row.set.size}`, short: `× ${row.set.size}`, kind: 'repair'}); tally.repair++; }
     if (outside) row.note += ` · ${outside} outside the evidence`;
   });
 
@@ -1004,58 +1109,33 @@ function runsCompare(model) {
   }
   if (!run && tally.repair) headline += ' Investigate the incident to compare them with the script.';
 
-  const H = RECON_LANE, n = Math.max(model.writes.length, 1);
-  let anyMissed = false, anyExtra = false, anyPlanned = false;
-  const svgRows = rows.map((row, i) => {
-    const y = i * H, band = `<rect class="recon-band${i % 2 ? ' alt' : ''}${row.current ? ' current' : ''}" x="0" y="${y}" width="${n}" height="${H}"/>`;
-    if (!row.set) return `${band}<line class="cmp-line${row.line ? ` ${row.line}` : ''}" x1="0" x2="${n}" y1="${y + H / 2}" y2="${y + H / 2}"/>`;
-    const marks = model.writes.map(w => {
-      const mine = row.set.has(w.order_id), base = engine?.has(w.order_id);
-      if (mine) {
-        const extra = !row.script && engine && !base, planned = row.script && !rehearsed;
-        anyExtra = anyExtra || extra; anyPlanned = anyPlanned || planned;
-        const says = planned ? 'the script targets it · not rehearsed yet' : `${row.label} cancels it${row.script || !engine ? '' : base ? (rehearsed ? ' · so does the script' : ' · the script targets it too') : ' · the script keeps it'}`;
-        return `<rect class="cmp-mark${extra ? ' extra' : ''}${planned ? ' planned' : ''}" x="${w.x + 0.18}" y="${y + 5}" width="0.64" height="${H - 10}"><title>${text(`${w.order_id} · ${says}`)}</title></rect>`;
-      }
-      if (!row.script && engine && base) {
-        anyMissed = true;
-        return `<rect class="cmp-missed" x="${w.x + 0.22}" y="${y + 6}" width="0.56" height="${H - 12}"><title>${text(`${w.order_id} · the script ${rehearsed ? 'cancels' : 'targets'} it · ${row.label} keeps it`)}</title></rect>`;
-      }
-      return '';
-    }).join('');
-    return band + marks;
+  // One line per run against the script, like comparing branches: a verdict, a five-block diffstat and, for a
+  // run that differs, the orders it cancels that the script keeps (+) and the reverse (−), numbered as in the
+  // log above. Only plans and verified reviews are compared; nothing here decides what repeats.
+  const ICON = {same: 'circle-check', differ: 'circle-alert', stop: 'ban', error: 'circle-x', skipped: 'info', loading: 'loader-circle', repair: 'circle-check'};
+  const blocks = (row) => {
+    if (row.kind !== 'same' && row.kind !== 'differ') return '';
+    const good = row.kind === 'same' ? 5 : Math.min(4, Math.round(5 * row.agree / (Math.max(engine.size, row.set.size) || 1)));
+    return `<span class="cmp-stat"><span class="cmp-blocks" aria-hidden="true">${'<i class="g"></i>'.repeat(good)}${'<i class="a"></i>'.repeat(5 - good)}</span>${text(`${row.agree} of ${engine.size} match`)}</span>`;
+  };
+  const diff = (row) => {
+    if (row.kind !== 'differ') return '';
+    const at = (id) => byOrder.get(id)?.x ?? Infinity, order = (ids) => ids.sort((a, b) => at(a) - at(b));
+    const plus = order([...row.set].filter(id => !engine.has(id))), minus = order([...engine].filter(id => !row.set.has(id)));
+    const line = (sign, cls, id, says) => { const w = byOrder.get(id);
+      return `<li class="${cls}"><span aria-hidden="true">${sign}</span><span class="mono">${w ? `#${text(w.commitLabel)}` : '—'}</span><span class="mono">${text(compactId(id))}</span><span>${text(says)}</span></li>`; };
+    const n = plus.length + minus.length;
+    return `<details class="cmp-diff"><summary>${text(`${n} ${n === 1 ? 'difference' : 'differences'}`)}</summary><ul>${plus.map(id => line('+', 'cmp-plus', id, `${row.label} cancels it; the script keeps it${byOrder.has(id) ? '' : ' · not in the evidence'}`)).join('')}${minus.map(id => line('−', 'cmp-minus', id, `the script ${rehearsed ? 'cancels' : 'targets'} it; ${row.label} keeps it`)).join('')}</ul></details>`;
+  };
+  const items = rows.map(row => {
+    const kind = row.script ? `script${row.line === 'stop' ? ' stop' : ''}` : row.kind;
+    const ic = row.script ? 'git-compare' : ICON[row.kind] || 'info';
+    return `<li class="cmp-row ${kind}${row.current ? ' current' : ''}"><button class="cmp-open" ${row.attrs}${row.current ? ' aria-current="true"' : ''} title="${escape(`Open ${row.label}`)}"><span class="cmp-icon" aria-hidden="true">${icon(ic, row.kind === 'loading' ? 'spin' : '')}</span><strong>${text(row.label)}</strong><span class="cmp-long">${text(row.note)}</span>${row.sub ? `<span class="cmp-sub">${text(row.sub)}</span>` : ''}${blocks(row)}${row.current ? '<span class="cmp-here">on screen</span>' : ''}</button>${diff(row)}</li>`;
   }).join('');
-  const labels = rows.map(row => `<li><button class="compare-run${row.current ? ' current' : ''}" ${row.attrs} ${row.current ? 'aria-current="true"' : ''} title="${escape(`${row.label} · ${row.note}`)}"><strong>${text(row.label)}</strong><span class="cmp-long">${text(row.note)}</span><span class="cmp-short" aria-hidden="true">${text(row.short)}</span></button></li>`).join('');
-  const legend = `<span><i class="repeat"></i>Cancelled by that run</span>${anyPlanned ? '<span><i class="planned"></i>Script’s target · not rehearsed yet</span>' : ''}${anyMissed ? `<span><i class="missed"></i>${rehearsed ? 'Cancelled' : 'Targeted'} by the script, kept by that run</span>` : ''}${anyExtra ? '<span><i class="extra"></i>Not in the script’s plan</span>' : ''}<span><i class="line"></i>No repair</span>`;
   return `<div class="recon-compare">
-    <div class="recon-head"><h4 id="compare-title">Compared runs</h4><span class="caption">Lined up with the writes above. Recordings show their verified reviews; the script shows its ${rehearsed ? 'test on a copy' : 'proposal'}.</span></div>
-    <div class="recon-body"><ol class="recon-lanes compare-lanes" aria-labelledby="compare-title">${labels}</ol>
-      <svg class="compare-svg" viewBox="0 0 ${n} ${rows.length * H}" height="${rows.length * H}" preserveAspectRatio="none" aria-hidden="true" focusable="false">${svgRows}</svg></div>
-    <div class="recon-legend" aria-hidden="true">${legend}</div>
-    <p class="recon-summary">${text(headline)}</p>
+    <div class="recon-head"><h4 id="compare-title">Compared runs</h4><span class="caption">Each run against the script. Recordings show their verified reviews; the script shows its ${rehearsed ? 'test on a copy' : 'proposal'}.</span></div>
+    <div class="cmp-box"><p class="cmp-headline">${text(headline)}</p><ol class="cmp-list" aria-labelledby="compare-title">${items}</ol></div>
   </div>`;
-}
-
-// Keyboard: one tab stop; arrows move between writes; Enter opens the order (same as clicking a tick).
-function moveRecon(svg, key) {
-  const n = Number(svg.dataset.count);
-  if (!n) return false;
-  const moves = {ArrowRight: 1, ArrowLeft: -1, PageDown: 10, PageUp: -10};
-  const cur = Number.isInteger(state.reconActive) ? state.reconActive : -1;
-  if (key === 'Home') state.reconActive = 0;
-  else if (key === 'End') state.reconActive = n - 1;
-  else if (key in moves) state.reconActive = Math.max(0, Math.min(n - 1, cur < 0 && moves[key] < 0 ? 0 : cur + moves[key]));
-  else return false;
-  const tick = svg.querySelector(`[data-i="${state.reconActive}"]`);
-  let ring = svg.querySelector('.recon-ring');
-  if (tick) {
-    if (!ring) { ring = document.createElementNS('http://www.w3.org/2000/svg', 'rect'); ring.setAttribute('class', 'recon-ring'); svg.appendChild(ring); }
-    const x = Number(tick.getAttribute('x')) - 0.14, y = Number(tick.getAttribute('y')) - 3;
-    ring.setAttribute('x', String(x)); ring.setAttribute('y', String(y)); ring.setAttribute('width', '0.92'); ring.setAttribute('height', String(RECON_LANE - 8));
-    const live = $('#recon-live');
-    if (live) live.textContent = tick.querySelector('title')?.textContent || '';
-  }
-  return true;
 }
 
 function investigationView() {
@@ -2926,14 +3006,6 @@ document.addEventListener('keydown', event => {
     items[next]?.focus();
     return;
   }
-  if (t.classList?.contains('recon-svg')) {
-    if (moveRecon(t, key)) { event.preventDefault(); return; }
-    if ((key === 'Enter' || key === ' ') && Number.isInteger(state.reconActive)) {
-      const tick = t.querySelector(`[data-i="${state.reconActive}"]`);
-      if (tick?.dataset.key) { event.preventDefault(); select(tick.dataset.key, {keepFocus: true}); }
-      return;
-    }
-  }
   if (t.id === 'ev-lines') {
     const moves = {ArrowDown: 1, ArrowUp: -1, PageDown: 15, PageUp: -15};
     if (key in moves) { event.preventDefault(); moveActive(moves[key]); return; }
@@ -2985,6 +3057,21 @@ $('#palette').addEventListener('close', () => { if (!palette.ran && palette.retu
 window.addEventListener('resize', () => { positionTabIndicator(); applyRail(); if (state.nav && !isNarrow()) setNav(false); });
 document.addEventListener('pointerdown', event => { const handle = event.target.closest?.('.resizer'); if (handle) startSideDrag(event, handle); });
 document.addEventListener('pointermove', moveSideDrag);
+// Pointing at or focusing a commit in What happened lights up the other writes of its source event.
+let glPaired = false;
+function pairHighlight(row) {
+  if (!row && !glPaired) return;
+  document.querySelectorAll('#content .gl .paired').forEach(el => el.classList.remove('paired'));
+  glPaired = false;
+  for (const id of row?.dataset.pair?.split(' ') || []) {
+    const other = document.querySelector(`#content .gl [data-i="${id}"]`);
+    if (other) { other.classList.add('paired'); glPaired = true; }
+  }
+}
+document.addEventListener('pointerover', event => pairHighlight(event.target.closest?.('.gl-commits > li') || null));
+document.addEventListener('focusin', event => pairHighlight(event.target.closest?.('.gl-commits > li') || null));
+// A commit group the person opens or closes stays that way when the panel repaints.
+document.addEventListener('toggle', event => { const d = event.target; if (d?.classList?.contains('gl-group')) state.reconOpen.set(d.dataset.group, d.open); }, true);
 document.addEventListener('pointerup', event => endSideDrag(event));
 document.addEventListener('pointercancel', event => endSideDrag(event, true));
 document.addEventListener('dblclick', event => { if (event.target.closest?.('.resizer')) resetSidebar(); });

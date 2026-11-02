@@ -794,68 +794,115 @@ details.tl-card>.tl-head:hover{background:var(--hover)}
 .stock-delta.negative{fill:var(--warn)}
 .stock-track line{stroke:var(--ink);stroke-width:1;vector-effect:non-scaling-stroke}
 
-/* What happened: lanes of committed writes, with repeats linked to the first write they duplicate */
+/* What happened: the evidence as a git log, then the compared runs */
 .recon{margin:var(--s3) 0 var(--s4);padding:var(--s3) 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
 #content>.recon:first-child{margin-top:0;padding-top:0;border-top:0}
 .recon-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;margin-bottom:var(--s2)}
 .recon-head h3{margin:0}
-.recon-body{display:grid;grid-template-columns:156px minmax(0,1fr);align-items:start}
-.recon-lanes{margin:0;padding:0;list-style:none}
-.recon-lanes li{height:30px;display:flex;flex-direction:column;justify-content:center;padding-right:12px;line-height:1.2;white-space:nowrap;overflow:hidden}
-.recon-lanes strong{font-size:var(--fs-3);font-weight:600}
-.recon-lanes span{overflow:hidden;text-overflow:ellipsis;font-size:var(--fs-1);color:var(--faint)}
-.recon-lanes strong{overflow:hidden;text-overflow:ellipsis}
-.recon-lanes .lane-short{display:none}
-.recon-svg{display:block;width:100%;overflow:visible;border-radius:var(--r-sm)}
-.recon-svg:focus{outline:none}
-.recon-svg:focus-visible{outline:2px solid var(--accent);outline-offset:4px}
-.recon-band{fill:var(--surface)}
-.recon-band.alt{fill:var(--raised)}
-.recon-tick{fill:var(--chart-neutral);cursor:pointer;transition:fill var(--dur-1)}
-.recon-tick:hover{fill:var(--ink)}
-.recon-tick.kept{fill:var(--accent)}
-.recon-tick.repeat{fill:var(--warn)}
-.recon-tick.selected{fill:var(--ink)}
-.recon-arc{fill:none;stroke:var(--warn);stroke-opacity:.5;stroke-width:1;vector-effect:non-scaling-stroke}
-.recon-lost{stroke:var(--danger-ink);stroke-width:2;stroke-dasharray:3 3;vector-effect:non-scaling-stroke}
-.recon-ring{fill:none;stroke:var(--ink);stroke-width:1.5;vector-effect:non-scaling-stroke;pointer-events:none}
+/* What happened as a git log: rails at 14px (main) and 36px (a branch), one row per commit or event. */
+.gl{position:relative;margin:0;padding:0;list-style:none;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface);overflow:hidden}
+.gl-branch{display:block}
+.gl-row,.gl-commits>li{position:relative;display:flex;flex-wrap:wrap;align-items:center;gap:2px var(--s1);min-height:36px;padding:7px var(--s2) 7px 56px;border-top:1px solid var(--line);font-size:var(--fs-3);line-height:1.45;--mid:18px}
+.gl>li:first-child{border-top:0}
+.gl-row::before,.gl-commits>li::before{content:'';position:absolute;left:13px;top:0;bottom:0;width:2px;background:var(--line-3)}
+.gl-main.first::before{top:var(--mid)}
+.gl-main.last::before{bottom:auto;height:var(--mid)}
+.gl-on::after,.gl-commits>li::after{content:'';position:absolute;left:35px;top:0;bottom:0;width:2px;background:var(--muted)}
+.gl-on.stop::after{bottom:auto;height:var(--mid)}
+.gl-curve{position:absolute;left:0;width:52px;height:18px;fill:none;stroke:var(--muted);stroke-width:2}
+.gl-curve.merge{top:0}
+.gl-curve.fork{top:18px}
+.gl-dot{position:absolute;z-index:1;top:calc(var(--mid) - 5px);left:9px;width:10px;height:10px;border-radius:50%;background:var(--chart-neutral)}
+.gl-on>.gl-dot{left:31px}
+.gl-main>.gl-dot{background:var(--surface);box-shadow:inset 0 0 0 2px var(--muted)}
+.gl-head.kept>.gl-dot,.gl-result.ok>.gl-dot{background:var(--accent)}
+.gl-head.repeat>.gl-dot{background:var(--warn)}
+.gl-result.danger>.gl-dot{background:var(--danger)}
+.gl-proposal>.gl-dot,.gl-gap>.gl-dot{background:var(--surface);box-shadow:inset 0 0 0 2px var(--warn)}
+.gl-dot.gl-x{display:grid;place-items:center;top:calc(var(--mid) - 7px);left:29px;width:14px;height:14px;background:var(--surface);box-shadow:inset 0 0 0 1.5px var(--warn);color:var(--warn-ink)}
+.gl-dot.gl-x .icon{width:10px;height:10px}
+.gl-bolt{position:absolute;z-index:1;top:calc(var(--mid) - 8px);left:31px;width:10px;height:16px;fill:none;stroke:var(--danger-ink);stroke-width:1.8;stroke-linejoin:round;stroke-linecap:round;background:var(--surface)}
+.gl-msg{display:flex;flex-wrap:wrap;align-items:center;gap:2px var(--s1);min-width:0}
+.gl-meta{margin-left:auto;padding-left:var(--s1);font-size:var(--fs-1);color:var(--faint);white-space:nowrap}
+.gl-tag{padding:0 7px;border:1px solid var(--line-2);border-radius:var(--r-pill);font:var(--fs-1)/18px var(--mono);color:var(--muted)}
+.gl-tag.head{border-color:var(--accent-line);color:var(--accent-ink)}
+.gl-pill,.gl .recon-arc{padding:0 7px;border-radius:var(--r-pill);background:var(--raised);font-size:var(--fs-1);line-height:18px;color:var(--muted)}
+.gl-pill.kept{background:var(--accent-soft);color:var(--accent-ink)}
+.gl-pill.repeat,.gl .recon-arc{background:var(--warn-soft);color:var(--warn-ink)}
+.gl-lost strong{color:var(--danger-ink)}
+.gl-result.ok .gl-checks{color:var(--accent-ink)}
+.gl-result.danger .gl-checks{color:var(--danger-ink)}
+.gl-group>summary{cursor:pointer;list-style:none}
+.gl-group>summary::-webkit-details-marker{display:none}
+.gl-group>summary:hover{background:var(--hover)}
+.gl-group>summary:focus-visible,.gl-commits>li:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.gl-chev{display:inline-flex;color:var(--faint);transition:transform var(--dur-1)}
+.gl-chev .icon{width:14px;height:14px}
+.gl-group[open]>summary .gl-chev{transform:rotate(90deg)}
+.gl-commits{margin:0;padding:0;list-style:none}
+.gl-commits>li.gl-more{display:block;min-height:0;padding:0;border-top:0;background:none}
+.gl-commits>li.gl-more::before,.gl-commits>li.gl-more::after{content:none}
+.gl-fold{position:relative;display:flex;align-items:center;gap:var(--s1);min-height:28px;padding:3px var(--s2) 3px 56px;border-top:1px solid var(--line);background:var(--raised);font-size:var(--fs-2);color:var(--muted);cursor:pointer;list-style:none}
+.gl-fold::-webkit-details-marker{display:none}
+.gl-fold::before,.gl-fold::after{content:'';position:absolute;top:0;bottom:0;width:2px}
+.gl-fold::before{left:13px;background:var(--line-3)}
+.gl-fold::after{left:35px;background:var(--muted)}
+.gl-fold:hover{background:var(--hover);color:var(--ink)}
+.gl-fold:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.gl-more>details[open]>.gl-fold .gl-chev{transform:rotate(90deg)}
+.gl-commits>li{min-height:28px;padding-top:3px;padding-bottom:3px;background:var(--raised);font-size:var(--fs-2);--mid:14px}
+.gl-commits>li>.gl-dot{top:calc(var(--mid) - 3.5px);left:32.5px;width:7px;height:7px}
+.gl-commits>li.kept>.gl-dot{background:var(--accent)}
+.gl-commits>li.repeat>.gl-dot{background:var(--warn)}
+.gl-commits>li[data-key]{cursor:pointer}
+.gl-commits>li[data-key]:hover,.gl-commits>li.paired{background:var(--hover)}
+.gl-commits>li.paired{box-shadow:inset 3px 0 0 var(--warn)}
+.gl-commits>li.selected{background:var(--accent-soft)}
+.gl-id{color:var(--ink)}
+.recon-summary.gl-summary,.recon-legend.graph-legend{margin-left:0}
+.recon-legend.graph-legend i{width:8px;height:8px;border-radius:50%;vertical-align:0}
+.legend-bolt{width:8px;height:12px;margin-right:7px;vertical-align:-2px;fill:none;stroke:var(--danger-ink);stroke-width:1.8;stroke-linejoin:round;stroke-linecap:round}
+.legend-x{display:inline-flex;margin-right:7px;color:var(--warn-ink);vertical-align:-2px}
+.legend-x .icon{width:10px;height:10px}
 .recon-legend{display:flex;flex-wrap:wrap;gap:6px 18px;margin:10px 0 0 156px;font-size:var(--fs-2);color:var(--muted)}
 .recon-legend i{display:inline-block;width:6px;height:12px;margin-right:7px;border-radius:var(--r-xs);vertical-align:-2px;background:var(--chart-neutral)}
 .recon-legend i.kept{background:var(--accent)}
 .recon-legend i.repeat{background:var(--warn)}
-.recon-legend i.lost{width:0;border-left:2px dashed var(--danger-ink);border-radius:0;background:none}
 .recon-summary{margin:10px 0 0 156px;max-width:82ch;font-size:var(--fs-4);line-height:1.55}
-/* Compared runs: the same columns as the timeline, one row per run. */
+/* Compared runs: one line per run against the script, with a diffstat and its differences. */
 .recon-compare{margin-top:20px;padding-top:16px;border-top:1px solid var(--line)}
 .recon-compare .recon-head h4{margin:0;font-size:var(--fs-3);font-weight:600}
-.compare-lanes li{height:30px;padding-right:10px}
-.compare-run{display:flex;flex-direction:column;justify-content:center;width:100%;height:100%;min-width:0;padding:0 6px;margin-left:-6px;border-radius:var(--r-sm);text-align:left;color:var(--ink);line-height:1.15}
-.compare-run:hover{background:var(--hover)}
-.compare-run.current{background:var(--raised)}
-.compare-run strong{overflow:hidden;text-overflow:ellipsis;font-size:var(--fs-3);font-weight:600}
-.compare-run span{overflow:hidden;text-overflow:ellipsis;font-size:var(--fs-2);color:var(--faint)}
-.compare-run.current span{color:var(--muted)}
-.compare-run .cmp-short{display:none}
-.compare-svg{display:block;width:100%;border-radius:var(--r-sm)}
-.recon-band.current{fill:var(--hover)}
-.cmp-mark{fill:var(--warn)}
-.cmp-mark.extra{fill:var(--danger)}
-.cmp-mark.planned{fill-opacity:.45}
-.cmp-missed{fill:none;stroke:var(--warn);stroke-width:1;stroke-opacity:.85;vector-effect:non-scaling-stroke}
-.cmp-line{stroke:var(--line-2);stroke-width:1;stroke-dasharray:2 3;vector-effect:non-scaling-stroke}
-.cmp-line.stop{stroke:var(--warn);stroke-opacity:.8}
-.cmp-line.error{stroke:var(--danger-ink);stroke-opacity:.75}
-.recon-legend i.missed{background:none;box-shadow:inset 0 0 0 1px var(--warn)}
-.recon-legend i.extra{background:var(--danger)}
-.recon-legend i.planned{background:var(--warn);opacity:.45}
-.recon-legend i.line{width:14px;height:0;border-top:1px dashed var(--faint);border-radius:0;background:none;vertical-align:3px}
+.cmp-box{border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface);overflow:hidden}
+.cmp-headline{margin:0;padding:10px var(--s2);border-bottom:1px solid var(--line);background:var(--raised);font-size:var(--fs-3);font-weight:500}
+.cmp-list{margin:0;padding:0;list-style:none}
+.cmp-row+.cmp-row{border-top:1px solid var(--line)}
+.cmp-open{display:flex;flex-wrap:wrap;align-items:center;gap:2px var(--s1);width:100%;min-height:40px;padding:8px var(--s2);border-radius:0;text-align:left;color:var(--ink);font-size:var(--fs-3)}
+.cmp-open:hover{background:var(--hover)}
+.cmp-open:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.cmp-row.current>.cmp-open{background:var(--raised);box-shadow:inset 3px 0 0 var(--muted)}
+.cmp-icon{display:inline-flex;flex:none;width:16px;color:var(--faint)}
+.cmp-icon .icon{width:15px;height:15px}
+.cmp-row.same .cmp-icon,.cmp-row.repair .cmp-icon,.cmp-row.same .cmp-long{color:var(--accent-ink)}
+.cmp-row.differ .cmp-icon,.cmp-row.differ .cmp-long,.cmp-row.stop .cmp-icon{color:var(--warn-ink)}
+.cmp-row.error .cmp-icon{color:var(--danger-ink)}
+.cmp-open strong{min-width:7.5em;font-weight:600}
+.cmp-long{color:var(--muted)}
+.cmp-sub,.cmp-here{font-size:var(--fs-2);color:var(--faint)}
+.cmp-stat{display:inline-flex;align-items:center;gap:var(--s1);margin-left:auto;font:var(--fs-1) var(--mono);color:var(--faint);white-space:nowrap}
+.cmp-blocks{display:inline-flex;gap:2px}
+.cmp-blocks i{width:8px;height:8px;border-radius:var(--r-xs);background:var(--line-2)}
+.cmp-blocks i.g{background:var(--accent)}
+.cmp-blocks i.a{background:var(--warn)}
+.cmp-diff{padding:0 var(--s2) 8px calc(var(--s2) + 16px + var(--s1))}
+.cmp-diff>summary{width:fit-content;cursor:pointer;font-size:var(--fs-2);color:var(--muted)}
+.cmp-diff>summary:hover{color:var(--ink)}
+.cmp-diff ul{margin:6px 0 0;padding:0;list-style:none;font-size:var(--fs-2)}
+.cmp-diff li{display:flex;flex-wrap:wrap;gap:2px var(--s1);padding:2px 0}
+.cmp-plus{color:var(--warn-ink)}
+.cmp-minus{color:var(--danger-ink)}
 @media(max-width:560px){
-  .recon-body{grid-template-columns:92px minmax(0,1fr)}
-  .recon-lanes span{display:none}
-  .recon-lanes .compare-run .cmp-short{display:block}
-  .recon-lanes .lane-long{display:none}
-  .recon-lanes .lane-short{display:block}
   .recon-legend,.recon-summary{margin-left:0}
+  .gl-meta{margin-left:0;padding-left:0}
 }
 
 /* Folded sidebar: a rail of progress rings (wide screens only). Rows keep their names for assistive tech. */

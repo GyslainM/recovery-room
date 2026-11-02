@@ -27,7 +27,7 @@ function harness(handler, options = {}) {
     setInterval: (fn) => { intervals.push(fn); return intervals.length; }, clearInterval: (id) => { cleared.push(id); }, intervals, cleared,
   };
   vm.createContext(context);
-  vm.runInContext(source + '\nrender = () => { globalThis.renderCalls++; };\nrenderPanel = () => {};\nglobalThis.subject = {state, download, reviewView, exportStatus, recheckExport, act, changesView, checksTab, sqlView, modeInfo, repairFlow, stockVisual, transition, packageView, lineContext, evidenceWrites, reconstructionView, runsCompare, checkContext, checksTab, demoDefault, staticContract, demoStartCase, guardrailMoment, guardrailView, timelineItems, displayedSteps, evaluationData, evaluationView, renderActions, replayControls, startReplay, playReplay, pauseReplay, nextReplay, sqlView, paletteCommands, loadSql, copySql, api, statusOf, stepsView, recCitations, recordedConclusion, recordedChangesView, recordedChecksView, startup, timerOn: () => replayTimer !== null};', context);
+  vm.runInContext(source + '\nrender = () => { globalThis.renderCalls++; };\nrenderPanel = () => {};\nglobalThis.subject = {gitSegments, state, download, reviewView, exportStatus, recheckExport, act, changesView, checksTab, sqlView, modeInfo, repairFlow, stockVisual, transition, packageView, lineContext, evidenceWrites, reconstructionView, runsCompare, checkContext, checksTab, demoDefault, staticContract, demoStartCase, guardrailMoment, guardrailView, timelineItems, displayedSteps, evaluationData, evaluationView, renderActions, replayControls, startReplay, playReplay, pauseReplay, nextReplay, sqlView, paletteCommands, loadSql, copySql, api, statusOf, stepsView, recCitations, recordedConclusion, recordedChangesView, recordedChecksView, startup, timerOn: () => replayTimer !== null};', context);
   return {context, nodes, ...context.subject};
 }
 
@@ -587,8 +587,13 @@ test('compared runs mark each run against the script only from plans and verifie
   assert.match(view, /Meta run 3<\/strong><span class="cmp-long">1 of 2 match · misses 1 · 1 not in the script</);
   assert.match(view, /Meta run 2<\/strong><span class="cmp-long">stopped · no repair</);
   assert.match(view, /Meta run 1<\/strong><span class="cmp-long">inputs differ · not compared</);
-  assert.equal((view.match(/class="cmp-mark extra"/g) || []).length, 1); // ord_b, which the script keeps
-  assert.equal((view.match(/class="cmp-missed"/g) || []).length, 1); // ord_d, which the differing run keeps
+  assert.equal((view.match(/class="cmp-plus"/g) || []).length, 1); // ord_b, which the script keeps
+  assert.equal((view.match(/class="cmp-minus"/g) || []).length, 1); // ord_d, which the differing run keeps
+  assert.match(view, /<li class="cmp-plus"><span aria-hidden="true">\+<\/span><span class="mono">#2<\/span><span class="mono">ord_b<\/span><span>Meta run 3 cancels it; the script keeps it<\/span><\/li>/);
+  assert.match(view, /<li class="cmp-minus"><span aria-hidden="true">−<\/span><span class="mono">#4<\/span><span class="mono">ord_d<\/span><span>the script cancels it; Meta run 3 keeps it<\/span><\/li>/);
+  assert.match(view, /<details class="cmp-diff"><summary>2 differences<\/summary>/);
+  assert.match(view, /class="cmp-row same"><button[^>]*>.*?<span class="cmp-blocks" aria-hidden="true">(<i class="g"><\/i>){5}<\/span>2 of 2 match/);
+  assert.match(view, /class="cmp-row differ"><button[^>]*>.*?(<i class="g"><\/i>){3}(<i class="a"><\/i>){2}<\/span>1 of 2 match/);
   assert.match(view, /4 recorded Meta runs: 1 cancels the same 2 writes as the script, 1 differs from the script, 1 stopped instead of repairing and 1 was not compared\./);
   assert.match(view, /data-recording="rec-other"/); // listed, so it can still be opened
   assert.doesNotMatch(view, /\bstyle=/);
@@ -601,8 +606,8 @@ test('a recording is not compared when its own record says the inputs differ', (
     details: {'rec-a': recording('rec-a', ['ord_c', 'ord_d'], {citations_enabled: false})},
   });
   assert.match(view, /Meta run 1<\/strong><span class="cmp-long">inputs differ · not compared</);
-  // Only the script's own two marks are drawn.
-  assert.equal((view.match(/class="cmp-mark"/g) || []).length, 2);
+  // Nothing is compared, so there is no diffstat and no difference list.
+  assert.doesNotMatch(view, /cmp-blocks|cmp-plus|cmp-minus/);
   assert.match(view, /The recorded Meta run was not compared\./);
 });
 
@@ -612,7 +617,7 @@ test('without a script run the rows show each recording and invite an investigat
     recs: [{id: 'rec-a', outcome: 'repair', fixture_matches: true}, {id: 'rec-b', outcome: 'repair', fixture_matches: true}],
     details: {'rec-a': recording('rec-a', ['ord_c', 'ord_d']), 'rec-b': recording('rec-b', ['ord_c', 'ord_d'])}});
   assert.match(view, /Script baseline<\/strong><span class="cmp-long">not investigated yet</);
-  assert.doesNotMatch(view, /cmp-missed|cmp-mark extra/);
+  assert.doesNotMatch(view, /cmp-plus|cmp-minus|cmp-blocks/);
   assert.match(view, /All 2 recorded Meta runs cancel 2 writes each\. Investigate the incident to compare them with the script\./);
 });
 
@@ -621,7 +626,9 @@ test('stops on both sides read as agreement, not as missing repairs', () => {
   const view = compareState(app, {engine: null, run: 'stopped', recs: [{id: 'rec-a', outcome: 'stop', fixture_matches: true}, {id: 'rec-b', outcome: 'stop', fixture_matches: true}]});
   assert.match(view, /Script baseline<\/strong><span class="cmp-long">stopped · 2 events unmatched</);
   assert.match(view, /All 2 recorded Meta runs stopped instead of repairing, as the script did\./);
-  assert.equal((view.match(/class="cmp-line stop"/g) || []).length, 3);
+  assert.equal((view.match(/class="cmp-row [^"]*\bstop\b/g) || []).length, 3);
+  app.state.run.missing_event_ids = ['evt-1']; // one unmatched event is singular
+  assert.match(app.runsCompare(app.evidenceWrites()), /Script baseline<\/strong><span class="cmp-long">stopped · 1 event unmatched</);
 });
 
 test('no recordings means no comparison', () => {
@@ -669,8 +676,7 @@ test('a proposal shows targets; only a rehearsal shows cancellations on the copy
   const view = compareState(harness(), {run: 'proposed', recs: [{id: 'rec-a', outcome: 'repair', fixture_matches: true}],
     details: {'rec-a': recording('rec-a', ['ord_c', 'ord_d'])}});
   assert.match(view, /Script baseline<\/strong><span class="cmp-long">targets 2</);
-  assert.equal((view.match(/class="cmp-mark planned"/g) || []).length, 2);
-  assert.match(view, /Script’s target · not rehearsed yet/);
+  assert.match(view, /Script baseline<\/strong><span class="cmp-long">targets 2<\/span><span class="cmp-sub">not tested on a copy yet<\/span>/);
   assert.match(view, /The recorded Meta run cancels the same 2 writes the script targets\./);
   assert.match(view, /the script shows its proposal/);
 });
@@ -1346,4 +1352,131 @@ test('a mismatched recording keeps its recorded review without current-case link
   assert.match(view, /Read-only recording · no downloads/);
   assert.doesNotMatch(view, /class="citation"|data-download/);
   assert.match(view, /class="mono ref-text"/);
+});
+
+// ---------- What happened as a git log ----------
+
+const branchHeads = (view) => [...view.matchAll(/<span class="gl-tag">([\w-]+)<\/span><strong>([^<]+)<\/strong><span class="muted">([^<]+)<\/span>/g)].filter(m => m[1] !== "main").map(m => `${m[1]}:${m[3]}`);
+
+test('each run of an attempt is a branch, a lost connection ends it, and an attempt with no commits is an empty branch', () => {
+  const app = harness();
+  evidenceState(app, {'events.jsonl': [write('import-first', 'ord_a'), write('import-first', 'ord_b'), {type: 'connection_lost', detail: 'timeout'},
+    write('import-retry', 'ord_c'), write('import-retry', 'ord_d'), {type: 'log_gap', attempt: 'import-retry'}, write('web-checkout', 'ord_e')]});
+  const segs = app.gitSegments(app.evidenceWrites());
+  assert.deepEqual(plain(segs.map(s => s.gap ? 'gap' : `${s.attempt}:${s.writes.map(w => w.order_id).join(',')}:${s.lost.length}:${s.gaps.length}`)),
+    ['import-first:ord_a,ord_b:1:0', 'import-retry:ord_c,ord_d:0:1', 'web-checkout:ord_e:0:0']); // the gap sits on the attempt it names
+  const view = app.reconstructionView();
+  assert.deepEqual(branchHeads(view), ['import-first:2 writes', 'import-retry:2 writes', 'web-checkout:1 write']);
+  assert.match(view, /<li class="gl-row gl-main first">.*?before the first committed write in the evidence/);
+  assert.match(view, /<span class="gl-tag">import-first<\/span><span>ended<\/span><span class="muted">2 recorded writes<\/span>/);
+  assert.match(view, /<span class="gl-tag">web-checkout<\/span><span>ended<\/span><span class="muted">1 recorded write<\/span><span class="gl-tag head">latest<\/span><span class="muted">5 recorded writes in the evidence<\/span>/);
+  assert.doesNotMatch(view, />(main|HEAD|Merge)</); // the database never had branches: no git labels
+  assert.match(view, /class="gl-row gl-on gl-lost">.*?<strong>Connection lost<\/strong><span class="muted">timeout<\/span>/);
+  assert.match(view, /<div class="gl-row gl-on gl-gap"><i class="gl-dot" aria-hidden="true"><\/i><span class="gl-msg"><strong>Gap in the commit log<\/strong>/);
+  assert.doesNotMatch(view, /recon-arc|recon-tick (repeat|kept)|gl-pill/); // nothing is marked without a plan or review
+  assert.doesNotMatch(view, /<details[^>]* open/); // without repeats every branch starts folded
+  assert.doesNotMatch(view, /\bstyle=/);
+
+  const empty = harness();
+  evidenceState(empty, {'events.jsonl': [{type: 'connection_lost', attempt: 'import-first'}, write('import-retry', 'ord_c')]});
+  const stopped = empty.reconstructionView(null, {stopped: 1});
+  assert.match(stopped, /<div class="gl-row gl-on gl-head">.*?<span class="gl-tag">import-first<\/span><strong>First import<\/strong><span class="muted">no commit records<\/span>/);
+  assert.match(stopped, /class="gl-row gl-on gl-lost stop"/); // nothing committed, so the branch stops at the lost connection
+  // Missing commit records do not show that nothing was written: the outcome is unknown, and totals count recorded writes only.
+  assert.match(stopped, /<li class="gl-row gl-main">.*?<strong>orders-db<\/strong><span class="gl-tag">import-first<\/span><span class="muted">Commit records unavailable · outcome unknown<\/span>/);
+  assert.match(stopped, /<span class="gl-tag">import-retry<\/span><span>ended<\/span><span class="muted">1 recorded write<\/span><span class="gl-tag head">latest<\/span><span class="muted">1 recorded write in the evidence · some outcomes unknown<\/span>/);
+  assert.doesNotMatch(stopped, /no writes from/);
+  assert.match(stopped, /The script stopped instead of guessing: 1 source events have no commit record\./);
+});
+
+test('repeats name the commit they repeat, both rows know each other, and their branch opens by default', () => {
+  const app = harness();
+  evidenceState(app, {'events.jsonl': [write('import-first', 'ord_a'), write('import-first', 'ord_b'), write('import-retry', 'ord_c'), write('import-retry', 'ord_d'), write('import-retry', 'ord_e')]},
+    {orders: [{id: 'ord_c', customer: 'customer-000', sku: 'MOUSE', quantity: 2}]});
+  const pairs = [{order_id: 'ord_c', duplicate_of: 'ord_a'}, {order_id: 'ord_d', duplicate_of: 'ord_b'}];
+  const view = app.reconstructionView(pairs);
+  assert.match(view, /<li class="recon-tick repeat" data-i="2" data-pair="0" data-key="order:ord_c"[^>]*><i class="gl-dot" aria-hidden="true"><\/i><span class="mono">#3<\/span><span class="mono gl-id">ord_c<\/span><span class="muted">customer-000 · MOUSE × 2<\/span><span class="recon-arc" title="Same source event as commit 1, ord_a, which stays">repeat of #1<\/span>/);
+  assert.match(view, /<li class="recon-tick kept" data-i="0" data-pair="2"/);
+  assert.match(view, /<li class="recon-tick" data-i="4"[^>]*>.*?<span class="gl-pill">untouched<\/span>/);
+  assert.match(view, /<span class="gl-pill repeat">2 repeats of #1–2<\/span><span class="gl-pill">1 untouched<\/span>/);
+  assert.match(view, /<span class="gl-pill kept">2 first writes kept<\/span>/);
+  assert.match(view, /<details class="gl-group" data-group="case-a:script:3" open>/); // the retry branch, which has the repeats
+  assert.match(view, /<details class="gl-group" data-group="case-a:script:1">/);
+  // A proposal: no copy branch, and nothing described as cancelled.
+  assert.match(view, /<span class="gl-tag">proposal<\/span><strong>Would cancel 2 repeated writes<\/strong><span class="muted">Not tested on a copy yet<\/span>/);
+  assert.doesNotMatch(view, /test-copy|Not applied/);
+  // A branch the person folded stays folded.
+  app.state.reconOpen.set('case-a:script:3', false);
+  assert.match(app.reconstructionView(pairs), /<details class="gl-group" data-group="case-a:script:3">/);
+});
+
+test('after a test on a copy, a copy branch forks from the latest state with the observed result and is never applied', () => {
+  const app = harness();
+  evidenceState(app, {'events.jsonl': [write('import-first', 'ord_a'), write('import-retry', 'ord_c'), write('import-retry', 'ord_d')]});
+  const pairs = [{order_id: 'ord_c', duplicate_of: 'ord_a'}];
+  app.state.run = {id: 'run-a', incident_id: 'case-a', status: 'ready_for_review', plan: {cancellations: []},
+    review: {passed: true, before_active: 3, after_active: 2, checks: [{name: 'source_snapshot_unchanged', passed: true, detail: ''}, {name: 'database_integrity', passed: true, detail: ''}]}};
+  const view = app.reconstructionView(pairs, {rehearsed: true});
+  assert.match(view, /<span class="gl-tag">import-retry<\/span><span>ended<\/span><span class="muted">2 recorded writes<\/span><span class="gl-tag head">latest<\/span><span class="muted">3 active orders<\/span>/);
+  assert.match(view, /<span class="gl-tag">test-copy<\/span><strong>Cancel 1 repeated write<\/strong><span class="muted">on a disposable copy<\/span>/);
+  assert.match(view, /<li class="gl-row gl-on stop gl-result ok">.*?<strong>3 → 2 active orders<\/strong><span class="gl-checks">2 of 2 checks passed<\/span><span class="muted">Not applied to orders-db<\/span>/);
+  assert.match(view, /<li class="gl-row gl-main last">.*?<strong>orders-db<\/strong><span class="muted">Unchanged during the test<\/span>/);
+  assert.doesNotMatch(view, /proposal/);
+  app.state.run.review.checks[1].passed = false;
+  assert.match(app.reconstructionView(pairs, {rehearsed: true}), /gl-result danger">.*?1 of 2 checks passed/);
+  app.state.run.review = {changes: []}; // a review without checks or counts draws no copy branch
+  assert.doesNotMatch(app.reconstructionView(pairs, {rehearsed: true}), /test-copy/);
+  // A recording's review is a recorded test.
+  app.state.source = 'recorded';
+  app.state.recording = {incident_id: 'case-a', citations_enabled: true, review: {passed: true, before_active: 3, after_active: 2, changes: [], checks: [{name: 'database_integrity', passed: true, detail: ''}]}};
+  const rec = app.reconstructionView(pairs, {recorded: true});
+  assert.match(rec, /<span class="gl-tag">recorded-test-copy<\/span><strong>Cancel 1 repeated write<\/strong><span class="muted">in the recorded test on a copy<\/span>/);
+  assert.match(rec, /<span class="muted">Opened read-only<\/span>/); // no source check recorded: no claim it stayed unchanged
+});
+
+test('compared runs read as one line per run, and open that run', () => {
+  const app = harness();
+  app.state.source = 'recorded'; app.state.recId = 'rec-a';
+  const view = compareState(app, {details: {'rec-a': recording('rec-a', ['ord_c', 'ord_d'])}, recs: [{id: 'rec-a', outcome: 'repair', fixture_matches: true}]});
+  assert.match(view, /<p class="cmp-headline">The recorded Meta run cancels the same 2 writes as the script\.<\/p>/);
+  assert.match(view, /<li class="cmp-row script"><button class="cmp-open" data-source="script"/);
+  assert.match(view, /<li class="cmp-row same current"><button class="cmp-open" data-source="recorded" data-recording="rec-a" aria-current="true"/);
+  assert.match(view, /<span class="cmp-here">on screen<\/span>/);
+  assert.match(view, /Each run against the script\./);
+  assert.doesNotMatch(view, /<svg class="compare-svg"|recon-scroll|cmp-mark/); // the old strip is gone
+});
+
+test('in the published cases every repeat names the commit it repeats, and the latest state carries the tested counts', () => {
+  const data = JSON.parse(fs.readFileSync(path.join(__dirname, '../examples/public-demo/demo-data.json'), 'utf8'));
+  for (const [caseId, branches, repeats] of [['import-retry', 3, 20], ['multiple-retries', 4, 40], ['split-evidence', 3, 20], ['inbox-evidence', 3, 20]]) {
+    const app = harness();
+    const files = Object.fromEntries(Object.entries(data.artifacts[caseId]).map(([name, f]) => [name, f.lines.map(l => l.text)]));
+    evidenceState(app, files, {incident: caseId, orders: data.api_get[`/api/incidents/${caseId}`].orders});
+    const runId = data.api_get[`/api/runs?incident=${caseId}`].runs[0].id;
+    app.state.run = data.api_get[`/api/runs/${runId}`];
+    const review = app.state.run.review, pairs = review.changes.map(c => ({order_id: c.before.id, duplicate_of: c.duplicate_of}));
+    const model = app.evidenceWrites(), label = new Map(model.writes.map(w => [w.order_id, w.commitLabel]));
+    const view = app.reconstructionView(pairs, {rehearsed: true});
+    assert.equal((view.match(/class="gl-row gl-on gl-head/g) || []).length, branches, caseId);
+    assert.equal((view.match(/class="recon-tick repeat"/g) || []).length, repeats, caseId);
+    for (const p of pairs) {
+      const row = view.match(new RegExp(`data-key="order:${p.order_id}"[^>]*>.*?repeat of #(\\d+)<`));
+      assert.ok(row, `${caseId} ${p.order_id}`);
+      assert.equal(Number(row[1]), label.get(p.duplicate_of), `${caseId} ${p.order_id}`);
+    }
+    assert.match(view, new RegExp(`<span class="gl-tag head">latest<\\/span><span class="muted">${review.before_active} active orders`), caseId);
+    assert.match(view, new RegExp(`${review.before_active} → ${review.after_active} active orders<\\/strong><span class="gl-checks">10 of 10 checks passed`), caseId);
+  }
+});
+
+test('in a branch with repeats, runs of unmarked commits fold into one row and stay in the list', () => {
+  const app = harness();
+  const retry = ['ord_c', 'ord_d', 'ord_e', 'ord_f', 'ord_g', 'ord_h'].map(id => write('import-retry', id));
+  evidenceState(app, {'events.jsonl': [write('import-first', 'ord_a'), ...retry]});
+  const view = app.reconstructionView([{order_id: 'ord_c', duplicate_of: 'ord_a'}]);
+  assert.match(view, /<summary class="gl-fold">.*?<span>5 untouched commits<\/span><span class="gl-meta mono">#3–7<\/span><\/summary>/);
+  assert.equal((view.match(/class="recon-tick"/g) || []).length, 5); // folded, not dropped
+  assert.match(view, /<li class="recon-tick repeat" data-i="1"/);
+  // Without marks nothing folds: the branch itself starts folded instead.
+  assert.doesNotMatch(app.reconstructionView(), /gl-fold/);
 });
