@@ -853,18 +853,67 @@ const reconLabel = (w, lane, role) => {
   return `Commit ${w.commitLabel} · ${ATTEMPT_LABEL[lane] || lane}${o ? ` · ${o.customer} ${o.sku} × ${o.quantity}` : ''} · ${w.order_id}${role ? ` · ${role}` : ''}`;
 };
 
+// The graph's columns: one per source event, in the order each event was first committed, so every write of
+// the same event lines up across the attempt lanes, like the same change on two branches. Columns come only
+// from the evidence's event IDs; which write repeats still comes only from the plan or review (pairs).
+// A write without an event ID, or a second write of an event in the same lane, gets a column of its own.
+const GRAPH_STEP = 11, GRAPH_PAD = 24;
+function graphColumns(model) {
+  const byEvent = new Map(), taken = new Set();
+  let count = 0;
+  for (const w of model.writes) {
+    const prior = w.event_id ? byEvent.get(w.event_id) : undefined;
+    w.col = prior !== undefined && !taken.has(`${prior}:${w.attempt}`) ? prior : count++;
+    if (w.event_id && prior === undefined) byEvent.set(w.event_id, w.col);
+    taken.add(`${w.col}:${w.attempt}`);
+  }
+  count = Math.max(count, 1);
+  return {count, width: GRAPH_PAD + count * GRAPH_STEP + GRAPH_STEP, cx: (col) => GRAPH_PAD + col * GRAPH_STEP + GRAPH_STEP / 2};
+}
+
+// The last graph drawn, so pointer and keyboard can update its column highlight and log without a repaint.
+let reconCtx = null;
+
+// Every write of the highlighted commit's source event, newest attempt last, like a short git log.
+function columnLog(active) {
+  const ctx = reconCtx;
+  if (!ctx || !active) return '<p class="caption">Point at a commit, or use the arrow keys, to list every write of its source event.</p>';
+  active = ctx.writes.find(w => w.x === active.x) || active;
+  const same = ctx.writes.filter(w => w.col === active.col).sort((a, b) => ctx.laneOf.get(a.attempt) - ctx.laneOf.get(b.attempt));
+  const o = ordersById().get(same[0].order_id);
+  const head = `${active.event_id ? `Source event <span class="mono">${text(active.event_id)}</span>` : 'No source event recorded'}${o ? ` · ${text(`${o.customer} · ${o.sku} × ${o.quantity}`)}` : ''} · ${same.length} ${same.length === 1 ? 'write' : 'writes'}`;
+  const rows = same.map(w => {
+    const role = ctx.role(w), tone = ctx.repeat.has(w.x) ? 'repeat' : ctx.kept.has(w.x) ? 'kept' : '';
+    const attrs = ctx.selectable ? ` data-key="order:${escape(w.order_id)}"` : '';
+    return `<li class="${tone}${w.x === active.x ? ' current' : ''}"${attrs}><i aria-hidden="true"></i><span class="mono">#${text(w.commitLabel)}</span><span class="mono">${text(compactId(w.order_id))}</span><span>${text(ATTEMPT_LABEL[w.attempt] || w.attempt)}</span><span class="mono faint">${text(w.ref)}</span><span>${text(role || 'committed write')}</span></li>`;
+  }).join('');
+  return `<p class="recon-log-head">${head}</p><ol class="recon-log-list">${rows}</ol>`;
+}
+
+// Highlight one commit's column and list its writes, in place.
+function showColumn(i) {
+  const svg = $('#content .recon-svg'), w = reconCtx?.writes.find(x => x.x === i);
+  if (!w) return;
+  state.reconActive = i;
+  if (!svg?.querySelector) return;
+  const col = svg.querySelector('.recon-col'), ring = svg.querySelector('.recon-ring'), dot = svg.querySelector(`[data-i="${i}"]`);
+  if (col) { col.setAttribute('x', String(reconCtx.cx(w.col) - GRAPH_STEP / 2)); col.removeAttribute('visibility'); }
+  if (ring && dot) { ring.setAttribute('cx', dot.getAttribute('cx')); ring.setAttribute('cy', dot.getAttribute('cy')); ring.removeAttribute('visibility'); }
+  const log = $('#recon-log');
+  if (log) log.innerHTML = columnLog(w);
+}
+
 // pairs: [{order_id: the repeated (cancelled) order, duplicate_of: the first write that stays}].
 // rehearsed: a rehearsal review exists, so the marked repeats were cancelled on the copy; otherwise they
 // are the proposal's targets and nothing has been cancelled yet.
 function reconstructionView(pairs = null, {recorded = false, stopped = null, rehearsed = false} = {}) {
   const model = evidenceWrites();
-  const head = `<div class="recon-head"><h3 id="recon-title">What happened</h3><span class="caption">Committed writes in order, read from the evidence files</span></div>`;
+  const head = `<div class="recon-head"><h3 id="recon-title">What happened</h3><span class="caption">Each attempt is a branch and each column one source event, read from the evidence files</span></div>`;
   if (model === null) return `<section class="recon" aria-labelledby="recon-title">${head}${skeleton(3)}</section>`;
   if (model.error) return `<section class="recon" aria-labelledby="recon-title">${head}<p class="callout stop">${text(model.error)}</p></section>`;
   const {writes, marks, lanes} = model;
   if (!writes.length && !marks.length) return '';
-  const n = Math.max(writes.length, 1), height = Math.max(lanes.length, 1) * RECON_LANE;
-  const laneOf = new Map(lanes.map((l, i) => [l, i]));
+  const cols = graphColumns(model), laneOf = new Map(lanes.map((l, i) => [l, i]));
   const byOrder = new Map(writes.map(w => [w.order_id, w]));
   const kept = new Set(), repeat = new Set(), arcs = [];
   for (const p of pairs || []) {
@@ -872,23 +921,49 @@ function reconstructionView(pairs = null, {recorded = false, stopped = null, reh
     if (!r || !k) continue;
     repeat.add(r.x); kept.add(k.x); arcs.push([k, r]);
   }
-  const top = (w) => laneOf.get(w.attempt) * RECON_LANE + 7, bottom = (w) => top(w) + RECON_LANE - 14;
+  // The copy branch appears only once a test on a copy exists (this run's review or the recording's).
+  const found = pairs && (rehearsed || recorded) && arcs.length ? active().review : null;
+  const review = found && Array.isArray(found.checks) && Number.isFinite(found.before_active) && Number.isFinite(found.after_active) ? found : null;
+  const laneCount = Math.max(lanes.length, 1), height = (laneCount + (review ? 2 : 0)) * RECON_LANE;
+  const ly = (lane) => laneOf.get(lane) * RECON_LANE + RECON_LANE / 2, cx = (w) => cols.cx(w.col);
   const repeatRole = recorded ? 'Repeat · cancelled in this recording' : rehearsed ? 'Repeat · cancelled on the copy' : 'Repeat · proposed to cancel';
   const role = (w) => repeat.has(w.x) ? repeatRole.toLowerCase() : kept.has(w.x) ? 'first write · stays' : pairs ? 'untouched' : '';
   const selectable = active().selectable;
-  const ticks = writes.map(w => `<rect class="recon-tick ${repeat.has(w.x) ? 'repeat' : kept.has(w.x) ? 'kept' : ''}" data-i="${w.x}" ${selectable ? `data-key="order:${escape(w.order_id)}"` : ''} x="${w.x + 0.18}" y="${top(w)}" width="0.64" height="${RECON_LANE - 14}"><title>${text(reconLabel(w, w.attempt, role(w)))}</title></rect>`).join('');
-  const curves = arcs.map(([k, r]) => {
-    const xk = k.x + 0.5, xr = r.x + 0.5;
-    if (laneOf.get(k.attempt) === laneOf.get(r.attempt)) { const y = top(k); return `<path class="recon-arc" d="M${xk} ${y} C${xk} ${y - 10}, ${xr} ${y - 10}, ${xr} ${y}"/>`; }
-    const y1 = bottom(k), y2 = top(r), mid = (y1 + y2) / 2;
-    return `<path class="recon-arc" d="M${xk} ${y1} C${xk} ${mid}, ${xr} ${mid}, ${xr} ${y2}"/>`;
+  const branches = lanes.map(l => {
+    const xs = writes.filter(w => w.attempt === l).map(cx);
+    return xs.length > 1 ? `<line class="recon-branch" x1="${Math.min(...xs)}" x2="${Math.max(...xs)}" y1="${ly(l)}" y2="${ly(l)}"/>` : '';
   }).join('');
-  const lost = marks.filter(m => m.type === 'connection_lost' && laneOf.has(m.attempt))
-    .map(m => `<line class="recon-lost" x1="${m.x}" x2="${m.x}" y1="${laneOf.get(m.attempt) * RECON_LANE + 3}" y2="${laneOf.get(m.attempt) * RECON_LANE + RECON_LANE - 3}"><title>Connection lost · ${text(ATTEMPT_LABEL[m.attempt] || m.attempt)}</title></line>`).join('');
+  const curves = arcs.map(([k, r]) => {
+    const x1 = cx(k), x2 = cx(r), y1 = ly(k.attempt), y2 = ly(r.attempt);
+    if (x1 === x2) { const dir = Math.sign(y2 - y1) || 1; return `<line class="recon-arc" x1="${x1}" x2="${x2}" y1="${y1 + dir * 5}" y2="${y2 - dir * 5}"/>`; }
+    if (y1 === y2) return `<path class="recon-arc" d="M${x1} ${y1 - 5} C${x1} ${y1 - 14}, ${x2} ${y1 - 14}, ${x2} ${y1 - 5}"/>`;
+    const mid = (y1 + y2) / 2;
+    return `<path class="recon-arc" d="M${x1} ${y1} C${x1} ${mid}, ${x2} ${mid}, ${x2} ${y2}"/>`;
+  }).join('');
+  const ticks = writes.map(w => `<circle class="recon-tick${repeat.has(w.x) ? ' repeat' : kept.has(w.x) ? ' kept' : ''}" data-i="${w.x}" ${selectable ? `data-key="order:${escape(w.order_id)}"` : ''} cx="${cx(w)}" cy="${ly(w.attempt)}" r="3.5"><title>${text(reconLabel(w, w.attempt, role(w)))}</title></circle>`).join('');
+  const lost = marks.filter(m => m.type === 'connection_lost' && laneOf.has(m.attempt)).map(m => {
+    const own = writes.filter(w => w.attempt === m.attempt), before = own.filter(w => w.x < m.x);
+    const x = before.length ? Math.max(...before.map(cx)) + GRAPH_STEP : own.length ? Math.min(...own.map(cx)) - GRAPH_STEP : GRAPH_PAD, y = ly(m.attempt);
+    return `<path class="recon-lost" d="M${x + 2} ${y - 7}l-4 7h5l-4 7"><title>Connection lost · ${text(ATTEMPT_LABEL[m.attempt] || m.attempt)}</title></path>`;
+  }).join('');
   const gaps = marks.filter(m => m.type === 'log_gap');
-  const bands = lanes.map((l, i) => `<rect class="recon-band${i % 2 ? ' alt' : ''}" x="0" y="${i * RECON_LANE}" width="${n}" height="${RECON_LANE}"/>`).join('');
-  const activeIndex = Number.isInteger(state.reconActive) && state.reconActive < writes.length ? state.reconActive : null;
-  const ring = activeIndex === null ? '' : (() => { const w = writes[activeIndex]; return `<rect class="recon-ring" x="${w.x + 0.04}" y="${top(w) - 3}" width="0.92" height="${RECON_LANE - 8}"/>`; })();
+  const activeW = Number.isInteger(state.reconActive) ? writes.find(w => w.x === state.reconActive) || null : null;
+  const hidden = activeW ? '' : ' visibility="hidden"';
+  const highlight = `<rect class="recon-col" x="${activeW ? cx(activeW) - GRAPH_STEP / 2 : 0}" y="0" width="${GRAPH_STEP}" height="${laneCount * RECON_LANE}"${hidden}/>`;
+  const ring = `<circle class="recon-ring" cx="${activeW ? cx(activeW) : 0}" cy="${activeW ? ly(activeW.attempt) : 0}" r="6"${hidden}/>`;
+  let copy = '', copyRows = '';
+  if (review) {
+    const top = laneCount * RECON_LANE, y0 = top + RECON_LANE / 2, y1 = y0 + RECON_LANE, end = cols.cx(cols.count - 1);
+    const passed = review.checks.filter(ch => ch.passed).length, ok = review.passed === true && review.checks.length > 0 && passed === review.checks.length;
+    const src = review.checks.find(ch => ch.name === 'source_snapshot_unchanged');
+    const reverts = [...new Set(arcs.map(([, r]) => cx(r)))].map(x => `<path class="recon-revert" d="M${x - 3} ${y1 - 3}l6 6m0 -6l-6 6"/>`).join('');
+    copy = `<line class="recon-divider" x1="0" x2="${cols.width}" y1="${top}" y2="${top}"/>
+      <line class="recon-branch" x1="6" x2="${end}" y1="${y0}" y2="${y0}"/><circle class="recon-node" cx="6" cy="${y0}" r="3.5"/><circle class="recon-node" cx="${end}" cy="${y0}" r="4"/>
+      <path class="recon-branch" d="M6 ${y0} C16 ${y0}, 10 ${y1}, 22 ${y1} L${end} ${y1}"/>${reverts}<circle class="recon-node ${ok ? 'ok' : 'danger'}" cx="${end}" cy="${y1}" r="4"/>`;
+    const where = recorded || historicalRun(state.run) ? 'Recorded test copy' : 'Tested copy';
+    copyRows = `<li class="copy-first" title="${escape(`Original database · ${src ? (src.passed ? 'unchanged during the test' : 'changed during the test') : 'opened read-only'}`)}"><strong class="lane-long">Original database</strong><strong class="lane-short">Original</strong><span>${text(src ? (src.passed ? 'unchanged during the test' : 'changed during the test') : 'opened read-only')}</span></li>
+      <li title="${escape(`${where} · ${review.before_active} → ${review.after_active} active · ${passed}/${review.checks.length} checks`)}"><strong class="lane-long">${text(where)}</strong><strong class="lane-short">Copy</strong><span>${text(`${review.before_active} → ${review.after_active} · ${passed}/${review.checks.length} checks`)}</span></li>`;
+  }
   const laneRows = lanes.map(l => {
     const count = writes.filter(w => w.attempt === l).length;
     const notes = [count ? `${count} write${count === 1 ? '' : 's'}` : 'no commit records',
@@ -898,9 +973,10 @@ function reconstructionView(pairs = null, {recorded = false, stopped = null, reh
     return `<li title="${escape(`${ATTEMPT_LABEL[l] || l} · ${notes}`)}"><strong class="lane-long">${text(ATTEMPT_LABEL[l] || l)}</strong><strong class="lane-short">${text(short)}</strong><span>${text(notes)}</span></li>`;
   }).join('');
   const legend = pairs
-    ? `<span><i class="kept"></i>First write · stays</span><span><i class="repeat"></i>${repeatRole}</span><span><i></i>Untouched</span>`
+    ? `<span><i class="kept"></i>First write · stays</span><span><i class="repeat"></i>${repeatRole}</span><span><i></i>Untouched</span>${arcs.length ? '<span><i class="tie"></i>Same source event</span>' : ''}`
     : '<span><i></i>Committed write</span>';
-  const lostKey = marks.some(m => m.type === 'connection_lost') ? '<span><i class="lost"></i>Connection lost</span>' : '';
+  const lostKey = marks.some(m => m.type === 'connection_lost') ? '<span><svg class="legend-bolt" viewBox="0 0 8 16" aria-hidden="true"><path d="M5 1l-4 7h5l-4 7"/></svg>Connection lost</span>' : '';
+  const copyKey = review ? `<span><svg class="legend-revert" viewBox="0 0 8 8" aria-hidden="true"><path d="M1 1l6 6m0 -6l-6 6"/></svg>Cancelled on the ${recorded || historicalRun(state.run) ? 'recorded ' : ''}copy</span>` : '';
   const untouched = writes.length - repeat.size - kept.size;
   const lostCount = marks.filter(m => m.type === 'connection_lost').length;
   const summary = stopped ? `The script stopped instead of guessing: ${stopped} source events have no commit record${gaps.length ? ', where the log has a gap' : ''}.`
@@ -908,11 +984,13 @@ function reconstructionView(pairs = null, {recorded = false, stopped = null, reh
     : pairs && !recorded && !rehearsed ? `The proposal would cancel ${repeat.size} repeated write${repeat.size === 1 ? '' : 's'} and keep the first write of each source event. ${untouched} other write${untouched === 1 ? '' : 's'} would stay untouched. Nothing is cancelled until it is tested on a copy.`
     : pairs ? `${recorded ? 'This recording’s review cancels' : 'On the copy, the repair cancelled'} ${repeat.size} repeated write${repeat.size === 1 ? '' : 's'} and ${recorded ? 'keeps' : 'kept'} the first write of each source event. ${untouched} other write${untouched === 1 ? ' is' : 's are'} untouched.`
     : `${writes.length} committed writes across ${lanes.length} ${lanes.length === 1 ? 'attempt' : 'attempts'}${lostCount ? `, with ${lostCount === 1 ? 'a lost connection' : `${lostCount} lost connections`}` : ''}${gaps.length ? ' and a gap in the commit log' : ''}. The investigation decides which writes repeat.`;
-  const described = `${summary} Use the arrow keys to move between writes${selectable ? ' and Enter to open one' : ''}.`;
+  const described = `${summary} Use the left and right arrow keys to move between writes, up and down to move between writes of the same source event${selectable ? ', and Enter to open one' : ''}.`;
+  reconCtx = {writes, laneOf, repeat, kept, role, selectable, cx: cols.cx};
   return `<section class="recon" aria-labelledby="recon-title">${head}
-    <div class="recon-body"><ol class="recon-lanes" aria-hidden="true">${laneRows}</ol>
-      <svg class="recon-svg" data-count="${writes.length}" viewBox="0 0 ${n} ${height}" height="${height}" preserveAspectRatio="none" tabindex="0" role="group" aria-roledescription="timeline" aria-label="${escape(`Committed writes in commit order, ${lanes.length} lanes`)}" aria-describedby="recon-summary">${bands}${curves}${ticks}${lost}${ring}</svg></div>
-    <div class="recon-legend" aria-hidden="true">${legend}${lostKey}</div>
+    <div class="recon-body"><ol class="recon-lanes" aria-hidden="true">${laneRows}${copyRows}</ol>
+      <div class="recon-scroll"><svg class="recon-svg" data-count="${writes.length}" viewBox="0 0 ${cols.width} ${height}" width="${cols.width}" height="${height}" tabindex="0" role="group" aria-roledescription="commit graph" aria-label="${escape(`Committed writes, ${lanes.length} attempt lanes, one column per source event`)}" aria-describedby="recon-summary">${highlight}${branches}${curves}${ticks}${lost}${copy}${ring}</svg></div></div>
+    <div class="recon-log" id="recon-log">${columnLog(activeW)}</div>
+    <div class="recon-legend graph-legend" aria-hidden="true">${legend}${lostKey}${copyKey}</div>
     <p class="recon-summary" id="recon-summary">${text(summary)}<span class="sr-only"> ${text(described.slice(summary.length + 1))}</span></p>
     <p class="sr-only" id="recon-live" aria-live="polite"></p>${runsCompare(model)}</section>`;
 }
@@ -1004,7 +1082,7 @@ function runsCompare(model) {
   }
   if (!run && tally.repair) headline += ' Investigate the incident to compare them with the script.';
 
-  const H = RECON_LANE, n = Math.max(model.writes.length, 1);
+  const H = RECON_LANE, cols = graphColumns(model), n = cols.width;
   let anyMissed = false, anyExtra = false, anyPlanned = false;
   const svgRows = rows.map((row, i) => {
     const y = i * H, band = `<rect class="recon-band${i % 2 ? ' alt' : ''}${row.current ? ' current' : ''}" x="0" y="${y}" width="${n}" height="${H}"/>`;
@@ -1015,11 +1093,11 @@ function runsCompare(model) {
         const extra = !row.script && engine && !base, planned = row.script && !rehearsed;
         anyExtra = anyExtra || extra; anyPlanned = anyPlanned || planned;
         const says = planned ? 'the script targets it · not rehearsed yet' : `${row.label} cancels it${row.script || !engine ? '' : base ? (rehearsed ? ' · so does the script' : ' · the script targets it too') : ' · the script keeps it'}`;
-        return `<rect class="cmp-mark${extra ? ' extra' : ''}${planned ? ' planned' : ''}" x="${w.x + 0.18}" y="${y + 5}" width="0.64" height="${H - 10}"><title>${text(`${w.order_id} · ${says}`)}</title></rect>`;
+        return `<rect class="cmp-mark${extra ? ' extra' : ''}${planned ? ' planned' : ''}" x="${cols.cx(w.col) - 3}" y="${y + 5}" width="6" height="${H - 10}" rx="1"><title>${text(`${w.order_id} · ${says}`)}</title></rect>`;
       }
       if (!row.script && engine && base) {
         anyMissed = true;
-        return `<rect class="cmp-missed" x="${w.x + 0.22}" y="${y + 6}" width="0.56" height="${H - 12}"><title>${text(`${w.order_id} · the script ${rehearsed ? 'cancels' : 'targets'} it · ${row.label} keeps it`)}</title></rect>`;
+        return `<rect class="cmp-missed" x="${cols.cx(w.col) - 2.5}" y="${y + 6}" width="5" height="${H - 12}" rx="1"><title>${text(`${w.order_id} · the script ${rehearsed ? 'cancels' : 'targets'} it · ${row.label} keeps it`)}</title></rect>`;
       }
       return '';
     }).join('');
@@ -1028,33 +1106,34 @@ function runsCompare(model) {
   const labels = rows.map(row => `<li><button class="compare-run${row.current ? ' current' : ''}" ${row.attrs} ${row.current ? 'aria-current="true"' : ''} title="${escape(`${row.label} · ${row.note}`)}"><strong>${text(row.label)}</strong><span class="cmp-long">${text(row.note)}</span><span class="cmp-short" aria-hidden="true">${text(row.short)}</span></button></li>`).join('');
   const legend = `<span><i class="repeat"></i>Cancelled by that run</span>${anyPlanned ? '<span><i class="planned"></i>Script’s target · not rehearsed yet</span>' : ''}${anyMissed ? `<span><i class="missed"></i>${rehearsed ? 'Cancelled' : 'Targeted'} by the script, kept by that run</span>` : ''}${anyExtra ? '<span><i class="extra"></i>Not in the script’s plan</span>' : ''}<span><i class="line"></i>No repair</span>`;
   return `<div class="recon-compare">
-    <div class="recon-head"><h4 id="compare-title">Compared runs</h4><span class="caption">Lined up with the writes above. Recordings show their verified reviews; the script shows its ${rehearsed ? 'test on a copy' : 'proposal'}.</span></div>
+    <div class="recon-head"><h4 id="compare-title">Compared runs</h4><span class="caption">In the same columns as the graph above. Recordings show their verified reviews; the script shows its ${rehearsed ? 'test on a copy' : 'proposal'}.</span></div>
     <div class="recon-body"><ol class="recon-lanes compare-lanes" aria-labelledby="compare-title">${labels}</ol>
-      <svg class="compare-svg" viewBox="0 0 ${n} ${rows.length * H}" height="${rows.length * H}" preserveAspectRatio="none" aria-hidden="true" focusable="false">${svgRows}</svg></div>
+      <div class="recon-scroll"><svg class="compare-svg" viewBox="0 0 ${n} ${rows.length * H}" width="${n}" height="${rows.length * H}" aria-hidden="true" focusable="false">${svgRows}</svg></div></div>
     <div class="recon-legend" aria-hidden="true">${legend}</div>
     <p class="recon-summary">${text(headline)}</p>
   </div>`;
 }
 
-// Keyboard: one tab stop; arrows move between writes; Enter opens the order (same as clicking a tick).
+// Keyboard: one tab stop. Left and right move through the commits in order, up and down between writes
+// of the same source event; Enter opens the order (same as clicking a commit).
 function moveRecon(svg, key) {
-  const n = Number(svg.dataset.count);
+  const writes = reconCtx?.writes || [], n = writes.length;
   if (!n) return false;
   const moves = {ArrowRight: 1, ArrowLeft: -1, PageDown: 10, PageUp: -10};
-  const cur = Number.isInteger(state.reconActive) ? state.reconActive : -1;
-  if (key === 'Home') state.reconActive = 0;
-  else if (key === 'End') state.reconActive = n - 1;
-  else if (key in moves) state.reconActive = Math.max(0, Math.min(n - 1, cur < 0 && moves[key] < 0 ? 0 : cur + moves[key]));
-  else return false;
-  const tick = svg.querySelector(`[data-i="${state.reconActive}"]`);
-  let ring = svg.querySelector('.recon-ring');
-  if (tick) {
-    if (!ring) { ring = document.createElementNS('http://www.w3.org/2000/svg', 'rect'); ring.setAttribute('class', 'recon-ring'); svg.appendChild(ring); }
-    const x = Number(tick.getAttribute('x')) - 0.14, y = Number(tick.getAttribute('y')) - 3;
-    ring.setAttribute('x', String(x)); ring.setAttribute('y', String(y)); ring.setAttribute('width', '0.92'); ring.setAttribute('height', String(RECON_LANE - 8));
-    const live = $('#recon-live');
-    if (live) live.textContent = tick.querySelector('title')?.textContent || '';
-  }
+  const cur = Number.isInteger(state.reconActive) && state.reconActive < n ? state.reconActive : -1;
+  let next;
+  if (key === 'Home') next = 0;
+  else if (key === 'End') next = n - 1;
+  else if (key in moves) next = Math.max(0, Math.min(n - 1, cur < 0 && moves[key] < 0 ? 0 : cur + moves[key]));
+  else if (key === 'ArrowUp' || key === 'ArrowDown') {
+    if (cur < 0) return false;
+    const w = writes[cur], same = writes.filter(x => x.col === w.col).sort((a, b) => reconCtx.laneOf.get(a.attempt) - reconCtx.laneOf.get(b.attempt));
+    const to = same[same.indexOf(w) + (key === 'ArrowDown' ? 1 : -1)];
+    next = to ? to.x : cur;
+  } else return false;
+  showColumn(next);
+  const live = $('#recon-live'), dot = svg.querySelector?.(`[data-i="${next}"]`);
+  if (live && dot) live.textContent = dot.querySelector('title')?.textContent || '';
   return true;
 }
 
@@ -2956,6 +3035,14 @@ $('#palette').addEventListener('close', () => { if (!palette.ran && palette.retu
 window.addEventListener('resize', () => { positionTabIndicator(); applyRail(); if (state.nav && !isNarrow()) setNav(false); });
 document.addEventListener('pointerdown', event => { const handle = event.target.closest?.('.resizer'); if (handle) startSideDrag(event, handle); });
 document.addEventListener('pointermove', moveSideDrag);
+// Pointing at a commit highlights its column and lists its writes.
+document.addEventListener('pointerover', event => { const dot = event.target.closest?.('.recon-svg .recon-tick'); if (dot) showColumn(Number(dot.dataset.i)); });
+// On narrow screens the graph and the compared runs scroll sideways together, so their columns stay aligned.
+document.addEventListener('scroll', event => {
+  const box = event.target;
+  if (!box?.classList?.contains('recon-scroll')) return;
+  box.closest('.recon')?.querySelectorAll('.recon-scroll').forEach(o => { if (o !== box && o.scrollLeft !== box.scrollLeft) o.scrollLeft = box.scrollLeft; });
+}, true);
 document.addEventListener('pointerup', event => endSideDrag(event));
 document.addEventListener('pointercancel', event => endSideDrag(event, true));
 document.addEventListener('dblclick', event => { if (event.target.closest?.('.resizer')) resetSidebar(); });

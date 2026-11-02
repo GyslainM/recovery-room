@@ -745,9 +745,10 @@ details.tl-card>.tl-head:hover{background:var(--hover)}
 .recon-lanes span{overflow:hidden;text-overflow:ellipsis;font-size:var(--fs-1);color:var(--faint)}
 .recon-lanes strong{overflow:hidden;text-overflow:ellipsis}
 .recon-lanes .lane-short{display:none}
-.recon-svg{display:block;width:100%;overflow:visible;border-radius:var(--r-sm)}
+.recon-scroll{min-width:0;overflow-x:auto;overflow-y:hidden;scrollbar-width:thin}
+.recon-svg{display:block;max-width:none;overflow:visible;border-radius:var(--r-sm)}
 .recon-svg:focus{outline:none}
-.recon-svg:focus-visible{outline:2px solid var(--accent);outline-offset:4px}
+.recon-svg:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
 .recon-band{fill:var(--surface)}
 .recon-band.alt{fill:var(--raised)}
 .recon-tick{fill:var(--chart-neutral);cursor:pointer;transition:fill var(--dur-1)}
@@ -755,9 +756,35 @@ details.tl-card>.tl-head:hover{background:var(--hover)}
 .recon-tick.kept{fill:var(--accent)}
 .recon-tick.repeat{fill:var(--warn)}
 .recon-tick.selected{fill:var(--ink)}
-.recon-arc{fill:none;stroke:var(--warn);stroke-opacity:.5;stroke-width:1;vector-effect:non-scaling-stroke}
-.recon-lost{stroke:var(--danger-ink);stroke-width:2;stroke-dasharray:3 3;vector-effect:non-scaling-stroke}
-.recon-ring{fill:none;stroke:var(--ink);stroke-width:1.5;vector-effect:non-scaling-stroke;pointer-events:none}
+.recon-arc{fill:none;stroke:var(--warn);stroke-opacity:.75;stroke-width:1;stroke-dasharray:2 2}
+.recon-branch{fill:none;stroke:var(--line-3);stroke-width:1.5}
+.recon-col{fill:var(--hover)}
+.recon-divider{stroke:var(--line);stroke-width:1}
+.recon-node{fill:var(--chart-neutral)}
+.recon-node.ok{fill:var(--accent)}
+.recon-node.danger{fill:var(--danger)}
+.recon-revert{fill:none;stroke:var(--warn);stroke-width:1.5;stroke-linecap:round}
+.recon-lost{fill:none;stroke:var(--danger-ink);stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}
+.recon-ring{fill:none;stroke:var(--ink);stroke-width:1.5;pointer-events:none}
+.recon-lanes li.copy-first{box-shadow:inset 0 1px var(--line)}
+.recon-legend.graph-legend i{width:8px;height:8px;border-radius:50%;vertical-align:0}
+.recon-legend.graph-legend i.tie{width:0;height:12px;border-left:1px dashed var(--warn);border-radius:0;background:none;vertical-align:-2px}
+.legend-bolt,.legend-revert{width:8px;height:12px;margin-right:7px;vertical-align:-2px;fill:none;stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}
+.legend-bolt{stroke:var(--danger-ink)}
+.legend-revert{height:8px;vertical-align:0;stroke:var(--warn)}
+.recon-log{margin:10px 0 0 156px;min-height:24px}
+.recon-log .caption{margin:0}
+.recon-log-head{margin:0 0 6px;font-size:var(--fs-3);color:var(--muted)}
+.recon-log-list{max-width:760px;margin:0;padding:0;list-style:none;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface)}
+.recon-log-list li{display:grid;grid-template-columns:8px 3.5em 9.5em 8.5em 10em minmax(0,1fr);gap:var(--s1);align-items:center;padding:6px var(--s2);border-top:1px solid var(--line);font-size:var(--fs-3)}
+.recon-log-list li:first-child{border-top:0}
+.recon-log-list li>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.recon-log-list i{width:8px;height:8px;border-radius:50%;background:var(--chart-neutral)}
+.recon-log-list li.kept i{background:var(--accent)}
+.recon-log-list li.repeat i{background:var(--warn)}
+.recon-log-list li.current{background:var(--hover)}
+.recon-log-list li[data-key]{cursor:pointer}
+.recon-log-list li[data-key]:hover{background:var(--hover)}
 .recon-legend{display:flex;flex-wrap:wrap;gap:6px 18px;margin:10px 0 0 156px;font-size:var(--fs-2);color:var(--muted)}
 .recon-legend i{display:inline-block;width:6px;height:12px;margin-right:7px;border-radius:var(--r-xs);vertical-align:-2px;background:var(--chart-neutral)}
 .recon-legend i.kept{background:var(--accent)}
@@ -775,7 +802,7 @@ details.tl-card>.tl-head:hover{background:var(--hover)}
 .compare-run span{overflow:hidden;text-overflow:ellipsis;font-size:var(--fs-2);color:var(--faint)}
 .compare-run.current span{color:var(--muted)}
 .compare-run .cmp-short{display:none}
-.compare-svg{display:block;width:100%;border-radius:var(--r-sm)}
+.compare-svg{display:block;max-width:none;border-radius:var(--r-sm)}
 .recon-band.current{fill:var(--hover)}
 .cmp-mark{fill:var(--warn)}
 .cmp-mark.extra{fill:var(--danger)}
@@ -794,7 +821,9 @@ details.tl-card>.tl-head:hover{background:var(--hover)}
   .recon-lanes .compare-run .cmp-short{display:block}
   .recon-lanes .lane-long{display:none}
   .recon-lanes .lane-short{display:block}
-  .recon-legend,.recon-summary{margin-left:0}
+  .recon-legend,.recon-summary,.recon-log{margin-left:0}
+  .recon-log-list li{grid-template-columns:8px 3.5em minmax(0,1fr) auto}
+  .recon-log-list li>span:nth-of-type(4),.recon-log-list li>span:nth-of-type(5){grid-column:3 / -1}
 }
 
 /* Folded sidebar: a rail of progress rings (wide screens only). Rows keep their names for assistive tech. */

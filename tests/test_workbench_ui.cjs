@@ -27,7 +27,7 @@ function harness(handler, options = {}) {
     setInterval: (fn) => { intervals.push(fn); return intervals.length; }, clearInterval: (id) => { cleared.push(id); }, intervals, cleared,
   };
   vm.createContext(context);
-  vm.runInContext(source + '\nrender = () => { globalThis.renderCalls++; };\nrenderPanel = () => {};\nglobalThis.subject = {state, download, reviewView, exportStatus, recheckExport, act, changesView, checksTab, sqlView, modeInfo, repairFlow, stockVisual, transition, packageView, lineContext, evidenceWrites, reconstructionView, runsCompare, checkContext, checksTab, demoDefault, staticContract, demoStartCase, guardrailMoment, guardrailView, timelineItems, displayedSteps, evaluationData, evaluationView, renderActions, replayControls, startReplay, playReplay, pauseReplay, nextReplay, sqlView, paletteCommands, loadSql, copySql, api, statusOf, stepsView, recCitations, recordedConclusion, recordedChangesView, recordedChecksView, startup, timerOn: () => replayTimer !== null};', context);
+  vm.runInContext(source + '\nrender = () => { globalThis.renderCalls++; };\nrenderPanel = () => {};\nglobalThis.subject = {graphColumns, columnLog, moveRecon, state, download, reviewView, exportStatus, recheckExport, act, changesView, checksTab, sqlView, modeInfo, repairFlow, stockVisual, transition, packageView, lineContext, evidenceWrites, reconstructionView, runsCompare, checkContext, checksTab, demoDefault, staticContract, demoStartCase, guardrailMoment, guardrailView, timelineItems, displayedSteps, evaluationData, evaluationView, renderActions, replayControls, startReplay, playReplay, pauseReplay, nextReplay, sqlView, paletteCommands, loadSql, copySql, api, statusOf, stepsView, recCitations, recordedConclusion, recordedChangesView, recordedChecksView, startup, timerOn: () => replayTimer !== null};', context);
   return {context, nodes, ...context.subject};
 }
 
@@ -1266,3 +1266,109 @@ test('the published dataset opens on its matched inbox repair and keeps all 16 r
     }
     assert.deepEqual(fetches, ['./demo-data.json']);
   });
+
+// ---------- What happened as a commit graph ----------
+
+const dots = (view) => [...view.matchAll(/<circle class="recon-tick[^"]*" data-i="(\d+)"[^>]*cx="([\d.]+)" cy="([\d.]+)"/g)].map(m => ({i: Number(m[1]), x: Number(m[2]), y: Number(m[3])}));
+
+test('each source event gets one column, so a retry copy sits under its original', () => {
+  const app = harness();
+  evidenceState(app, {'events.jsonl': [write('import-first', 'ord_a', {event_id: 'evt-1'}), write('import-first', 'ord_b', {event_id: 'evt-2'}),
+    {type: 'connection_lost'}, write('import-retry', 'ord_c', {event_id: 'evt-1'}), write('import-retry', 'ord_d', {event_id: 'evt-2'}),
+    write('import-retry', 'ord_e', {event_id: 'evt-3'}), write('import-retry', 'ord_f', {event_id: 'evt-3'}), write('web-checkout', 'ord_g', {event_id: ''})]});
+  const model = app.evidenceWrites(), cols = app.graphColumns(model);
+  assert.deepEqual(Array.from(model.writes, w => w.col), [0, 1, 0, 1, 2, 3, 4]); // a second write in the same lane, or none, gets its own column
+  assert.equal(cols.count, 5);
+  const view = app.reconstructionView(), d = dots(view);
+  assert.equal(d[0].x, d[2].x); // ord_a and its copy ord_c share a column
+  assert.notEqual(d[0].y, d[2].y); // on different branches
+  assert.doesNotMatch(view, /recon-arc|recon-tick (repeat|kept)/); // the column is evidence; a tie needs a plan or review
+  assert.match(view, /class="recon-lost" d="M/);
+  assert.doesNotMatch(view, /\bstyle=/);
+});
+
+test('ties come only from pairs, and the copy branch only from a test on a copy', () => {
+  const app = harness();
+  evidenceState(app, {'events.jsonl': [write('import-first', 'ord_a', {event_id: 'evt-1'}), write('import-retry', 'ord_c', {event_id: 'evt-1'}), write('import-retry', 'ord_d', {event_id: 'evt-2'})]});
+  const pairs = [{order_id: 'ord_c', duplicate_of: 'ord_a'}];
+  const proposed = app.reconstructionView(pairs);
+  assert.match(proposed, /<line class="recon-arc" x1="([\d.]+)" x2="\1"/); // a vertical tie down the column
+  assert.doesNotMatch(proposed, /Tested copy|recon-revert/); // nothing cancelled before a test
+  app.state.run = {id: 'run-a', incident_id: 'case-a', status: 'ready_for_review', plan: {cancellations: []},
+    review: {passed: true, before_active: 3, after_active: 2, checks: [{name: 'source_snapshot_unchanged', passed: true, detail: ''}, {name: 'database_integrity', passed: true, detail: ''}]}};
+  const tested = app.reconstructionView(pairs, {rehearsed: true});
+  assert.match(tested, /<strong class="lane-long">Original database<\/strong><strong class="lane-short">Original<\/strong><span>unchanged during the test<\/span>/);
+  assert.match(tested, /<strong class="lane-long">Tested copy<\/strong><strong class="lane-short">Copy<\/strong><span>3 → 2 · 2\/2 checks<\/span>/);
+  assert.equal((tested.match(/class="recon-revert"/g) || []).length, 1);
+  assert.match(tested, /class="recon-node ok"/);
+  app.state.run.review.checks[1].passed = false;
+  assert.match(app.reconstructionView(pairs, {rehearsed: true}), /class="recon-node danger"/);
+  app.state.run.review = {changes: []}; // a review without checks or counts draws no copy branch
+  assert.doesNotMatch(app.reconstructionView(pairs, {rehearsed: true}), /Tested copy/);
+});
+
+test('the column log lists every write of the event, in lane order, with its role and evidence line', () => {
+  const app = harness();
+  evidenceState(app, {'events.jsonl': [write('import-first', 'ord_a', {event_id: 'evt-1'}), write('import-retry-partial', 'ord_b', {event_id: 'evt-1'}),
+    write('import-retry', 'ord_c', {event_id: 'evt-1'}), write('import-retry', 'ord_d', {event_id: 'evt-2'})]},
+    {orders: [{id: 'ord_a', customer: 'customer-000', sku: 'MOUSE', quantity: 2}]});
+  const pairs = [{order_id: 'ord_b', duplicate_of: 'ord_a'}, {order_id: 'ord_c', duplicate_of: 'ord_a'}];
+  app.reconstructionView(pairs);
+  assert.match(app.columnLog(null), /Point at a commit/);
+  const log = app.columnLog(app.evidenceWrites().writes[2]); // a fresh model keeps the same columns
+  assert.match(log, /Source event <span class="mono">evt-1<\/span> · customer-000 · MOUSE × 2 · 3 writes/);
+  const rows = [...log.matchAll(/<li class="([^"]*)"[^>]*>/g)].map(m => m[1]);
+  assert.deepEqual(rows, ['kept', 'repeat', 'repeat current']);
+  assert.match(log, /#1<\/span><span class="mono">ord_a<\/span><span>First import<\/span><span class="mono faint">events\.jsonl:L1<\/span><span>first write · stays<\/span>/);
+  assert.match(log, /Partial retry<\/span><span class="mono faint">events\.jsonl:L2<\/span><span>repeat · proposed to cancel/);
+  assert.match(log, /data-key="order:ord_c"/);
+});
+
+test('arrow keys move through commits, and up and down between writes of the same event', () => {
+  const app = harness();
+  evidenceState(app, {'events.jsonl': [write('import-first', 'ord_a', {event_id: 'evt-1'}), write('import-first', 'ord_b', {event_id: 'evt-2'}),
+    write('import-retry', 'ord_c', {event_id: 'evt-1'}), write('import-retry', 'ord_d', {event_id: 'evt-2'})]});
+  app.reconstructionView();
+  const svg = {};
+  assert.equal(app.moveRecon(svg, 'ArrowUp'), false); // nothing active yet: the page scrolls as usual
+  assert.equal(app.moveRecon(svg, 'ArrowRight'), true);
+  assert.equal(app.state.reconActive, 0);
+  app.moveRecon(svg, 'ArrowDown');
+  assert.equal(app.state.reconActive, 2); // ord_c, the copy of ord_a's event
+  app.moveRecon(svg, 'ArrowDown');
+  assert.equal(app.state.reconActive, 2); // no lower write in this column
+  app.moveRecon(svg, 'ArrowLeft');
+  assert.equal(app.state.reconActive, 1);
+  app.moveRecon(svg, 'End');
+  assert.equal(app.state.reconActive, 3);
+});
+
+test('compared runs mark cancellations in the graph columns', () => {
+  const app = harness();
+  const view = compareState(app, {details: {'rec-a': recording('rec-a', ['ord_c', 'ord_d'])}, recs: [{id: 'rec-a', outcome: 'repair', fixture_matches: true}]});
+  const graph = app.reconstructionView([{order_id: 'ord_c', duplicate_of: 'ord_a'}, {order_id: 'ord_d', duplicate_of: 'ord_b'}]);
+  const xs = new Set(dots(graph).map(d => d.x));
+  const marks = [...view.matchAll(/class="cmp-mark[^"]*" x="([\d.]+)" y="[\d.]+" width="6"/g)].map(m => Number(m[1]) + 3);
+  assert.ok(marks.length >= 2);
+  assert.ok(marks.every(x => xs.has(x)), `${marks} within ${[...xs]}`);
+});
+
+test('in the published cases every reviewed repeat shares a column with the original it repeats', () => {
+  const data = JSON.parse(fs.readFileSync(path.join(__dirname, '../examples/public-demo/demo-data.json'), 'utf8'));
+  for (const [caseId, columns, repeats] of [['import-retry', 60, 20], ['multiple-retries', 60, 40], ['split-evidence', 60, 20]]) {
+    const app = harness();
+    const files = Object.fromEntries(Object.entries(data.artifacts[caseId]).map(([name, f]) => [name, f.lines.map(l => l.text)]));
+    evidenceState(app, files, {incident: caseId, orders: data.api_get[`/api/incidents/${caseId}`].orders});
+    const runId = data.api_get[`/api/runs?incident=${caseId}`].runs[0].id, review = data.api_get[`/api/runs/${runId}`].review;
+    app.state.run = data.api_get[`/api/runs/${runId}`];
+    const pairs = review.changes.map(c => ({order_id: c.before.id, duplicate_of: c.duplicate_of}));
+    const model = app.evidenceWrites();
+    assert.equal(app.graphColumns(model).count, columns, caseId);
+    const col = new Map(model.writes.map(w => [w.order_id, w.col]));
+    assert.equal(pairs.length, repeats, caseId);
+    assert.ok(pairs.every(p => col.get(p.order_id) === col.get(p.duplicate_of)), caseId);
+    const view = app.reconstructionView(pairs, {rehearsed: true});
+    assert.equal((view.match(/<line class="recon-arc"/g) || []).length, repeats, caseId); // every tie runs straight down its column
+    assert.match(view, new RegExp(`${review.before_active} → ${review.after_active} · 10/10 checks`), caseId);
+  }
+});
