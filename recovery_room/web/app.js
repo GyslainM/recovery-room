@@ -23,6 +23,8 @@ const state = {
   recDetails: new Map(),
   // reconWaiting: cases whose timeline evidence is being read; each case starts and repaints its own.
   reconWaiting: new Set(),
+  // reconOpen: which commit groups in What happened the person opened or closed, by case, source and group.
+  reconOpen: new Map(),
   // sourceChosen: the person picked script or recorded; until then each case opens on its recorded Meta run.
   // replay: {recId, cursor, playing} while the saved steps of the open recording are being replayed.
   // demo: the public read-only demo's dataset defaults and evaluation notes (see staticContract).
@@ -871,112 +873,155 @@ function graphColumns(model) {
   return {count, width: GRAPH_PAD + count * GRAPH_STEP + GRAPH_STEP, cx: (col) => GRAPH_PAD + col * GRAPH_STEP + GRAPH_STEP / 2};
 }
 
-// The last graph drawn, so pointer and keyboard can update its column highlight and log without a repaint.
-let reconCtx = null;
-
-// Every write of the highlighted commit's source event, newest attempt last, like a short git log.
-function columnLog(active) {
-  const ctx = reconCtx;
-  if (!ctx || !active) return '<p class="caption">Point at a commit, or use the arrow keys, to list every write of its source event.</p>';
-  active = ctx.writes.find(w => w.x === active.x) || active;
-  const same = ctx.writes.filter(w => w.col === active.col).sort((a, b) => ctx.laneOf.get(a.attempt) - ctx.laneOf.get(b.attempt));
-  const o = ordersById().get(same[0].order_id);
-  const head = `${active.event_id ? `Source event <span class="mono">${text(active.event_id)}</span>` : 'No source event recorded'}${o ? ` · ${text(`${o.customer} · ${o.sku} × ${o.quantity}`)}` : ''} · ${same.length} ${same.length === 1 ? 'write' : 'writes'}`;
-  const rows = same.map(w => {
-    const role = ctx.role(w), tone = ctx.repeat.has(w.x) ? 'repeat' : ctx.kept.has(w.x) ? 'kept' : '';
-    const attrs = ctx.selectable ? ` data-key="order:${escape(w.order_id)}"` : '';
-    return `<li class="${tone}${w.x === active.x ? ' current' : ''}"${attrs}><i aria-hidden="true"></i><span class="mono">#${text(w.commitLabel)}</span><span class="mono">${text(compactId(w.order_id))}</span><span>${text(ATTEMPT_LABEL[w.attempt] || w.attempt)}</span><span class="mono faint">${text(w.ref)}</span><span>${text(role || 'committed write')}</span></li>`;
-  }).join('');
-  return `<p class="recon-log-head">${head}</p><ol class="recon-log-list">${rows}</ol>`;
+// What happened, as a git log of the evidence, oldest first. The orders database is main. Each attempt's
+// consecutive committed writes form a branch that forks off main and merges back; a lost connection ends
+// its branch. An attempt with no commit records is a branch with nothing in it. A gap in the commit log
+// is shown on its attempt's branch (the evidence names the attempt), or on main when no branch has it.
+function gitSegments(model) {
+  const items = [...model.writes.map(w => ({w, at: w.x})), ...model.marks.filter(m => m.type === 'connection_lost').map(m => ({m, at: m.x - 0.5}))].sort((a, b) => a.at - b.at);
+  const out = [];
+  let cur = null;
+  const close = () => { if (cur) out.push(cur); cur = null; };
+  for (const it of items) {
+    if (it.w) {
+      if (!cur || cur.attempt !== it.w.attempt) { close(); cur = {attempt: it.w.attempt, writes: [], lost: [], gaps: []}; }
+      cur.writes.push(it.w);
+    } else {
+      if (!cur || cur.attempt !== it.m.attempt) { close(); cur = {attempt: it.m.attempt, writes: [], lost: [], gaps: []}; }
+      cur.lost.push(it.m);
+      close();
+    }
+  }
+  close();
+  for (const m of model.marks.filter(mk => mk.type === 'log_gap')) {
+    const home = [...out].reverse().find(seg => seg.attempt === m.attempt);
+    if (home) home.gaps.push(m); else out.push({gap: m});
+  }
+  return out;
 }
 
-// Highlight one commit's column and list its writes, in place.
-function showColumn(i) {
-  const svg = $('#content .recon-svg'), w = reconCtx?.writes.find(x => x.x === i);
-  if (!w) return;
-  state.reconActive = i;
-  if (!svg?.querySelector) return;
-  const col = svg.querySelector('.recon-col'), ring = svg.querySelector('.recon-ring'), dot = svg.querySelector(`[data-i="${i}"]`);
-  if (col) { col.setAttribute('x', String(reconCtx.cx(w.col) - GRAPH_STEP / 2)); col.removeAttribute('visibility'); }
-  if (ring && dot) { ring.setAttribute('cx', dot.getAttribute('cx')); ring.setAttribute('cy', dot.getAttribute('cy')); ring.removeAttribute('visibility'); }
-  const log = $('#recon-log');
-  if (log) log.innerHTML = columnLog(w);
-}
+const GL_MERGE = '<svg class="gl-curve merge" viewBox="0 0 52 18" aria-hidden="true" focusable="false"><path d="M36 0C36 12,14 6,14 18"/></svg>';
+const GL_FORK = '<svg class="gl-curve fork" viewBox="0 0 52 18" aria-hidden="true" focusable="false"><path d="M14 0C14 12,36 6,36 18"/></svg>';
+const GL_BOLT = '<svg class="gl-bolt" viewBox="0 0 10 16" aria-hidden="true" focusable="false"><path d="M6 1L2 8h5l-4 7"/></svg>';
 
 // pairs: [{order_id: the repeated (cancelled) order, duplicate_of: the first write that stays}].
 // rehearsed: a rehearsal review exists, so the marked repeats were cancelled on the copy; otherwise they
-// are the proposal's targets and nothing has been cancelled yet.
+// are the proposal's targets and nothing has been cancelled yet. Which write repeats, and the tie to its
+// original, come only from these pairs; the copy branch appears only once a test on a copy exists.
 function reconstructionView(pairs = null, {recorded = false, stopped = null, rehearsed = false} = {}) {
   const model = evidenceWrites();
-  const head = `<div class="recon-head"><h3 id="recon-title">What happened</h3><span class="caption">Each attempt is a branch and each column one source event, read from the evidence files</span></div>`;
+  const head = `<div class="recon-head"><h3 id="recon-title">What happened</h3><span class="caption">Each attempt is a branch of committed writes, oldest first, read from the evidence files</span></div>`;
   if (model === null) return `<section class="recon" aria-labelledby="recon-title">${head}${skeleton(3)}</section>`;
   if (model.error) return `<section class="recon" aria-labelledby="recon-title">${head}<p class="callout stop">${text(model.error)}</p></section>`;
   const {writes, marks, lanes} = model;
   if (!writes.length && !marks.length) return '';
-  const cols = graphColumns(model), laneOf = new Map(lanes.map((l, i) => [l, i]));
   const byOrder = new Map(writes.map(w => [w.order_id, w]));
-  const kept = new Set(), repeat = new Set(), arcs = [];
+  const kept = new Set(), repeat = new Set(), originalOf = new Map(), copiesOf = new Map();
   for (const p of pairs || []) {
     const r = byOrder.get(p.order_id), k = byOrder.get(p.duplicate_of);
     if (!r || !k) continue;
-    repeat.add(r.x); kept.add(k.x); arcs.push([k, r]);
+    repeat.add(r.x); kept.add(k.x); originalOf.set(r.x, k);
+    copiesOf.set(k.x, [...(copiesOf.get(k.x) || []), r.x]);
   }
-  // The copy branch appears only once a test on a copy exists (this run's review or the recording's).
-  const found = pairs && (rehearsed || recorded) && arcs.length ? active().review : null;
+  const found = pairs && (rehearsed || recorded) && repeat.size ? active().review : null;
   const review = found && Array.isArray(found.checks) && Number.isFinite(found.before_active) && Number.isFinite(found.after_active) ? found : null;
-  const laneCount = Math.max(lanes.length, 1), height = (laneCount + (review ? 2 : 0)) * RECON_LANE;
-  const ly = (lane) => laneOf.get(lane) * RECON_LANE + RECON_LANE / 2, cx = (w) => cols.cx(w.col);
+  const proposal = pairs && !recorded && !rehearsed && repeat.size > 0;
   const repeatRole = recorded ? 'Repeat · cancelled in this recording' : rehearsed ? 'Repeat · cancelled on the copy' : 'Repeat · proposed to cancel';
   const role = (w) => repeat.has(w.x) ? repeatRole.toLowerCase() : kept.has(w.x) ? 'first write · stays' : pairs ? 'untouched' : '';
-  const selectable = active().selectable;
-  const branches = lanes.map(l => {
-    const xs = writes.filter(w => w.attempt === l).map(cx);
-    return xs.length > 1 ? `<line class="recon-branch" x1="${Math.min(...xs)}" x2="${Math.max(...xs)}" y1="${ly(l)}" y2="${ly(l)}"/>` : '';
-  }).join('');
-  const curves = arcs.map(([k, r]) => {
-    const x1 = cx(k), x2 = cx(r), y1 = ly(k.attempt), y2 = ly(r.attempt);
-    if (x1 === x2) { const dir = Math.sign(y2 - y1) || 1; return `<line class="recon-arc" x1="${x1}" x2="${x2}" y1="${y1 + dir * 5}" y2="${y2 - dir * 5}"/>`; }
-    if (y1 === y2) return `<path class="recon-arc" d="M${x1} ${y1 - 5} C${x1} ${y1 - 14}, ${x2} ${y1 - 14}, ${x2} ${y1 - 5}"/>`;
-    const mid = (y1 + y2) / 2;
-    return `<path class="recon-arc" d="M${x1} ${y1} C${x1} ${mid}, ${x2} ${mid}, ${x2} ${y2}"/>`;
-  }).join('');
-  const ticks = writes.map(w => `<circle class="recon-tick${repeat.has(w.x) ? ' repeat' : kept.has(w.x) ? ' kept' : ''}" data-i="${w.x}" ${selectable ? `data-key="order:${escape(w.order_id)}"` : ''} cx="${cx(w)}" cy="${ly(w.attempt)}" r="3.5"><title>${text(reconLabel(w, w.attempt, role(w)))}</title></circle>`).join('');
-  const lost = marks.filter(m => m.type === 'connection_lost' && laneOf.has(m.attempt)).map(m => {
-    const own = writes.filter(w => w.attempt === m.attempt), before = own.filter(w => w.x < m.x);
-    const x = before.length ? Math.max(...before.map(cx)) + GRAPH_STEP : own.length ? Math.min(...own.map(cx)) - GRAPH_STEP : GRAPH_PAD, y = ly(m.attempt);
-    return `<path class="recon-lost" d="M${x + 2} ${y - 7}l-4 7h5l-4 7"><title>Connection lost · ${text(ATTEMPT_LABEL[m.attempt] || m.attempt)}</title></path>`;
-  }).join('');
-  const gaps = marks.filter(m => m.type === 'log_gap');
-  const activeW = Number.isInteger(state.reconActive) ? writes.find(w => w.x === state.reconActive) || null : null;
-  const hidden = activeW ? '' : ' visibility="hidden"';
-  const highlight = `<rect class="recon-col" x="${activeW ? cx(activeW) - GRAPH_STEP / 2 : 0}" y="0" width="${GRAPH_STEP}" height="${laneCount * RECON_LANE}"${hidden}/>`;
-  const ring = `<circle class="recon-ring" cx="${activeW ? cx(activeW) : 0}" cy="${activeW ? ly(activeW.attempt) : 0}" r="6"${hidden}/>`;
-  let copy = '', copyRows = '';
-  if (review) {
-    const top = laneCount * RECON_LANE, y0 = top + RECON_LANE / 2, y1 = y0 + RECON_LANE, end = cols.cx(cols.count - 1);
-    const passed = review.checks.filter(ch => ch.passed).length, ok = review.passed === true && review.checks.length > 0 && passed === review.checks.length;
-    const src = review.checks.find(ch => ch.name === 'source_snapshot_unchanged');
-    const reverts = [...new Set(arcs.map(([, r]) => cx(r)))].map(x => `<path class="recon-revert" d="M${x - 3} ${y1 - 3}l6 6m0 -6l-6 6"/>`).join('');
-    copy = `<line class="recon-divider" x1="0" x2="${cols.width}" y1="${top}" y2="${top}"/>
-      <line class="recon-branch" x1="6" x2="${end}" y1="${y0}" y2="${y0}"/><circle class="recon-node" cx="6" cy="${y0}" r="3.5"/><circle class="recon-node" cx="${end}" cy="${y0}" r="4"/>
-      <path class="recon-branch" d="M6 ${y0} C16 ${y0}, 10 ${y1}, 22 ${y1} L${end} ${y1}"/>${reverts}<circle class="recon-node ${ok ? 'ok' : 'danger'}" cx="${end}" cy="${y1}" r="4"/>`;
-    const where = recorded || historicalRun(state.run) ? 'Recorded test copy' : 'Tested copy';
-    copyRows = `<li class="copy-first" title="${escape(`Original database · ${src ? (src.passed ? 'unchanged during the test' : 'changed during the test') : 'opened read-only'}`)}"><strong class="lane-long">Original database</strong><strong class="lane-short">Original</strong><span>${text(src ? (src.passed ? 'unchanged during the test' : 'changed during the test') : 'opened read-only')}</span></li>
-      <li title="${escape(`${where} · ${review.before_active} → ${review.after_active} active · ${passed}/${review.checks.length} checks`)}"><strong class="lane-long">${text(where)}</strong><strong class="lane-short">Copy</strong><span>${text(`${review.before_active} → ${review.after_active} · ${passed}/${review.checks.length} checks`)}</span></li>`;
+  const selectable = active().selectable, orders = ordersById(), past = recorded || historicalRun(state.run);
+  const tag = (t, cls = '') => `<span class="gl-tag${cls ? ` ${cls}` : ''}">${text(t)}</span>`;
+  const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+  const commit = (w) => {
+    const o = orders.get(w.order_id), k = originalOf.get(w.x), partners = k ? [k.x] : copiesOf.get(w.x) || [];
+    const tone = repeat.has(w.x) ? ' repeat' : kept.has(w.x) ? ' kept' : '';
+    const pill = k ? `<span class="recon-arc" title="${escape(`Same source event as commit ${k.commitLabel}, ${k.order_id}, which stays`)}">repeat of #${text(k.commitLabel)}</span>`
+      : kept.has(w.x) ? '<span class="gl-pill kept">first write · stays</span>' : pairs ? '<span class="gl-pill">untouched</span>' : '';
+    const attrs = `data-i="${w.x}"${partners.length ? ` data-pair="${partners.join(' ')}"` : ''}${selectable ? ` data-key="order:${escape(w.order_id)}" tabindex="0" aria-selected="false"` : ''}`;
+    return `<li class="recon-tick${tone}" ${attrs} title="${escape(reconLabel(w, w.attempt, role(w)))}"><i class="gl-dot" aria-hidden="true"></i><span class="mono">#${text(w.commitLabel)}</span><span class="mono gl-id">${text(compactId(w.order_id))}</span>${o ? `<span class="muted">${text(`${o.customer} · ${o.sku} × ${o.quantity}`)}</span>` : ''}${pill}<span class="gl-meta mono">${text(w.ref)}</span></li>`;
+  };
+
+  // In a branch with marked commits, a run of four or more unmarked ones folds into one row, so the
+  // repeats and the originals they repeat stay together on screen. The folded commits stay in the list.
+  const commits = (list) => {
+    if (!list.some(w => repeat.has(w.x) || kept.has(w.x))) return list.map(commit).join('');
+    const out = [];
+    for (let i = 0; i < list.length;) {
+      let j = i;
+      while (j < list.length && !repeat.has(list[j].x) && !kept.has(list[j].x)) j++;
+      if (j - i >= 4) {
+        const run = list.slice(i, j), first = run[0].commitLabel, last = run[run.length - 1].commitLabel;
+        out.push(`<li class="gl-more"><details><summary class="gl-fold"><span class="gl-chev" aria-hidden="true">${icon('chevron-right')}</span><span>${text(`${run.length} ${pairs ? 'untouched' : ''} commits`.replace('  ', ' '))}</span><span class="gl-meta mono">${text(`#${first}–${last}`)}</span></summary><ol class="gl-commits">${run.map(commit).join('')}</ol></details></li>`);
+        i = j;
+      } else { if (j === i) j = i + 1; out.push(...list.slice(i, j).map(commit)); i = j; }
+    }
+    return out.join('');
+  };
+
+  // The rows in order: main, then each branch (and its merge), then the copy branch or the proposal.
+  const segs = gitSegments(model), entries = [{kind: 'main', role: 'base'}];
+  for (const seg of segs) {
+    if (seg.gap) { entries.push({kind: 'gap', mark: seg.gap}); continue; }
+    entries.push({kind: 'branch', seg});
+    // A branch with commits merges back; an empty one just ends, and main carries on unchanged.
+    entries.push({kind: 'main', role: seg.writes.length ? 'merge' : 'idle', seg});
   }
-  const laneRows = lanes.map(l => {
-    const count = writes.filter(w => w.attempt === l).length;
-    const notes = [count ? `${count} write${count === 1 ? '' : 's'}` : 'no commit records',
-      marks.some(m => m.type === 'connection_lost' && m.attempt === l) ? 'connection lost' : '',
-      gaps.some(m => m.attempt === l) ? 'log gap' : ''].filter(Boolean).join(' · ');
-    const short = l === 'web-checkout' ? 'Checkouts' : ATTEMPT_LABEL[l] || l;
-    return `<li title="${escape(`${ATTEMPT_LABEL[l] || l} · ${notes}`)}"><strong class="lane-long">${text(ATTEMPT_LABEL[l] || l)}</strong><strong class="lane-short">${text(short)}</strong><span>${text(notes)}</span></li>`;
+  const headAt = entries.map(e => e.kind).lastIndexOf('main');
+  if (review) entries.push({kind: 'copy'}, {kind: 'main', role: 'after'});
+  else if (proposal) entries.push({kind: 'proposal'}, {kind: 'main', role: 'after'});
+  else if (entries[entries.length - 1].kind !== 'main') entries.push({kind: 'main', role: 'after'});
+  const lastMain = entries.map(e => e.kind).lastIndexOf('main');
+  const branchy = (e) => e && (e.kind === 'branch' || e.kind === 'copy' || e.kind === 'proposal');
+  let total = 0;
+  const passed = review ? review.checks.filter(ch => ch.passed).length : 0;
+  const ok = review && review.passed === true && review.checks.length > 0 && passed === review.checks.length;
+  const src = review?.checks.find(ch => ch.name === 'source_snapshot_unchanged');
+
+  const rows = entries.map((e, i) => {
+    if (e.kind === 'main') {
+      const prev = entries[i - 1], merge = prev?.kind === 'branch' && prev.seg.writes.length > 0, fork = branchy(entries[i + 1]);
+      if (e.role === 'merge') total += e.seg.writes.length;
+      const cls = `${i === 0 ? ' first' : ''}${i === lastMain ? ' last' : ''}`;
+      const tags = `${tag('main')}${i === headAt ? tag('HEAD', 'head') : ''}`;
+      const what = e.role === 'base' ? '<strong>orders-db</strong><span class="muted">before the first committed write in the evidence</span>'
+        : e.role === 'idle' ? `<strong>orders-db</strong><span class="muted">${text(`no writes from ${e.seg.attempt}`)}</span>`
+        : e.role === 'merge' ? `<span>Merge</span>${tag(e.seg.attempt)}<span class="muted">${text(i === headAt && review ? `${review.before_active} active orders` : `${plural(total, 'committed write')}`)}</span>`
+        : review ? `<strong>orders-db</strong><span class="muted">${text(src ? (src.passed ? 'Unchanged during the test' : 'Changed during the test') : 'Opened read-only')}</span>`
+        : proposal ? '<strong>orders-db</strong><span class="muted">Unchanged: nothing is cancelled until it is tested on a copy</span>'
+        : '<strong>orders-db</strong>';
+      return `<li class="gl-row gl-main${cls}">${merge ? GL_MERGE : ''}${fork ? GL_FORK : ''}<i class="gl-dot" aria-hidden="true"></i><span class="gl-msg">${tags}${what}</span></li>`;
+    }
+    if (e.kind === 'gap') return `<li class="gl-row gl-main gl-gap${i === lastMain ? ' last' : ''}"><i class="gl-dot" aria-hidden="true"></i><span class="gl-msg"><strong>Gap in the commit log</strong>${e.mark.detail ? `<span class="muted">${text(e.mark.detail)}</span>` : ''}</span></li>`;
+    if (e.kind === 'copy') {
+      const n = repeat.size;
+      return `<li class="gl-row gl-on gl-copy"><span class="gl-dot gl-x" aria-hidden="true">${icon('x')}</span><span class="gl-msg">${tag(past ? 'recorded-test-copy' : 'test-copy')}<strong>${text(`Cancel ${plural(n, 'repeated write')}`)}</strong><span class="muted">${past ? 'in the recorded test on a copy' : 'on a disposable copy'}</span></span></li>
+        <li class="gl-row gl-on stop gl-result ${ok ? 'ok' : 'danger'}"><i class="gl-dot" aria-hidden="true"></i><span class="gl-msg"><strong>${text(`${review.before_active} → ${review.after_active} active orders`)}</strong><span class="gl-checks">${text(`${passed} of ${review.checks.length} checks passed`)}</span><span class="muted">Not merged into orders-db</span></span></li>`;
+    }
+    if (e.kind === 'proposal') return `<li class="gl-row gl-on stop gl-proposal"><i class="gl-dot" aria-hidden="true"></i><span class="gl-msg">${tag('proposal')}<strong>${text(`Would cancel ${plural(repeat.size, 'repeated write')}`)}</strong><span class="muted">Not tested on a copy yet</span></span></li>`;
+    // A branch: its header (a fold when it has commits), its commits, and a lost connection if one ended it.
+    const {seg} = e, n = seg.writes.length, label = ATTEMPT_LABEL[seg.attempt] || seg.attempt;
+    const reps = seg.writes.filter(w => repeat.has(w.x)), keeps = seg.writes.filter(w => kept.has(w.x));
+    const of = reps.map(w => originalOf.get(w.x).commitLabel), range = (a) => a.length ? (Math.min(...a) === Math.max(...a) ? `#${Math.min(...a)}` : `#${Math.min(...a)}–${Math.max(...a)}`) : '';
+    const numeric = of.every(Number.isFinite);
+    const pills = `${reps.length ? `<span class="gl-pill repeat">${text(`${plural(reps.length, 'repeat')}${numeric ? ` of ${range(of)}` : ''}`)}</span>` : ''}${keeps.length ? `<span class="gl-pill kept">${text(`${plural(keeps.length, 'first write')} kept`)}</span>` : ''}${pairs && n - reps.length - keeps.length > 0 ? `<span class="gl-pill">${text(`${n - reps.length - keeps.length} untouched`)}</span>` : ''}`;
+    const labels = seg.writes.map(w => w.commitLabel), span = n ? (n === 1 ? `#${labels[0]}` : `#${labels[0]}–${labels[n - 1]}`) : '';
+    const tone = reps.length ? ' repeat' : keeps.length ? ' kept' : '';
+    const ends = !n; // nothing was committed, so nothing merges back: the branch stops at its last row
+    const headInner = `<i class="gl-dot" aria-hidden="true"></i><span class="gl-msg">${n ? `<span class="gl-chev" aria-hidden="true">${icon('chevron-right')}</span>` : ''}${tag(seg.attempt)}<strong>${text(label)}</strong><span class="muted">${n ? text(plural(n, 'write')) : 'no commit records'}</span>${pills}</span>${span ? `<span class="gl-meta mono">${text(span)}</span>` : ''}`;
+    const gapRows = seg.gaps.map((m, j) => `<div class="gl-row gl-on gl-gap${ends && !seg.lost.length && j === seg.gaps.length - 1 ? ' stop' : ''}"><i class="gl-dot" aria-hidden="true"></i><span class="gl-msg"><strong>Gap in the commit log</strong>${m.detail ? `<span class="muted">${text(m.detail)}</span>` : ''}</span></div>`).join('');
+    const lost = gapRows + seg.lost.map((m, j) => `<div class="gl-row gl-on gl-lost${ends && j === seg.lost.length - 1 ? ' stop' : ''}">${GL_BOLT}<span class="gl-msg"><strong>Connection lost</strong>${m.detail ? `<span class="muted">${text(m.detail)}</span>` : ''}</span></div>`).join('');
+    if (!n) return `<li class="gl-branch"><div class="gl-row gl-on gl-head${lost ? '' : ' stop'}">${headInner}</div>${lost}</li>`;
+    const key = `${state.incident.id}:${recordedMode() ? 'rec' : 'script'}:${i}`;
+    const open = state.reconOpen.has(key) ? state.reconOpen.get(key) : reps.length > 0;
+    return `<li class="gl-branch"><details class="gl-group" data-group="${escape(key)}"${open ? ' open' : ''}><summary class="gl-row gl-on gl-head${tone}">${headInner}</summary><ol class="gl-commits">${commits(seg.writes)}</ol></details>${lost}</li>`;
   }).join('');
+
+  const gaps = marks.filter(m => m.type === 'log_gap');
   const legend = pairs
-    ? `<span><i class="kept"></i>First write · stays</span><span><i class="repeat"></i>${repeatRole}</span><span><i></i>Untouched</span>${arcs.length ? '<span><i class="tie"></i>Same source event</span>' : ''}`
+    ? `<span><i class="kept"></i>First write · stays</span><span><i class="repeat"></i>${repeatRole}</span><span><i></i>Untouched</span>`
     : '<span><i></i>Committed write</span>';
-  const lostKey = marks.some(m => m.type === 'connection_lost') ? '<span><svg class="legend-bolt" viewBox="0 0 8 16" aria-hidden="true"><path d="M5 1l-4 7h5l-4 7"/></svg>Connection lost</span>' : '';
-  const copyKey = review ? `<span><svg class="legend-revert" viewBox="0 0 8 8" aria-hidden="true"><path d="M1 1l6 6m0 -6l-6 6"/></svg>Cancelled on the ${recorded || historicalRun(state.run) ? 'recorded ' : ''}copy</span>` : '';
+  const lostKey = marks.some(m => m.type === 'connection_lost') ? `<span>${GL_BOLT.replace('gl-bolt', 'legend-bolt')}Connection lost</span>` : '';
+  const copyKey = review ? `<span><span class="legend-x">${icon('x')}</span>Cancelled on the ${past ? 'recorded ' : ''}copy</span>` : '';
   const untouched = writes.length - repeat.size - kept.size;
   const lostCount = marks.filter(m => m.type === 'connection_lost').length;
   const summary = stopped ? `The script stopped instead of guessing: ${stopped} source events have no commit record${gaps.length ? ', where the log has a gap' : ''}.`
@@ -984,15 +1029,10 @@ function reconstructionView(pairs = null, {recorded = false, stopped = null, reh
     : pairs && !recorded && !rehearsed ? `The proposal would cancel ${repeat.size} repeated write${repeat.size === 1 ? '' : 's'} and keep the first write of each source event. ${untouched} other write${untouched === 1 ? '' : 's'} would stay untouched. Nothing is cancelled until it is tested on a copy.`
     : pairs ? `${recorded ? 'This recording’s review cancels' : 'On the copy, the repair cancelled'} ${repeat.size} repeated write${repeat.size === 1 ? '' : 's'} and ${recorded ? 'keeps' : 'kept'} the first write of each source event. ${untouched} other write${untouched === 1 ? ' is' : 's are'} untouched.`
     : `${writes.length} committed writes across ${lanes.length} ${lanes.length === 1 ? 'attempt' : 'attempts'}${lostCount ? `, with ${lostCount === 1 ? 'a lost connection' : `${lostCount} lost connections`}` : ''}${gaps.length ? ' and a gap in the commit log' : ''}. The investigation decides which writes repeat.`;
-  const described = `${summary} Use the left and right arrow keys to move between writes, up and down to move between writes of the same source event${selectable ? ', and Enter to open one' : ''}.`;
-  reconCtx = {writes, laneOf, repeat, kept, role, selectable, cx: cols.cx};
   return `<section class="recon" aria-labelledby="recon-title">${head}
-    <div class="recon-body"><ol class="recon-lanes" aria-hidden="true">${laneRows}${copyRows}</ol>
-      <div class="recon-scroll"><svg class="recon-svg" data-count="${writes.length}" viewBox="0 0 ${cols.width} ${height}" width="${cols.width}" height="${height}" tabindex="0" role="group" aria-roledescription="commit graph" aria-label="${escape(`Committed writes, ${lanes.length} attempt lanes, one column per source event`)}" aria-describedby="recon-summary">${highlight}${branches}${curves}${ticks}${lost}${copy}${ring}</svg></div></div>
-    <div class="recon-log" id="recon-log">${columnLog(activeW)}</div>
+    <ol class="gl" aria-label="${escape(`Commit history, ${plural(writes.length, 'committed write')} across ${plural(lanes.length, 'attempt')}, oldest first`)}">${rows}</ol>
     <div class="recon-legend graph-legend" aria-hidden="true">${legend}${lostKey}${copyKey}</div>
-    <p class="recon-summary" id="recon-summary">${text(summary)}<span class="sr-only"> ${text(described.slice(summary.length + 1))}</span></p>
-    <p class="sr-only" id="recon-live" aria-live="polite"></p>${runsCompare(model)}</section>`;
+    <p class="recon-summary gl-summary" id="recon-summary">${text(summary)}${selectable ? '<span class="sr-only"> Open a branch to list its commits; select a commit to open its order.</span>' : ''}</p>${runsCompare(model)}</section>`;
 }
 
 // Compared runs, under the timeline: one row per run on this case (the offline script, then each
@@ -1106,35 +1146,12 @@ function runsCompare(model) {
   const labels = rows.map(row => `<li><button class="compare-run${row.current ? ' current' : ''}" ${row.attrs} ${row.current ? 'aria-current="true"' : ''} title="${escape(`${row.label} · ${row.note}`)}"><strong>${text(row.label)}</strong><span class="cmp-long">${text(row.note)}</span><span class="cmp-short" aria-hidden="true">${text(row.short)}</span></button></li>`).join('');
   const legend = `<span><i class="repeat"></i>Cancelled by that run</span>${anyPlanned ? '<span><i class="planned"></i>Script’s target · not rehearsed yet</span>' : ''}${anyMissed ? `<span><i class="missed"></i>${rehearsed ? 'Cancelled' : 'Targeted'} by the script, kept by that run</span>` : ''}${anyExtra ? '<span><i class="extra"></i>Not in the script’s plan</span>' : ''}<span><i class="line"></i>No repair</span>`;
   return `<div class="recon-compare">
-    <div class="recon-head"><h4 id="compare-title">Compared runs</h4><span class="caption">In the same columns as the graph above. Recordings show their verified reviews; the script shows its ${rehearsed ? 'test on a copy' : 'proposal'}.</span></div>
+    <div class="recon-head"><h4 id="compare-title">Compared runs</h4><span class="caption">One column per source event, in commit order. Recordings show their verified reviews; the script shows its ${rehearsed ? 'test on a copy' : 'proposal'}.</span></div>
     <div class="recon-body"><ol class="recon-lanes compare-lanes" aria-labelledby="compare-title">${labels}</ol>
       <div class="recon-scroll"><svg class="compare-svg" viewBox="0 0 ${n} ${rows.length * H}" width="${n}" height="${rows.length * H}" aria-hidden="true" focusable="false">${svgRows}</svg></div></div>
     <div class="recon-legend" aria-hidden="true">${legend}</div>
     <p class="recon-summary">${text(headline)}</p>
   </div>`;
-}
-
-// Keyboard: one tab stop. Left and right move through the commits in order, up and down between writes
-// of the same source event; Enter opens the order (same as clicking a commit).
-function moveRecon(svg, key) {
-  const writes = reconCtx?.writes || [], n = writes.length;
-  if (!n) return false;
-  const moves = {ArrowRight: 1, ArrowLeft: -1, PageDown: 10, PageUp: -10};
-  const cur = Number.isInteger(state.reconActive) && state.reconActive < n ? state.reconActive : -1;
-  let next;
-  if (key === 'Home') next = 0;
-  else if (key === 'End') next = n - 1;
-  else if (key in moves) next = Math.max(0, Math.min(n - 1, cur < 0 && moves[key] < 0 ? 0 : cur + moves[key]));
-  else if (key === 'ArrowUp' || key === 'ArrowDown') {
-    if (cur < 0) return false;
-    const w = writes[cur], same = writes.filter(x => x.col === w.col).sort((a, b) => reconCtx.laneOf.get(a.attempt) - reconCtx.laneOf.get(b.attempt));
-    const to = same[same.indexOf(w) + (key === 'ArrowDown' ? 1 : -1)];
-    next = to ? to.x : cur;
-  } else return false;
-  showColumn(next);
-  const live = $('#recon-live'), dot = svg.querySelector?.(`[data-i="${next}"]`);
-  if (live && dot) live.textContent = dot.querySelector('title')?.textContent || '';
-  return true;
 }
 
 function investigationView() {
@@ -2976,14 +2993,6 @@ document.addEventListener('keydown', event => {
     items[next]?.focus();
     return;
   }
-  if (t.classList?.contains('recon-svg')) {
-    if (moveRecon(t, key)) { event.preventDefault(); return; }
-    if ((key === 'Enter' || key === ' ') && Number.isInteger(state.reconActive)) {
-      const tick = t.querySelector(`[data-i="${state.reconActive}"]`);
-      if (tick?.dataset.key) { event.preventDefault(); select(tick.dataset.key, {keepFocus: true}); }
-      return;
-    }
-  }
   if (t.id === 'ev-lines') {
     const moves = {ArrowDown: 1, ArrowUp: -1, PageDown: 15, PageUp: -15};
     if (key in moves) { event.preventDefault(); moveActive(moves[key]); return; }
@@ -3035,8 +3044,21 @@ $('#palette').addEventListener('close', () => { if (!palette.ran && palette.retu
 window.addEventListener('resize', () => { positionTabIndicator(); applyRail(); if (state.nav && !isNarrow()) setNav(false); });
 document.addEventListener('pointerdown', event => { const handle = event.target.closest?.('.resizer'); if (handle) startSideDrag(event, handle); });
 document.addEventListener('pointermove', moveSideDrag);
-// Pointing at a commit highlights its column and lists its writes.
-document.addEventListener('pointerover', event => { const dot = event.target.closest?.('.recon-svg .recon-tick'); if (dot) showColumn(Number(dot.dataset.i)); });
+// Pointing at or focusing a commit in What happened lights up the other writes of its source event.
+let glPaired = false;
+function pairHighlight(row) {
+  if (!row && !glPaired) return;
+  document.querySelectorAll('#content .gl .paired').forEach(el => el.classList.remove('paired'));
+  glPaired = false;
+  for (const id of row?.dataset.pair?.split(' ') || []) {
+    const other = document.querySelector(`#content .gl [data-i="${id}"]`);
+    if (other) { other.classList.add('paired'); glPaired = true; }
+  }
+}
+document.addEventListener('pointerover', event => pairHighlight(event.target.closest?.('.gl-commits > li') || null));
+document.addEventListener('focusin', event => pairHighlight(event.target.closest?.('.gl-commits > li') || null));
+// A commit group the person opens or closes stays that way when the panel repaints.
+document.addEventListener('toggle', event => { const d = event.target; if (d?.classList?.contains('gl-group')) state.reconOpen.set(d.dataset.group, d.open); }, true);
 // On narrow screens the graph and the compared runs scroll sideways together, so their columns stay aligned.
 document.addEventListener('scroll', event => {
   const box = event.target;

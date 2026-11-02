@@ -756,35 +756,73 @@ details.tl-card>.tl-head:hover{background:var(--hover)}
 .recon-tick.kept{fill:var(--accent)}
 .recon-tick.repeat{fill:var(--warn)}
 .recon-tick.selected{fill:var(--ink)}
-.recon-arc{fill:none;stroke:var(--warn);stroke-opacity:.75;stroke-width:1;stroke-dasharray:2 2}
-.recon-branch{fill:none;stroke:var(--line-3);stroke-width:1.5}
-.recon-col{fill:var(--hover)}
-.recon-divider{stroke:var(--line);stroke-width:1}
-.recon-node{fill:var(--chart-neutral)}
-.recon-node.ok{fill:var(--accent)}
-.recon-node.danger{fill:var(--danger)}
-.recon-revert{fill:none;stroke:var(--warn);stroke-width:1.5;stroke-linecap:round}
 .recon-lost{fill:none;stroke:var(--danger-ink);stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}
 .recon-ring{fill:none;stroke:var(--ink);stroke-width:1.5;pointer-events:none}
-.recon-lanes li.copy-first{box-shadow:inset 0 1px var(--line)}
+/* What happened as a git log: rails at 14px (main) and 36px (a branch), one row per commit or event. */
+.gl{position:relative;margin:0;padding:0;list-style:none;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface);overflow:hidden}
+.gl-branch{display:block}
+.gl-row,.gl-commits>li{position:relative;display:flex;flex-wrap:wrap;align-items:center;gap:2px var(--s1);min-height:36px;padding:7px var(--s2) 7px 56px;border-top:1px solid var(--line);font-size:var(--fs-3);line-height:1.45;--mid:18px}
+.gl>li:first-child{border-top:0}
+.gl-row::before,.gl-commits>li::before{content:'';position:absolute;left:13px;top:0;bottom:0;width:2px;background:var(--line-3)}
+.gl-main.first::before{top:var(--mid)}
+.gl-main.last::before{bottom:auto;height:var(--mid)}
+.gl-on::after,.gl-commits>li::after{content:'';position:absolute;left:35px;top:0;bottom:0;width:2px;background:var(--muted)}
+.gl-on.stop::after{bottom:auto;height:var(--mid)}
+.gl-curve{position:absolute;left:0;width:52px;height:18px;fill:none;stroke:var(--muted);stroke-width:2}
+.gl-curve.merge{top:0}
+.gl-curve.fork{top:18px}
+.gl-dot{position:absolute;z-index:1;top:calc(var(--mid) - 5px);left:9px;width:10px;height:10px;border-radius:50%;background:var(--chart-neutral)}
+.gl-on>.gl-dot{left:31px}
+.gl-main>.gl-dot{background:var(--surface);box-shadow:inset 0 0 0 2px var(--muted)}
+.gl-head.kept>.gl-dot,.gl-result.ok>.gl-dot{background:var(--accent)}
+.gl-head.repeat>.gl-dot{background:var(--warn)}
+.gl-result.danger>.gl-dot{background:var(--danger)}
+.gl-proposal>.gl-dot,.gl-gap>.gl-dot{background:var(--surface);box-shadow:inset 0 0 0 2px var(--warn)}
+.gl-dot.gl-x{display:grid;place-items:center;top:calc(var(--mid) - 7px);left:29px;width:14px;height:14px;background:var(--surface);box-shadow:inset 0 0 0 1.5px var(--warn);color:var(--warn-ink)}
+.gl-dot.gl-x .icon{width:10px;height:10px}
+.gl-bolt{position:absolute;z-index:1;top:calc(var(--mid) - 8px);left:31px;width:10px;height:16px;fill:none;stroke:var(--danger-ink);stroke-width:1.8;stroke-linejoin:round;stroke-linecap:round;background:var(--surface)}
+.gl-msg{display:flex;flex-wrap:wrap;align-items:center;gap:2px var(--s1);min-width:0}
+.gl-meta{margin-left:auto;padding-left:var(--s1);font-size:var(--fs-1);color:var(--faint);white-space:nowrap}
+.gl-tag{padding:0 7px;border:1px solid var(--line-2);border-radius:var(--r-pill);font:var(--fs-1)/18px var(--mono);color:var(--muted)}
+.gl-tag.head{border-color:var(--accent-line);color:var(--accent-ink)}
+.gl-pill,.gl .recon-arc{padding:0 7px;border-radius:var(--r-pill);background:var(--raised);font-size:var(--fs-1);line-height:18px;color:var(--muted)}
+.gl-pill.kept{background:var(--accent-soft);color:var(--accent-ink)}
+.gl-pill.repeat,.gl .recon-arc{background:var(--warn-soft);color:var(--warn-ink)}
+.gl-lost strong{color:var(--danger-ink)}
+.gl-result.ok .gl-checks{color:var(--accent-ink)}
+.gl-result.danger .gl-checks{color:var(--danger-ink)}
+.gl-group>summary{cursor:pointer;list-style:none}
+.gl-group>summary::-webkit-details-marker{display:none}
+.gl-group>summary:hover{background:var(--hover)}
+.gl-group>summary:focus-visible,.gl-commits>li:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.gl-chev{display:inline-flex;color:var(--faint);transition:transform var(--dur-1)}
+.gl-chev .icon{width:14px;height:14px}
+.gl-group[open]>summary .gl-chev{transform:rotate(90deg)}
+.gl-commits{margin:0;padding:0;list-style:none}
+.gl-commits>li.gl-more{display:block;min-height:0;padding:0;border-top:0;background:none}
+.gl-commits>li.gl-more::before,.gl-commits>li.gl-more::after{content:none}
+.gl-fold{position:relative;display:flex;align-items:center;gap:var(--s1);min-height:28px;padding:3px var(--s2) 3px 56px;border-top:1px solid var(--line);background:var(--raised);font-size:var(--fs-2);color:var(--muted);cursor:pointer;list-style:none}
+.gl-fold::-webkit-details-marker{display:none}
+.gl-fold::before,.gl-fold::after{content:'';position:absolute;top:0;bottom:0;width:2px}
+.gl-fold::before{left:13px;background:var(--line-3)}
+.gl-fold::after{left:35px;background:var(--muted)}
+.gl-fold:hover{background:var(--hover);color:var(--ink)}
+.gl-fold:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.gl-more>details[open]>.gl-fold .gl-chev{transform:rotate(90deg)}
+.gl-commits>li{min-height:28px;padding-top:3px;padding-bottom:3px;background:var(--raised);font-size:var(--fs-2);--mid:14px}
+.gl-commits>li>.gl-dot{top:calc(var(--mid) - 3.5px);left:32.5px;width:7px;height:7px}
+.gl-commits>li.kept>.gl-dot{background:var(--accent)}
+.gl-commits>li.repeat>.gl-dot{background:var(--warn)}
+.gl-commits>li[data-key]{cursor:pointer}
+.gl-commits>li[data-key]:hover,.gl-commits>li.paired{background:var(--hover)}
+.gl-commits>li.paired{box-shadow:inset 3px 0 0 var(--warn)}
+.gl-commits>li.selected{background:var(--accent-soft)}
+.gl-id{color:var(--ink)}
+.recon-summary.gl-summary,.recon-legend.graph-legend{margin-left:0}
 .recon-legend.graph-legend i{width:8px;height:8px;border-radius:50%;vertical-align:0}
-.recon-legend.graph-legend i.tie{width:0;height:12px;border-left:1px dashed var(--warn);border-radius:0;background:none;vertical-align:-2px}
-.legend-bolt,.legend-revert{width:8px;height:12px;margin-right:7px;vertical-align:-2px;fill:none;stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}
-.legend-bolt{stroke:var(--danger-ink)}
-.legend-revert{height:8px;vertical-align:0;stroke:var(--warn)}
-.recon-log{margin:10px 0 0 156px;min-height:24px}
-.recon-log .caption{margin:0}
-.recon-log-head{margin:0 0 6px;font-size:var(--fs-3);color:var(--muted)}
-.recon-log-list{max-width:760px;margin:0;padding:0;list-style:none;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface)}
-.recon-log-list li{display:grid;grid-template-columns:8px 3.5em 9.5em 8.5em 10em minmax(0,1fr);gap:var(--s1);align-items:center;padding:6px var(--s2);border-top:1px solid var(--line);font-size:var(--fs-3)}
-.recon-log-list li:first-child{border-top:0}
-.recon-log-list li>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.recon-log-list i{width:8px;height:8px;border-radius:50%;background:var(--chart-neutral)}
-.recon-log-list li.kept i{background:var(--accent)}
-.recon-log-list li.repeat i{background:var(--warn)}
-.recon-log-list li.current{background:var(--hover)}
-.recon-log-list li[data-key]{cursor:pointer}
-.recon-log-list li[data-key]:hover{background:var(--hover)}
+.legend-bolt{width:8px;height:12px;margin-right:7px;vertical-align:-2px;fill:none;stroke:var(--danger-ink);stroke-width:1.8;stroke-linejoin:round;stroke-linecap:round}
+.legend-x{display:inline-flex;margin-right:7px;color:var(--warn-ink);vertical-align:-2px}
+.legend-x .icon{width:10px;height:10px}
 .recon-legend{display:flex;flex-wrap:wrap;gap:6px 18px;margin:10px 0 0 156px;font-size:var(--fs-2);color:var(--muted)}
 .recon-legend i{display:inline-block;width:6px;height:12px;margin-right:7px;border-radius:var(--r-xs);vertical-align:-2px;background:var(--chart-neutral)}
 .recon-legend i.kept{background:var(--accent)}
@@ -821,9 +859,8 @@ details.tl-card>.tl-head:hover{background:var(--hover)}
   .recon-lanes .compare-run .cmp-short{display:block}
   .recon-lanes .lane-long{display:none}
   .recon-lanes .lane-short{display:block}
-  .recon-legend,.recon-summary,.recon-log{margin-left:0}
-  .recon-log-list li{grid-template-columns:8px 3.5em minmax(0,1fr) auto}
-  .recon-log-list li>span:nth-of-type(4),.recon-log-list li>span:nth-of-type(5){grid-column:3 / -1}
+  .recon-legend,.recon-summary{margin-left:0}
+  .gl-meta{margin-left:0;padding-left:0}
 }
 
 /* Folded sidebar: a rail of progress rings (wide screens only). Rows keep their names for assistive tech. */
