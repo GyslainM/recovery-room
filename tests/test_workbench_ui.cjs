@@ -1281,8 +1281,8 @@ test('each run of an attempt is a branch, a lost connection ends it, and an atte
   const view = app.reconstructionView();
   assert.deepEqual(branchHeads(view), ['import-first:2 writes', 'import-retry:2 writes', 'web-checkout:1 write']);
   assert.match(view, /<li class="gl-row gl-main first">.*?before the first committed write in the evidence/);
-  assert.match(view, /<span>Merge<\/span><span class="gl-tag">import-first<\/span><span class="muted">2 committed writes<\/span>/);
-  assert.match(view, /<span class="gl-tag">main<\/span><span class="gl-tag head">HEAD<\/span><span>Merge<\/span><span class="gl-tag">web-checkout<\/span><span class="muted">5 committed writes<\/span>/);
+  assert.match(view, /<span>Merge<\/span><span class="gl-tag">import-first<\/span><span class="muted">2 recorded writes<\/span>/);
+  assert.match(view, /<span class="gl-tag">main<\/span><span class="gl-tag head">HEAD<\/span><span>Merge<\/span><span class="gl-tag">web-checkout<\/span><span class="muted">5 recorded writes in the evidence<\/span>/);
   assert.match(view, /class="gl-row gl-on gl-lost">.*?<strong>Connection lost<\/strong><span class="muted">timeout<\/span>/);
   assert.match(view, /<div class="gl-row gl-on gl-gap"><i class="gl-dot" aria-hidden="true"><\/i><span class="gl-msg"><strong>Gap in the commit log<\/strong>/);
   assert.doesNotMatch(view, /recon-arc|recon-tick (repeat|kept)|gl-pill/); // nothing is marked without a plan or review
@@ -1294,7 +1294,10 @@ test('each run of an attempt is a branch, a lost connection ends it, and an atte
   const stopped = empty.reconstructionView(null, {stopped: 1});
   assert.match(stopped, /<div class="gl-row gl-on gl-head">.*?<span class="gl-tag">import-first<\/span><strong>First import<\/strong><span class="muted">no commit records<\/span>/);
   assert.match(stopped, /class="gl-row gl-on gl-lost stop"/); // nothing committed, so the branch stops at the lost connection
-  assert.match(stopped, /<li class="gl-row gl-main">.*?<strong>orders-db<\/strong><span class="muted">no writes from import-first<\/span>/); // main carries on and forks the retry
+  // Missing commit records do not show that nothing was written: the outcome is unknown, and totals count recorded writes only.
+  assert.match(stopped, /<li class="gl-row gl-main">.*?<strong>orders-db<\/strong><span class="gl-tag">import-first<\/span><span class="muted">Commit records unavailable · outcome unknown<\/span>/);
+  assert.match(stopped, /HEAD<\/span><span>Merge<\/span><span class="gl-tag">import-retry<\/span><span class="muted">1 recorded write in the evidence · some outcomes unknown<\/span>/);
+  assert.doesNotMatch(stopped, /no writes from/);
   assert.match(stopped, /The script stopped instead of guessing: 1 source events have no commit record\./);
 });
 

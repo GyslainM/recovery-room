@@ -977,6 +977,7 @@ function reconstructionView(pairs = null, {recorded = false, stopped = null, reh
   const ok = review && review.passed === true && review.checks.length > 0 && passed === review.checks.length;
   const src = review?.checks.find(ch => ch.name === 'source_snapshot_unchanged');
 
+  const unknown = segs.some(seg => !seg.gap && !seg.writes.length);
   const rows = entries.map((e, i) => {
     if (e.kind === 'main') {
       const prev = entries[i - 1], merge = prev?.kind === 'branch' && prev.seg.writes.length > 0, fork = branchy(entries[i + 1]);
@@ -984,8 +985,9 @@ function reconstructionView(pairs = null, {recorded = false, stopped = null, reh
       const cls = `${i === 0 ? ' first' : ''}${i === lastMain ? ' last' : ''}`;
       const tags = `${tag('main')}${i === headAt ? tag('HEAD', 'head') : ''}`;
       const what = e.role === 'base' ? '<strong>orders-db</strong><span class="muted">before the first committed write in the evidence</span>'
-        : e.role === 'idle' ? `<strong>orders-db</strong><span class="muted">${text(`no writes from ${e.seg.attempt}`)}</span>`
-        : e.role === 'merge' ? `<span>Merge</span>${tag(e.seg.attempt)}<span class="muted">${text(i === headAt && review ? `${review.before_active} active orders` : `${plural(total, 'committed write')}`)}</span>`
+        : e.role === 'idle' ? `<strong>orders-db</strong>${tag(e.seg.attempt)}<span class="muted">Commit records unavailable · outcome unknown</span>`
+        : e.role === 'merge' ? `<span>Merge</span>${tag(e.seg.attempt)}<span class="muted">${text(i === headAt && review ? `${review.before_active} active orders`
+          : i === headAt ? `${plural(total, 'recorded write')} in the evidence${unknown ? ' · some outcomes unknown' : ''}` : plural(e.seg.writes.length, 'recorded write'))}</span>`
         : review ? `<strong>orders-db</strong><span class="muted">${text(src ? (src.passed ? 'Unchanged during the test' : 'Changed during the test') : 'Opened read-only')}</span>`
         : proposal ? '<strong>orders-db</strong><span class="muted">Unchanged: nothing is cancelled until it is tested on a copy</span>'
         : '<strong>orders-db</strong>';
