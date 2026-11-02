@@ -910,7 +910,7 @@ const GL_BOLT = '<svg class="gl-bolt" viewBox="0 0 10 16" aria-hidden="true" foc
 // original, come only from these pairs; the copy branch appears only once a test on a copy exists.
 function reconstructionView(pairs = null, {recorded = false, stopped = null, rehearsed = false} = {}) {
   const model = evidenceWrites();
-  const head = `<div class="recon-head"><h3 id="recon-title">What happened</h3><span class="caption">Each attempt is a branch of committed writes, oldest first, read from the evidence files</span></div>`;
+  const head = `<div class="recon-head"><h3 id="recon-title">What happened</h3><span class="caption">Each attempt’s committed writes, oldest first, read from the evidence files</span></div>`;
   if (model === null) return `<section class="recon" aria-labelledby="recon-title">${head}${skeleton(3)}</section>`;
   if (model.error) return `<section class="recon" aria-labelledby="recon-title">${head}<p class="callout stop">${text(model.error)}</p></section>`;
   const {writes, marks, lanes} = model;
@@ -983,21 +983,23 @@ function reconstructionView(pairs = null, {recorded = false, stopped = null, reh
       const prev = entries[i - 1], merge = prev?.kind === 'branch' && prev.seg.writes.length > 0, fork = branchy(entries[i + 1]);
       if (e.role === 'merge') total += e.seg.writes.length;
       const cls = `${i === 0 ? ' first' : ''}${i === lastMain ? ' last' : ''}`;
-      const tags = `${tag('main')}${i === headAt ? tag('HEAD', 'head') : ''}`;
+      // Plain labels: the database never had branches, so no main, HEAD or merge. "latest" marks the database's
+      // state after the last attempt: the review's active orders, or the writes the evidence records.
+      const latest = i === headAt && (e.role === 'merge' || e.role === 'idle')
+        ? `${tag('latest', 'head')}<span class="muted">${text(review ? `${review.before_active} active orders` : `${plural(total, 'recorded write')} in the evidence${unknown ? ' · some outcomes unknown' : ''}`)}</span>` : '';
       const what = e.role === 'base' ? '<strong>orders-db</strong><span class="muted">before the first committed write in the evidence</span>'
-        : e.role === 'idle' ? `<strong>orders-db</strong>${tag(e.seg.attempt)}<span class="muted">Commit records unavailable · outcome unknown</span>`
-        : e.role === 'merge' ? `<span>Merge</span>${tag(e.seg.attempt)}<span class="muted">${text(i === headAt && review ? `${review.before_active} active orders`
-          : i === headAt ? `${plural(total, 'recorded write')} in the evidence${unknown ? ' · some outcomes unknown' : ''}` : plural(e.seg.writes.length, 'recorded write'))}</span>`
+        : e.role === 'idle' ? `<strong>orders-db</strong>${tag(e.seg.attempt)}<span class="muted">Commit records unavailable · outcome unknown</span>${latest}`
+        : e.role === 'merge' ? `${tag(e.seg.attempt)}<span>ended</span><span class="muted">${text(plural(e.seg.writes.length, 'recorded write'))}</span>${latest}`
         : review ? `<strong>orders-db</strong><span class="muted">${text(src ? (src.passed ? 'Unchanged during the test' : 'Changed during the test') : 'Opened read-only')}</span>`
         : proposal ? '<strong>orders-db</strong><span class="muted">Unchanged: nothing is cancelled until it is tested on a copy</span>'
         : '<strong>orders-db</strong>';
-      return `<li class="gl-row gl-main${cls}">${merge ? GL_MERGE : ''}${fork ? GL_FORK : ''}<i class="gl-dot" aria-hidden="true"></i><span class="gl-msg">${tags}${what}</span></li>`;
+      return `<li class="gl-row gl-main${cls}">${merge ? GL_MERGE : ''}${fork ? GL_FORK : ''}<i class="gl-dot" aria-hidden="true"></i><span class="gl-msg">${what}</span></li>`;
     }
     if (e.kind === 'gap') return `<li class="gl-row gl-main gl-gap${i === lastMain ? ' last' : ''}"><i class="gl-dot" aria-hidden="true"></i><span class="gl-msg"><strong>Gap in the commit log</strong>${e.mark.detail ? `<span class="muted">${text(e.mark.detail)}</span>` : ''}</span></li>`;
     if (e.kind === 'copy') {
       const n = repeat.size;
       return `<li class="gl-row gl-on gl-copy"><span class="gl-dot gl-x" aria-hidden="true">${icon('x')}</span><span class="gl-msg">${tag(past ? 'recorded-test-copy' : 'test-copy')}<strong>${text(`Cancel ${plural(n, 'repeated write')}`)}</strong><span class="muted">${past ? 'in the recorded test on a copy' : 'on a disposable copy'}</span></span></li>
-        <li class="gl-row gl-on stop gl-result ${ok ? 'ok' : 'danger'}"><i class="gl-dot" aria-hidden="true"></i><span class="gl-msg"><strong>${text(`${review.before_active} → ${review.after_active} active orders`)}</strong><span class="gl-checks">${text(`${passed} of ${review.checks.length} checks passed`)}</span><span class="muted">Not merged into orders-db</span></span></li>`;
+        <li class="gl-row gl-on stop gl-result ${ok ? 'ok' : 'danger'}"><i class="gl-dot" aria-hidden="true"></i><span class="gl-msg"><strong>${text(`${review.before_active} → ${review.after_active} active orders`)}</strong><span class="gl-checks">${text(`${passed} of ${review.checks.length} checks passed`)}</span><span class="muted">Not applied to orders-db</span></span></li>`;
     }
     if (e.kind === 'proposal') return `<li class="gl-row gl-on stop gl-proposal"><i class="gl-dot" aria-hidden="true"></i><span class="gl-msg">${tag('proposal')}<strong>${text(`Would cancel ${plural(repeat.size, 'repeated write')}`)}</strong><span class="muted">Not tested on a copy yet</span></span></li>`;
     // A branch: its header (a fold when it has commits), its commits, and a lost connection if one ended it.

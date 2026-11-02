@@ -1281,8 +1281,9 @@ test('each run of an attempt is a branch, a lost connection ends it, and an atte
   const view = app.reconstructionView();
   assert.deepEqual(branchHeads(view), ['import-first:2 writes', 'import-retry:2 writes', 'web-checkout:1 write']);
   assert.match(view, /<li class="gl-row gl-main first">.*?before the first committed write in the evidence/);
-  assert.match(view, /<span>Merge<\/span><span class="gl-tag">import-first<\/span><span class="muted">2 recorded writes<\/span>/);
-  assert.match(view, /<span class="gl-tag">main<\/span><span class="gl-tag head">HEAD<\/span><span>Merge<\/span><span class="gl-tag">web-checkout<\/span><span class="muted">5 recorded writes in the evidence<\/span>/);
+  assert.match(view, /<span class="gl-tag">import-first<\/span><span>ended<\/span><span class="muted">2 recorded writes<\/span>/);
+  assert.match(view, /<span class="gl-tag">web-checkout<\/span><span>ended<\/span><span class="muted">1 recorded write<\/span><span class="gl-tag head">latest<\/span><span class="muted">5 recorded writes in the evidence<\/span>/);
+  assert.doesNotMatch(view, />(main|HEAD|Merge)</); // the database never had branches: no git labels
   assert.match(view, /class="gl-row gl-on gl-lost">.*?<strong>Connection lost<\/strong><span class="muted">timeout<\/span>/);
   assert.match(view, /<div class="gl-row gl-on gl-gap"><i class="gl-dot" aria-hidden="true"><\/i><span class="gl-msg"><strong>Gap in the commit log<\/strong>/);
   assert.doesNotMatch(view, /recon-arc|recon-tick (repeat|kept)|gl-pill/); // nothing is marked without a plan or review
@@ -1296,7 +1297,7 @@ test('each run of an attempt is a branch, a lost connection ends it, and an atte
   assert.match(stopped, /class="gl-row gl-on gl-lost stop"/); // nothing committed, so the branch stops at the lost connection
   // Missing commit records do not show that nothing was written: the outcome is unknown, and totals count recorded writes only.
   assert.match(stopped, /<li class="gl-row gl-main">.*?<strong>orders-db<\/strong><span class="gl-tag">import-first<\/span><span class="muted">Commit records unavailable · outcome unknown<\/span>/);
-  assert.match(stopped, /HEAD<\/span><span>Merge<\/span><span class="gl-tag">import-retry<\/span><span class="muted">1 recorded write in the evidence · some outcomes unknown<\/span>/);
+  assert.match(stopped, /<span class="gl-tag">import-retry<\/span><span>ended<\/span><span class="muted">1 recorded write<\/span><span class="gl-tag head">latest<\/span><span class="muted">1 recorded write in the evidence · some outcomes unknown<\/span>/);
   assert.doesNotMatch(stopped, /no writes from/);
   assert.match(stopped, /The script stopped instead of guessing: 1 source events have no commit record\./);
 });
@@ -1316,22 +1317,22 @@ test('repeats name the commit they repeat, both rows know each other, and their 
   assert.match(view, /<details class="gl-group" data-group="case-a:script:1">/);
   // A proposal: no copy branch, and nothing described as cancelled.
   assert.match(view, /<span class="gl-tag">proposal<\/span><strong>Would cancel 2 repeated writes<\/strong><span class="muted">Not tested on a copy yet<\/span>/);
-  assert.doesNotMatch(view, /test-copy|Not merged/);
+  assert.doesNotMatch(view, /test-copy|Not applied/);
   // A branch the person folded stays folded.
   app.state.reconOpen.set('case-a:script:3', false);
   assert.match(app.reconstructionView(pairs), /<details class="gl-group" data-group="case-a:script:3">/);
 });
 
-test('after a test on a copy, a copy branch forks from HEAD with the observed result and never merges', () => {
+test('after a test on a copy, a copy branch forks from the latest state with the observed result and is never applied', () => {
   const app = harness();
   evidenceState(app, {'events.jsonl': [write('import-first', 'ord_a'), write('import-retry', 'ord_c'), write('import-retry', 'ord_d')]});
   const pairs = [{order_id: 'ord_c', duplicate_of: 'ord_a'}];
   app.state.run = {id: 'run-a', incident_id: 'case-a', status: 'ready_for_review', plan: {cancellations: []},
     review: {passed: true, before_active: 3, after_active: 2, checks: [{name: 'source_snapshot_unchanged', passed: true, detail: ''}, {name: 'database_integrity', passed: true, detail: ''}]}};
   const view = app.reconstructionView(pairs, {rehearsed: true});
-  assert.match(view, /<span class="gl-tag head">HEAD<\/span><span>Merge<\/span><span class="gl-tag">import-retry<\/span><span class="muted">3 active orders<\/span>/);
+  assert.match(view, /<span class="gl-tag">import-retry<\/span><span>ended<\/span><span class="muted">2 recorded writes<\/span><span class="gl-tag head">latest<\/span><span class="muted">3 active orders<\/span>/);
   assert.match(view, /<span class="gl-tag">test-copy<\/span><strong>Cancel 1 repeated write<\/strong><span class="muted">on a disposable copy<\/span>/);
-  assert.match(view, /<li class="gl-row gl-on stop gl-result ok">.*?<strong>3 → 2 active orders<\/strong><span class="gl-checks">2 of 2 checks passed<\/span><span class="muted">Not merged into orders-db<\/span>/);
+  assert.match(view, /<li class="gl-row gl-on stop gl-result ok">.*?<strong>3 → 2 active orders<\/strong><span class="gl-checks">2 of 2 checks passed<\/span><span class="muted">Not applied to orders-db<\/span>/);
   assert.match(view, /<li class="gl-row gl-main last">.*?<strong>orders-db<\/strong><span class="muted">Unchanged during the test<\/span>/);
   assert.doesNotMatch(view, /proposal/);
   app.state.run.review.checks[1].passed = false;
@@ -1357,7 +1358,7 @@ test('compared runs keep one column per source event', () => {
   assert.match(view, /One column per source event, in commit order\./);
 });
 
-test('in the published cases every repeat names the commit it repeats, and HEAD carries the tested counts', () => {
+test('in the published cases every repeat names the commit it repeats, and the latest state carries the tested counts', () => {
   const data = JSON.parse(fs.readFileSync(path.join(__dirname, '../examples/public-demo/demo-data.json'), 'utf8'));
   for (const [caseId, branches, repeats] of [['import-retry', 3, 20], ['multiple-retries', 4, 40], ['split-evidence', 3, 20], ['inbox-evidence', 3, 20]]) {
     const app = harness();
@@ -1375,7 +1376,7 @@ test('in the published cases every repeat names the commit it repeats, and HEAD 
       assert.ok(row, `${caseId} ${p.order_id}`);
       assert.equal(Number(row[1]), label.get(p.duplicate_of), `${caseId} ${p.order_id}`);
     }
-    assert.match(view, new RegExp(`HEAD<\\/span><span>Merge<\\/span><span class="gl-tag">[\\w-]+<\\/span><span class="muted">${review.before_active} active orders`), caseId);
+    assert.match(view, new RegExp(`<span class="gl-tag head">latest<\\/span><span class="muted">${review.before_active} active orders`), caseId);
     assert.match(view, new RegExp(`${review.before_active} → ${review.after_active} active orders<\\/strong><span class="gl-checks">10 of 10 checks passed`), caseId);
   }
 });
