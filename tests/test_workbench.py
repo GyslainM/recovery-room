@@ -7,6 +7,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -253,6 +254,89 @@ class HTTPTests(WorkbenchCase):
         for body, mime in (("{}", "text/plain"), ("{", "application/json"), ("[]", "application/json"), (" " * 4097, "application/json")):
             self.assertEqual(self.request(path, "POST", body, {"Content-Type": mime})[0], 400)
         self.assertFalse(self.app.runs)
+
+    def observe_body_reads(self):
+        """Observe actual stream consumption at the response boundary, without reading ahead."""
+        replies = []
+        handler = self.server.RequestHandlerClass
+        setup, send = handler.setup, handler._send
+
+        class BodyReader:
+            def __init__(self, reader):
+                self.reader, self.consumed, self.requested = reader, 0, []
+
+            def __getattr__(self, name):
+                return getattr(self.reader, name)
+
+            def read(self, size=-1):
+                self.requested.append(size)
+                data = self.reader.read(size)
+                self.consumed += len(data)
+                return data
+
+            def read1(self, size=-1):
+                self.requested.append(size)
+                data = self.reader.read1(size)
+                self.consumed += len(data)
+                return data
+
+        def setup_reader(request):
+            setup(request)
+            request.rfile = BodyReader(request.rfile)
+
+        def record_reply(request, value, content_type, status=200, filename=None):
+            replies.append((status, request.rfile.consumed, request.rfile.requested[:]))
+            return send(request, value, content_type, status, filename)
+
+        self.enterContext(patch.object(handler, "setup", setup_reader))
+        self.enterContext(patch.object(handler, "_send", record_reply))
+        return replies
+
+    def test_oversized_body_is_discarded_before_the_error_with_a_small_read_cap(self):
+        replies = self.observe_body_reads()
+        path = "/api/incidents/import-retry/investigate"
+        for declared, supplied in ((4097, 4097), (8192, 8192), (1_000_000, 8192)):
+            with self.subTest(declared=declared, supplied=supplied):
+                status, _, body = self.request(path, "POST", " " * supplied,
+                    {"Content-Type": "application/json", "Content-Length": str(declared)})
+                self.assertEqual(status, 400)
+                self.assertIn("1 to 4096 bytes", json.loads(body)["error"])
+                response_status, consumed, requested = replies[-1]
+                self.assertEqual((response_status, consumed), (400, supplied))
+                self.assertTrue(requested)
+                self.assertTrue(all(0 < n <= 8192 for n in requested))
+        self.assertFalse(self.app.runs)
+
+    def test_origin_and_content_type_rejections_discard_the_unread_body(self):
+        replies = self.observe_body_reads()
+        path = "/api/incidents/import-retry/investigate"
+        for headers, expected in (({"Origin": "https://other.example"}, 403),
+                                  ({"Host": "other.example"}, 403),
+                                  ({"Sec-Fetch-Site": "cross-site"}, 403),
+                                  ({"Content-Type": "text/plain"}, 400)):
+            with self.subTest(headers=headers):
+                status, _, body = self.request(path, "POST", "{}", {"Content-Type": "application/json", **headers})
+                self.assertEqual(status, expected)
+                self.assertIn("error", json.loads(body))
+                self.assertEqual(replies[-1][:2], (expected, 2))
+        self.assertFalse(self.app.runs)
+
+    def test_incomplete_oversized_body_has_a_short_total_discard_deadline(self):
+        started = time.monotonic()
+        status, _, body = self.request("/api/incidents/import-retry/investigate", "POST", b"",
+            {"Content-Type": "application/json", "Content-Length": "4097"})
+        self.assertEqual(status, 400)
+        self.assertIn("1 to 4096 bytes", json.loads(body)["error"])
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertEqual(self.request("/api/incidents")[0], 200)
+        self.assertFalse(self.app.runs)
+
+    def test_json_body_at_the_existing_4096_byte_limit_remains_accepted(self):
+        status, _, body = self.request("/api/incidents/import-retry/investigate", "POST", "{}" + " " * 4094,
+            {"Content-Type": "application/json"})
+        self.assertEqual(status, 201)
+        self.assertEqual(json.loads(body)["incident_id"], "import-retry")
+        self.assertEqual(len(self.app.runs), 1)
 
     def test_evidence_is_paginated_and_bounded(self):
         path = "/api/incidents/import-retry/artifacts/events.jsonl"

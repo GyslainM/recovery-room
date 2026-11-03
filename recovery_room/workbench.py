@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 from pathlib import Path
 import sqlite3
+import time
 from urllib.parse import parse_qs, urlsplit
 import uuid
 
@@ -269,6 +270,8 @@ def make_server(workbench: Workbench, port: int = 8765) -> HTTPServer:
             self.wfile.write(value)
 
         def _json(self, value, status=200):
+            if status >= 400 and self.command == "POST":
+                self._discard_rejected_body()
             self._send(json.dumps(value).encode(), "application/json", status)
 
         def _guard(self):
@@ -289,7 +292,39 @@ def make_server(workbench: Workbench, port: int = 8765) -> HTTPServer:
         def do_POST(self):
             self._dispatch(True)
 
+        def _discard_rejected_body(self):
+            # Closing with unread incoming data can reset the socket on Windows,
+            # hiding the rejection response. Cleanup is best-effort, never an unlimited
+            # read of the untrusted Content-Length or a new slow-sender timeout.
+            self.close_connection = True
+            if self.headers.get("Transfer-Encoding"):
+                return  # Unsupported framing is never interpreted as Content-Length.
+            try:
+                size = int(self.headers.get("Content-Length", "0")) - self._body_consumed
+            except ValueError:
+                return
+            if size <= 0:
+                return
+            remaining = min(size, 8192)
+            deadline = time.monotonic() + 0.25
+            previous_timeout = self.connection.gettimeout()
+            try:
+                while remaining:
+                    timeout = deadline - time.monotonic()
+                    if timeout <= 0:
+                        break
+                    self.connection.settimeout(timeout)
+                    data = self.rfile.read1(remaining)
+                    if not data:
+                        break
+                    remaining -= len(data)
+            except OSError:
+                pass  # Still send the rejection if the peer stops sending.
+            finally:
+                self.connection.settimeout(previous_timeout)
+
         def _dispatch(self, post):
+            self._body_consumed = 0
             try:
                 self._guard()
                 url = urlsplit(self.path)
@@ -300,7 +335,9 @@ def make_server(workbench: Workbench, port: int = 8765) -> HTTPServer:
                     size = int(self.headers.get("Content-Length", "0"))
                     if not 1 <= size <= 4096:
                         raise ValueError("Request body must be 1 to 4096 bytes.")
-                    if json.loads(self.rfile.read(size)) != {}:
+                    body = self.rfile.read(size)
+                    self._body_consumed = len(body)
+                    if json.loads(body) != {}:
                         raise ValueError("This offline action accepts an empty object only; plans and paths are server-owned.")
                     if len(parts) == 4 and parts[:2] == ["api", "incidents"] and parts[3] == "investigate":
                         return self._json(workbench.investigate(parts[2]), 201)
