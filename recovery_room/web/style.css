@@ -450,13 +450,18 @@ mark{background:var(--warn-soft);color:var(--warn-ink);border-radius:var(--r-xs)
 .rv-title h2{margin:0;font-size:var(--fs-5);font-weight:600;line-height:1.35}
 .rv-title .caption{margin:2px 0 0}
 .rv-box-head>.link{flex:none;margin:2px 0 0 auto}
-.rv-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:var(--s1) var(--s3);padding:var(--s2) var(--s3);border-top:1px solid var(--line)}
-.rv-stat{display:flex;flex-direction:column;gap:2px;min-width:0}
-.rv-stat strong{font-size:var(--fs-6);font-weight:600;line-height:1.2;font-variant-numeric:tabular-nums;color:var(--ink)}
-.rv-stat span{font-size:var(--fs-2);color:var(--muted)}
-.rv-stat.mod strong{color:var(--warn-ink)}
-.rv-stat.keep strong{color:var(--accent-ink)}
-.rv-summary .impact{margin:0;padding:0 var(--s3) var(--s2)}
+/* One row per subject the test touched, in the compared runs' row style; each opens its section below. */
+.rv-rows{margin:0;padding:0;list-style:none;border-top:1px solid var(--line)}
+.rv-rows li+li{border-top:1px solid var(--line)}
+.rv-row{display:flex;flex-wrap:wrap;align-items:center;gap:4px var(--s1);width:100%;min-height:40px;padding:8px var(--s3);border-radius:0;text-align:left;color:var(--ink);font-size:var(--fs-3)}
+.rv-row:hover{background:var(--hover)}
+.rv-row:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.rv-row-icon{flex:none;width:15px;height:15px;color:var(--faint)}
+.rv-row-name{min-width:8.5em;font-weight:600}
+.rv-move{font:var(--fs-2) var(--mono);font-variant-numeric:tabular-nums;color:var(--ink)}
+.rv-row-note{font-size:var(--fs-2);color:var(--muted)}
+.rv-row-go{flex:none;width:14px;height:14px;color:var(--faint)}
+.rv-row:hover .rv-row-go{color:var(--ink)}
 .rv-fails{padding:var(--s1) var(--s3);border-top:1px solid var(--danger-line);background:var(--danger-soft);border-radius:0 0 var(--r-md) var(--r-md)}
 .rv-fails h3{margin:var(--s1) 0 0;font-size:var(--fs-3);font-weight:600;color:var(--danger-ink)}
 .rv-box-row{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s1) var(--s2);padding:var(--s2) var(--s3);border-top:1px solid var(--line)}
@@ -780,14 +785,6 @@ details.tl-card>.tl-head:hover{background:var(--hover)}
 .outcome-preserved>strong{font-size:var(--fs-7);font-weight:500;letter-spacing:-.025em;color:var(--accent-ink)}
 .outcome-preserved>span{font-size:var(--fs-3)}
 .outcome-preserved>small{flex-basis:100%;font-size:var(--fs-2);color:var(--faint)}
-.impact{margin:12px 0 8px}
-.impact-track{display:block;width:100%;height:7px;overflow:hidden;border-radius:var(--r-xs);background:var(--raised)}
-.impact-changed{fill:var(--warn)}
-.impact-preserved{fill:var(--chart-preserved)}
-.impact figcaption{display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px 16px;margin-top:7px;font-size:var(--fs-2);color:var(--muted)}
-.impact figcaption>span{display:inline-flex;align-items:center;gap:7px}
-.impact-dot{width:6px;height:6px;background:var(--chart-preserved);display:inline-block}
-.impact-dot.changed{background:var(--warn)}
 .outcome-path{display:flex;flex-wrap:wrap;margin:4px 0 0;padding:0;list-style:none}
 /* The content column adapts to its own width (the details column and the sidebar both narrow it). */
 #content{container:panel / inline-size}
@@ -925,6 +922,7 @@ details.tl-card>.tl-head:hover{background:var(--hover)}
 .cmp-blocks i{width:8px;height:8px;border-radius:var(--r-xs);background:var(--line-2)}
 .cmp-blocks i.g{background:var(--accent)}
 .cmp-blocks i.a{background:var(--warn)}
+.cmp-blocks i.r{background:var(--danger)}
 .cmp-diff{padding:0 var(--s2) 8px calc(var(--s2) + 16px + var(--s1))}
 .cmp-diff>summary{width:fit-content;cursor:pointer;font-size:var(--fs-2);color:var(--muted)}
 .cmp-diff>summary:hover{color:var(--ink)}
@@ -994,7 +992,7 @@ details.tl-card>.tl-head:hover{background:var(--hover)}
   .package-head{flex-wrap:wrap}
   .topbar{display:flex;padding:0 16px}
   :root{--tabs-h:44px}
-  .primary,.secondary,.nav-toggle,.palette-trigger,.source-switch button,.segmented button,.toggle,.case,.run-item,.step,.guide-toggle,.run-details>summary{min-height:44px}
+  .primary,.secondary,.nav-toggle,.palette-trigger,.source-switch button,.segmented button,.toggle,.case,.run-item,.step,.guide-toggle,.run-details>summary,.rv-row{min-height:44px}
   .run-details>summary,.guide-toggle{display:inline-flex;align-items:center}
   .head-actions .primary{order:-1}
   .incident-head{grid-template-columns:minmax(0,1fr);gap:8px;padding:12px var(--s3) 10px}

@@ -2020,35 +2020,73 @@ function checksTitle(checks, where) {
 }
 const checksOk = (passed, checks) => passed === true && checks.length > 0 && checks.every(c => c.passed);
 
-// The review at a glance, from the selected test's own observations: whether its checks passed, what it
-// cancelled, what it left untouched and how stock moved. Failed checks are listed here too. The bar counts
-// changed and preserved records, not deleted orders or a live source.
+// The review at a glance, from the selected test's own observations: whether its checks passed, then one row
+// per subject the test touched, in the words and marks used elsewhere (the What happened pills, the compared
+// runs' five blocks). Each row opens its section below. Failed checks are listed here too.
 function repairFlow(review, {run = null, recorded = false} = {}) {
   const where = recorded ? 'the recorded copy' : 'the copy', ok = checksOk(review.passed, review.checks);
   const sourceCheck = review.checks.find(c => c.name === 'source_snapshot_unchanged');
   const sourceNote = sourceCheck ? (sourceCheck.passed ? 'Source unchanged during the test.' : 'Source changed during the test.') : 'Source opened read-only.';
-  const changed = review.cancellations, preserved = review.untargeted_preserved;
-  const known = [changed, preserved].every(n => Number.isSafeInteger(n) && n >= 0) && changed + preserved > 0;
-  const portion = known ? changed / (changed + preserved) * 100 : 0;
-  const moved = (review.stock || []).filter(p => p.after !== p.before), restocked = moved.length > 0 && moved.every(p => p.after > p.before);
-  const stat = (value, label, tone = '') => `<div class="rv-stat ${tone}"><strong>${text(value)}</strong><span>${text(label)}</span></div>`;
   const failed = review.checks.filter(c => !c.passed);
   return `<section class="rv-box rv-summary" aria-labelledby="rv-title">
     <div class="rv-box-head"><span class="rv-state ${ok ? 'ok' : 'danger'}" aria-hidden="true">${icon(ok ? 'circle-check' : 'circle-x')}</span>
       <div class="rv-title"><h2 id="rv-title">${text(checksTitle(review.checks, where))}</h2>
         <p class="caption">${text(`${sourceNote} Changes were made only on ${recorded ? 'the recorded test copy' : 'a disposable copy'}.`)}${recorded ? ' Read-only recording · no downloads.' : run && historicalRun(run) ? ' Recorded when this baseline was built, not a current check.' : ''}</p></div>
       ${review.checks.length ? '<button class="link small" data-tab="checks">View checks</button>' : ''}</div>
-    <div class="rv-stats">
-      ${stat(`${review.before_active} → ${review.after_active}`, 'active orders')}
-      ${stat(changed, `${changed === 1 ? 'order' : 'orders'} cancelled, history kept`, 'mod')}
-      ${stat(preserved, `${preserved === 1 ? 'order' : 'orders'} left untouched`, 'keep')}
-      ${stat(`${review.checkout_preserved} / ${review.checkout_total}`, 'later purchases intact', 'keep')}
-      ${moved.length ? stat(moved.length, restocked ? `${moved.length === 1 ? 'product' : 'products'} restocked` : `${moved.length === 1 ? 'product' : 'products'} with stock changed`) : ''}
-    </div>
-    ${known ? `<figure class="impact" aria-label="${text(`${changed} cancelled orders and ${preserved} unchanged orders in the test on a copy`)}">
-      <svg class="impact-track" viewBox="0 0 100 7" preserveAspectRatio="none" aria-hidden="true"><rect class="impact-changed" x="0" y="0" width="${portion}" height="7"/><rect class="impact-preserved" x="${portion}" y="0" width="${100 - portion}" height="7"/></svg></figure>` : ''}
+    ${summaryRows(review)}
     ${failed.length ? `<div class="rv-fails"><h3>Failed on ${text(where)}</h3>${checksView(failed)}</div>` : ''}
   </section>`;
+}
+
+const isCount = (n) => Number.isSafeInteger(n) && n >= 0;
+// Five blocks for a share of a whole, as in the compared runs: none only for nothing, all five only for all.
+function fiveBlocks(part, whole, on, off = '') {
+  const n = part <= 0 ? 0 : part >= whole ? 5 : Math.min(4, Math.max(1, Math.round(5 * part / whole)));
+  return `<span class="cmp-blocks" aria-hidden="true">${`<i class="${on}"></i>`.repeat(n)}${(off ? `<i class="${off}"></i>` : '<i></i>').repeat(5 - n)}</span>`;
+}
+
+// Orders, later purchases and stock, each with its count from the review. A row is left out when the review
+// lacks its counts; nothing is estimated. Stock says "restocked by the cancelled orders" only when every
+// product's change equals the units of its cancelled orders.
+function summaryRows(review) {
+  const row = (target, sym, name, middle, stat) => `<li><button class="rv-row" type="button" data-open-file="${target}">${icon(sym, 'rv-row-icon')}<span class="rv-row-name">${text(name)}</span>${middle}<span class="cmp-stat">${stat}</span><span class="sr-only">, show this section below</span>${icon('arrow-down', 'rv-row-go')}</button></li>`;
+  const rows = [], changes = review.changes || [];
+  const changed = review.cancellations, preserved = review.untargeted_preserved, before = review.before_active, after = review.after_active;
+  const known = isCount(changed) && isCount(preserved) && changed + preserved > 0, moved = isCount(before) && isCount(after);
+  if (known || moved) {
+    const repeats = changed > 0 && changes.length === changed && changes.every(c => c.duplicate_of);
+    const word = repeats ? (changed === 1 ? 'repeat' : 'repeats') : (changed === 1 ? 'order' : 'orders');
+    const pills = isCount(changed) ? `<span class="gl-pill${changed ? ' repeat' : ''}">${text(`${changed} ${word} cancelled`)}</span>${changed ? '<span class="gl-pill">history kept</span>' : ''}` : '';
+    rows.push(row('rv-cancelled', 'database', 'Active orders', `${moved ? `<span class="rv-move">${text(`${before} → ${after}`)}</span>` : ''}${pills}`,
+      known ? `${fiveBlocks(changed, changed + preserved, 'a')}${text(`${changed} of ${changed + preserved} changed`)}` : ''));
+  }
+  const kept = review.checkout_preserved, total = review.checkout_total;
+  if (isCount(kept) && isCount(total) && total > 0 && kept <= total) {
+    rows.push(row('rv-kept', 'shield-check', 'Later purchases', '', `${fiveBlocks(kept, total, 'g', 'r')}${text(`${kept} of ${total} intact`)}`));
+  }
+  const stock = review.stock || [];
+  if (stock.length) {
+    const units = new Map();
+    for (const ch of changes) units.set(ch.before?.sku, (units.get(ch.before?.sku) || 0) + ch.before?.quantity);
+    const shifted = stock.filter(p => p.after !== p.before), plural = (n) => (n === 1 ? 'product' : 'products');
+    const fromCancelled = shifted.length > 0 && [...units.keys()].every(sku => stock.some(p => p.sku === sku))
+      && stock.every(p => p.after - p.before === (units.get(p.sku) || 0));
+    const sumBefore = stock.reduce((n, p) => n + p.before, 0), sumAfter = stock.reduce((n, p) => n + p.after, 0);
+    const finite = Number.isFinite(sumBefore) && Number.isFinite(sumAfter), delta = sumAfter - sumBefore;
+    const note = !shifted.length ? 'no product changed' : fromCancelled ? `${shifted.length} ${plural(shifted.length)} restocked by the cancelled orders` : `${shifted.length} of ${stock.length} ${plural(stock.length)} changed`;
+    rows.push(row('rv-stock', 'package', 'Stock', `${finite ? `<span class="rv-move">${text(`${sumBefore} → ${sumAfter}`)}</span>` : ''}<span class="rv-row-note">${text(note)}</span>`,
+      finite ? text(`${delta > 0 ? '+' : delta < 0 ? '−' : '±'}${Math.abs(delta)} units`) : ''));
+  }
+  return rows.length ? `<ul class="rv-rows" aria-label="What the test changed">${rows.join('')}</ul>` : '';
+}
+
+// A summary row opens its section below and moves keyboard focus to that section's heading.
+function openReviewFile(id) {
+  const box = document.getElementById?.(id);
+  if (!box) return;
+  box.open = true;
+  box.scrollIntoView({block: 'start', behavior: prefersReducedMotion() ? 'auto' : 'smooth'});
+  box.querySelector('summary')?.focus({preventScroll: true});
 }
 
 // Zero-based stock marks are an alternative view of the displayed before/after values.
@@ -3021,6 +3059,7 @@ document.addEventListener('click', event => {
   }
   if (d.run && d.run !== state.run?.id && !state.busy) task = loadRun(d.run);
   if (d.tab) setTab(d.tab);
+  if (d.openFile) openReviewFile(d.openFile);
   if (d.reviewRepair !== undefined) reviewRepair();
   if (d.viewMissing !== undefined) viewMissing();
   if (d.reviewDownloads !== undefined) reviewRepair(true);

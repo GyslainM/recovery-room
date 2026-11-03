@@ -119,8 +119,8 @@ test('a current review preserves observed counts and qualifies its earlier sourc
   app.state.run = reviewRun('ready_for_review');
   const rendered = app.reviewView();
   assert.match(rendered, /80 → 60/);
-  assert.match(rendered, /20<\/strong>/);
-  assert.match(rendered, /10 \/ 10/);
+  assert.match(rendered, /20 orders cancelled/); // not called repeats: this review lists no changes to show it
+  assert.match(rendered, /10 of 10 intact/);
   assert.match(rendered, /Source unchanged during the test/);
 });
 
@@ -264,23 +264,29 @@ test('an unrecognised mode is shown as reported and never labelled offline or no
   for (const value of [other.short, other.long, other.method]) assert.doesNotMatch(value, /offline demo|without model|no model\b(?!-)/i);
 });
 
-test('repair proportions use observed counts and work under the existing style policy', () => {
+// The five blocks before a summary row's "N of M" label, as letters: a amber, g green, r red, - empty.
+const fiveMarks = (html, label) => {
+  const m = html.match(new RegExp(`<span class="cmp-blocks" aria-hidden="true">((?:<i[^>]*></i>){5})</span>${label}`));
+  return m && [...m[1].matchAll(/<i(?: class="(\w)")?><\/i>/g)].map(x => x[1] || '-').join('');
+};
+
+test('summary shares use observed counts in the compared runs\' five blocks, under the existing style policy', () => {
   const app = harness(), review = reviewRun('ready_for_review').review;
-  for (const [cancelled, preserved, width] of [[20, 60, 25], [40, 60, 40], [0, 60, 0]]) {
+  for (const [cancelled, preserved, marks] of [[20, 60, 'a----'], [40, 60, 'aa---'], [0, 60, '-----'], [1, 99, 'a----'], [99, 1, 'aaaa-'], [60, 0, 'aaaaa']]) {
     const rendered = app.repairFlow({...review, cancellations: cancelled, untargeted_preserved: preserved});
-    const changed = Number(rendered.match(/class="impact-changed"[^>]+width="([^"]+)"/)[1]);
-    const unchanged = Number(rendered.match(/class="impact-preserved"[^>]+width="([^"]+)"/)[1]);
-    assert.equal(changed, width);
-    assert.equal(changed + unchanged, 100);
-    assert.match(rendered, new RegExp(`${cancelled} cancelled orders and ${preserved} unchanged orders`));
+    assert.equal(fiveMarks(rendered, `${cancelled} of ${cancelled + preserved} changed`), marks, `${cancelled}/${preserved}`);
     assert.doesNotMatch(rendered, /\bstyle=|data-count/);
   }
+  // Later purchases: green for intact, red for any that were not.
+  assert.equal(fiveMarks(app.repairFlow(review), '10 of 10 intact'), 'ggggg');
+  assert.equal(fiveMarks(app.repairFlow({...review, checkout_preserved: 8}), '8 of 10 intact'), 'ggggr');
+  assert.equal(fiveMarks(app.repairFlow({...review, checkout_preserved: 0}), '0 of 10 intact'), 'rrrrr');
 });
 
 test('missing or invalid counts never become an invented repair proportion', () => {
   const app = harness(), review = reviewRun('ready_for_review').review;
   for (const [cancellations, untargeted_preserved] of [[null, 60], [20, undefined], [-1, 60], [0, 0], [NaN, 60]]) {
-    assert.doesNotMatch(app.repairFlow({...review, cancellations, untargeted_preserved}), /class="impact"/);
+    assert.doesNotMatch(app.repairFlow({...review, cancellations, untargeted_preserved}), / of \d+ changed/);
   }
 });
 
@@ -1294,10 +1300,11 @@ test('the Changes summary and sections take every count from the review, includi
     const view = app.reviewView(), words = strip(view);
     const cancelled = review.changes.length, moved = review.stock.filter(p => p.after !== p.before).length;
     assert.match(words, new RegExp(`All ${review.checks.length} checks passed on the copy`));
-    assert.match(words, new RegExp(`${review.before_active} → ${review.after_active} active orders`));
-    assert.match(words, new RegExp(` ${review.cancellations} orders cancelled, history kept`));
-    assert.match(words, new RegExp(` ${review.untargeted_preserved} orders left untouched`));
-    assert.match(words, new RegExp(`${review.checkout_preserved} / ${review.checkout_total} later purchases intact`));
+    const whole = review.cancellations + review.untargeted_preserved;
+    const units = review.stock.reduce((n, p) => n + p.after - p.before, 0), sum = (k) => review.stock.reduce((n, p) => n + p[k], 0);
+    assert.match(words, new RegExp(`Active orders ${review.before_active} → ${review.after_active} ${review.cancellations} repeats cancelled history kept ${review.cancellations} of ${whole} changed`));
+    assert.match(words, new RegExp(`Later purchases ${review.checkout_preserved} of ${review.checkout_total} intact`));
+    assert.match(words, new RegExp(`Stock ${sum('before')} → ${sum('after')} ${moved} products restocked by the cancelled orders \\+${units} units`));
     assert.match(words, new RegExp(`Cancelled on the copy ${cancelled} orders`));
     assert.match(words, new RegExp(`Stock ${moved} of ${review.stock.length} products changed`));
     assert.match(words, new RegExp(`Kept ${review.preserved_orders.length} orders unchanged`));
@@ -1615,4 +1622,30 @@ test('the open case folds its attempts into its strip and unfolds them, square b
   assert.match(loading, /<button class="case active loading" data-case="case-b"/);
   assert.doesNotMatch(loading.match(/data-case="case-b"[^>]*>/)[0], /aria-expanded/);
   assert.match(loading.match(/data-case="case-b".*?<\/button>/)[0], /case-strip/);
+});
+
+// ---------- Changes summary rows ----------
+
+test('each summary row opens its own section below, and stock credits the cancellations only when the units match', () => {
+  const data = publicData();
+  const app = harness();
+  const runId = data.api_get['/api/runs?incident=import-retry'].runs[0].id, run = data.api_get[`/api/runs/${runId}`];
+  app.state.incident = data.api_get['/api/incidents/import-retry'];
+  app.state.run = run;
+  const view = app.reviewView();
+  const targets = [...view.matchAll(/<button class="rv-row" type="button" data-open-file="([^"]+)">/g)].map(m => m[1]);
+  assert.deepEqual(targets, ['rv-cancelled', 'rv-kept', 'rv-stock']);
+  for (const id of targets) assert.match(view, new RegExp(`<details class="rv-box rv-file" id="${id}"`));
+  assert.match(view, /<ul class="rv-rows" aria-label="What the test changed">/);
+  assert.equal((view.match(/, show this section below/g) || []).length, 3);
+  assert.match(view, /<span class="gl-pill repeat">20 repeats cancelled<\/span><span class="gl-pill">history kept<\/span>/);
+  // One product's change no longer matches its cancelled units: the row only says what changed.
+  const stock = run.review.stock.map((p, i) => i === 0 ? {...p, after: p.after + 1} : p);
+  const words = strip(app.repairFlow({...run.review, stock}));
+  assert.match(words, /Stock \d+ → \d+ 4 of 4 products changed \+40 units/);
+  assert.doesNotMatch(words, /restocked by the cancelled orders/);
+  // No stock change, and a review without stock rows.
+  const flat = run.review.stock.map(p => ({...p, after: p.before}));
+  assert.match(strip(app.repairFlow({...run.review, stock: flat})), /no product changed ±0 units/);
+  assert.doesNotMatch(app.repairFlow({...run.review, stock: []}), /data-open-file="rv-stock"/);
 });
