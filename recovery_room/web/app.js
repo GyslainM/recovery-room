@@ -2072,14 +2072,7 @@ function summaryRows(review) {
   }
   const stock = review.stock || [];
   if (stock.length && stock.every(p => Number.isSafeInteger(p.before) && Number.isSafeInteger(p.after))) {
-    const units = new Map();
-    const quantitiesKnown = changes.length === changed && changes.every(ch => typeof ch.before?.sku === 'string'
-      && ch.before.sku.length > 0 && isCount(ch.before.quantity) && ch.before.quantity > 0);
-    if (quantitiesKnown) for (const ch of changes) units.set(ch.before.sku, (units.get(ch.before.sku) || 0) + ch.before.quantity);
-    const shifted = stock.filter(p => p.after !== p.before), plural = (n) => (n === 1 ? 'product' : 'products');
-    const fromCancelled = quantitiesKnown && [...units.values()].every(isCount) && shifted.length > 0
-      && [...units.keys()].every(sku => stock.some(p => p.sku === sku))
-      && stock.every(p => p.after - p.before === (units.get(p.sku) || 0));
+    const {shifted, fromCancelled} = stockLedger(review), plural = (n) => (n === 1 ? 'product' : 'products');
     const sumBefore = stock.reduce((n, p) => n + p.before, 0), sumAfter = stock.reduce((n, p) => n + p.after, 0);
     const delta = sumAfter - sumBefore;
     const note = !shifted.length ? 'no product changed' : fromCancelled ? `${shifted.length} ${plural(shifted.length)} restocked by the cancelled orders` : `${shifted.length} of ${stock.length} ${plural(stock.length)} changed`;
@@ -2091,6 +2084,63 @@ function summaryRows(review) {
   return rows.length ? `<ul class="rv-rows" aria-label="What the test changed">${rows.join('')}</ul>` : '';
 }
 
+// Stock against the cancelled orders, per product: the orders (oldest first) and the units they hold, and
+// whether the product's change equals those units. Shared by the summary row and the Stock section, so both
+// make the same claim. Quantities count only when every cancellation is listed with a product and a whole,
+// positive quantity, and stock only in whole numbers; otherwise units and deltas are unknown (NaN) and nothing
+// is matched or flagged. fromCancelled: something changed and every product (and every cancelled product) matches.
+function stockLedger(review) {
+  const stock = review.stock || [], bySku = new Map();
+  const changes = [...(review.changes || [])].sort((a, b) => String(a.before?.created_at || '').localeCompare(String(b.before?.created_at || '')));
+  const quantitiesKnown = changes.length === review.cancellations && changes.every(ch => typeof ch.before?.sku === 'string'
+    && ch.before.sku.length > 0 && isCount(ch.before.quantity) && ch.before.quantity > 0);
+  for (const ch of changes) { const sku = ch.before?.sku; if (!bySku.has(sku)) bySku.set(sku, []); bySku.get(sku).push(ch); }
+  const products = stock.map(p => {
+    const orders = bySku.get(p.sku) || [];
+    const units = quantitiesKnown ? orders.reduce((n, ch) => n + ch.before.quantity, 0) : NaN;
+    const delta = Number.isSafeInteger(p.before) && Number.isSafeInteger(p.after) ? p.after - p.before : NaN;
+    const known = isCount(units) && Number.isSafeInteger(delta);
+    return {p, orders, units, delta, matches: known && delta === units, flagged: known && delta !== units};
+  });
+  const countsKnown = products.every(x => Number.isSafeInteger(x.delta));
+  const orphan = [...bySku.keys()].some(sku => !stock.some(p => p.sku === sku)), shifted = products.filter(x => x.delta !== 0);
+  return {products, shifted, orphan, quantitiesKnown, countsKnown,
+    fromCancelled: quantitiesKnown && countsKnown && shifted.length > 0 && !orphan && products.every(x => x.matches)};
+}
+
+// One block per unit of a product's cancelled orders, grouped by order (amber, like the repeats in What happened);
+// hollow blocks for any part of the change no cancelled order explains. Left out for a fall in stock, a
+// quantity that is not a whole number, or more than 60 blocks: the words beside it still say the counts.
+const UNIT_CAP = 60;
+function unitCells(x) {
+  const qty = x.orders.map(ch => ch.before?.quantity), extra = x.delta - x.units;
+  if (!isCount(x.units) || !qty.every(q => Number.isSafeInteger(q) && q > 0) || !Number.isSafeInteger(x.delta) || x.delta < 0) return '';
+  const total = x.units + Math.max(0, extra);
+  if (!total || total > UNIT_CAP) return '';
+  const groups = x.orders.map((ch, i) => `<span class="unit-grp" title="${escape(`${ch.before.id} · ${qty[i]} ${qty[i] === 1 ? 'unit' : 'units'}${ch.duplicate_of ? ` · repeat of ${ch.duplicate_of}` : ''}`)}">${'<i></i>'.repeat(qty[i])}</span>`).join('');
+  const odd = extra > 0 ? `<span class="unit-grp odd" title="${escape(`${extra} ${extra === 1 ? 'unit' : 'units'} not explained by a cancelled order`)}">${'<i></i>'.repeat(extra)}</span>` : '';
+  return `<span class="unit-cells" aria-hidden="true">${groups}${odd}</span>`;
+}
+
+// The words for a product's change: always shown, so the blocks are never the only record.
+function unitLabel(x) {
+  const n = x.orders.length, repeats = n > 0 && x.orders.every(ch => ch.duplicate_of);
+  const from = `${n} ${repeats ? (n === 1 ? 'repeat' : 'repeats') : (n === 1 ? 'cancelled order' : 'cancelled orders')}`;
+  const change = Number.isSafeInteger(x.delta) ? `${x.delta > 0 ? '+' : x.delta < 0 ? '−' : '±'}${Math.abs(x.delta)} ${Math.abs(x.delta) === 1 ? 'unit' : 'units'}` : 'change unknown';
+  if (x.matches) return n ? `${change} from ${from}` : 'unchanged';
+  if (!x.flagged) return change; // quantities or counts unknown: say what is known, compare nothing
+  return `${change} · ${n ? `${from} hold ${x.units}` : 'no cancelled order for it'}`;
+}
+
+// "Show its N orders": the cancelled list above, filtered to this product with its existing filter.
+function showProductOrders(sku) {
+  state.filter = sku;
+  const select = document.getElementById?.('change-filter'), list = document.getElementById?.('change-table');
+  if (select) select.value = sku;
+  if (list && active().review) { list.innerHTML = changesTable(active().review.changes); markSelection(); }
+  openReviewFile('rv-cancelled');
+}
+
 // A summary row opens its section below and moves keyboard focus to that section's heading.
 function openReviewFile(id) {
   const box = document.getElementById?.(id);
@@ -2098,14 +2148,6 @@ function openReviewFile(id) {
   box.open = true;
   box.scrollIntoView({block: 'start', behavior: prefersReducedMotion() ? 'auto' : 'smooth'});
   box.querySelector('summary')?.focus({preventScroll: true});
-}
-
-// Zero-based stock marks are an alternative view of the displayed before/after values.
-function stockVisual(product, maximum) {
-  const numeric = `<span class="stock-values"><span>${text(product.before)}</span><span aria-hidden="true">→</span><strong>${text(product.after)}</strong></span>`;
-  if (![product.before, product.after, maximum].every(Number.isFinite) || Math.min(product.before, product.after) < 0 || maximum <= 0 || maximum < Math.max(product.before, product.after)) return numeric;
-  const before = product.before / maximum * 100, after = product.after / maximum * 100;
-  return `<div class="stock-visual">${numeric}<svg class="stock-track" viewBox="0 0 100 7" preserveAspectRatio="none" aria-hidden="true"><rect class="stock-base" x="0" y="0" width="${Math.min(before, after)}" height="7"/><rect class="stock-delta ${after < before ? 'negative' : ''}" x="${Math.min(before, after)}" y="0" width="${Math.abs(after - before)}" height="7"/><line x1="${after}" x2="${after}" y1="0" y2="7"/></svg></div>`;
 }
 
 // One collapsible subject of the review, like a file in a diff: a symbol, a name and its count, then rows.
@@ -2126,12 +2168,6 @@ function diffView(review) {
   const stockChanged = review.stock.filter(p => p.after !== p.before);
   const later = laterIds(review);
   const checkout = review.preserved_orders.filter(o => later.has(o.id)), others = review.preserved_orders.filter(o => !later.has(o.id));
-  const byProduct = new Map();
-  for (const change of review.changes) {
-    const entry = byProduct.get(change.before.sku) || {orders: 0, units: 0};
-    entry.orders += 1; entry.units += change.before.quantity;
-    byProduct.set(change.before.sku, entry);
-  }
   const n = review.changes.length, kept = review.preserved_orders.length;
   const cancelled = reviewFile('rv-cancelled', '~', 'Cancelled on the copy', `${n} ${n === 1 ? 'order' : 'orders'}`, `
     <div class="rv-file-tools">
@@ -2140,12 +2176,28 @@ function diffView(review) {
     </div>
     <p class="table-note">${uniformStatus(review.changes) ? 'Each order below goes from active to cancelled on the copy. ' : ''}Only the repeated write is cancelled: each row names the original order that stays and the evidence lines that show the repeat. Stock is returned with a compensating entry.</p>
     <div id="change-table">${changesTable(review.changes)}</div>`);
+  const ledger = stockLedger(review), odd = ledger.products.filter(x => x.flagged).length;
+  // The change symbol is said once in the heading when every product changed; a column only when they differ.
+  const mixed = ledger.shifted.length > 0 && ledger.shifted.length < review.stock.length;
+  const check = !ledger.countsKnown
+    ? '<p class="table-note">Some stock counts are not whole numbers, so stock is not compared with the cancelled orders.</p>'
+    : !ledger.quantitiesKnown
+      ? '<p class="table-note">The cancelled orders\' quantities are not all recorded, so stock is not compared with them.</p>'
+      : odd || ledger.orphan
+    ? `<p class="table-note stock-check warn">${icon('triangle-alert')}<span>${text(odd ? `${odd} ${odd === 1 ? 'product' : 'products'} changed by a different amount than ${odd === 1 ? 'its' : 'their'} cancelled orders hold, on the copy.` : 'Some cancelled orders are for products not listed in stock.')}</span></p>`
+    : ledger.shifted.length
+      ? `<p class="table-note stock-check ok">${icon('circle-check')}<span>On the copy, each product went up by exactly the units of its cancelled orders. One block is one unit; each group is one order.</span></p>`
+      : '<p class="table-note">No product changed on the copy.</p>';
   const stock = reviewFile('rv-stock', stockChanged.length ? '~' : '=', 'Stock', `${stockChanged.length} of ${review.stock.length} ${review.stock.length === 1 ? 'product' : 'products'} changed`, `
-    <p class="table-note">Before and after the test on a copy. Bars start at zero.</p>
-    ${table(['','Product','Stock on hand','Change','From cancellations'],review.stock.map(p=>{
-      const delta = p.after - p.before, entry = byProduct.get(p.sku);
-      return [`<span class="sym ${delta?'mod':'same'}">${delta?'~':'='}</span>`,`${text(p.name)} <span class="mono faint">${text(p.sku)}</span>`,stockVisual(p, Math.max(0, ...review.stock.flatMap(row => [row.before, row.after]))),`<span class="${delta>0?'positive':delta<0?'cancelled':''} num">${delta>0?'+':''}${text(delta)}</span>`,entry?`${entry.orders} orders · +${entry.units} units`:'—'];
-    }),review.stock.map(p=>selAttrs(`product:${p.sku}`)))}`);
+    ${check}
+    ${table([...(mixed ? [''] : []), 'Product', 'Stock on hand', 'Returned to stock', ''], ledger.products.map(x => {
+      const p = x.p, n = x.orders.length;
+      return [...(mixed ? [`<span class="sym ${x.delta ? 'mod' : 'same'}">${x.delta ? '~' : '='}</span>`] : []),
+        `${text(p.name)} <span class="mono faint">${text(p.sku)}</span>`,
+        `<span class="stock-move"><span class="was">${text(p.before)}</span> → ${text(p.after)}</span>`,
+        `<span class="unit-row">${unitCells(x)}<span class="unit-text${x.flagged ? ' warn' : ''}">${text(unitLabel(x))}</span></span>`,
+        n ? `<button class="link small stock-orders" type="button" data-stock-orders="${escape(p.sku)}">${text(`Show its ${n} ${n === 1 ? 'order' : 'orders'}`)}${icon('arrow-down', 'up')}</button>` : ''];
+    }), review.stock.map(p => selAttrs(`product:${p.sku}`)))}`);
   const keep = reviewFile('rv-kept', '=', 'Kept', `${kept} ${kept === 1 ? 'order' : 'orders'} unchanged`, `
     <div class="group-head"><h4>Later purchases</h4><span class="caption">In this synthetic case. On the copy, ${text(review.checkout_preserved)} of ${text(review.checkout_total)} remained unchanged.</span></div>
     ${keptTable(checkout)}
@@ -3071,6 +3123,7 @@ document.addEventListener('click', event => {
   if (d.run && d.run !== state.run?.id && !state.busy) task = loadRun(d.run);
   if (d.tab) setTab(d.tab);
   if (d.openFile) openReviewFile(d.openFile);
+  if (d.stockOrders) showProductOrders(d.stockOrders);
   if (d.reviewRepair !== undefined) reviewRepair();
   if (d.viewMissing !== undefined) viewMissing();
   if (d.reviewDownloads !== undefined) reviewRepair(true);

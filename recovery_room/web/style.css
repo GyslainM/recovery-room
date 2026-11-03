@@ -358,7 +358,6 @@ tr.selected td{background:var(--accent-soft)}
 .before{color:var(--faint)}
 .after{color:var(--accent-ink)}
 .cancelled{color:var(--warn-ink)}
-.positive{color:var(--accent-ink);font-weight:600}
 .citations{display:inline-flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline;white-space:nowrap}
 .citation{padding:0;color:var(--muted);font:var(--fs-2) var(--mono);text-decoration:underline;text-decoration-color:var(--line-3);text-underline-offset:3px}
 .citation:hover{color:var(--ink);text-decoration-color:var(--faint)}
@@ -813,14 +812,25 @@ details.tl-card>.tl-head:hover{background:var(--hover)}
 .table-note{margin:0 0 12px;color:var(--faint);font-size:var(--fs-2)}
 .diff .before{color:var(--faint)}
 .diff .after{color:var(--warn-ink)}
-.stock-visual{min-width:130px;max-width:180px}
-.stock-values{display:flex;align-items:center;gap:10px;font-variant-numeric:tabular-nums;font-size:var(--fs-3)}
-.stock-values>span{color:var(--faint)}
-.stock-values>strong{font-weight:500}
-.stock-track{display:block;width:100%;height:6px;margin:6px 0 0;border-radius:var(--r-xs);background:var(--raised);overflow:hidden}
-.stock-base{fill:var(--chart-base)}
-.stock-delta{fill:var(--accent)}
-.stock-delta.negative{fill:var(--warn)}
+/* Stock: before → after, then one block per returned unit grouped by cancelled order (amber, as repeats are);
+   hollow blocks for change no cancelled order explains. */
+.stock-move{font:var(--fs-2) var(--mono);font-variant-numeric:tabular-nums;color:var(--ink);white-space:nowrap}
+.stock-move .was{color:var(--faint)}
+.unit-row{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px}
+.unit-cells{display:inline-flex;flex-wrap:wrap;gap:3px}
+.unit-grp{display:inline-flex;gap:2px;padding:1px;border-radius:var(--r-xs)}
+.unit-grp:hover{background:var(--line-2)}
+.unit-grp i{width:6px;height:12px;border-radius:2px;background:var(--warn)}
+.unit-grp.odd i{background:none;box-shadow:inset 0 0 0 1.5px var(--warn)}
+.unit-text{font:var(--fs-1) var(--mono);color:var(--faint);white-space:nowrap}
+.unit-text.warn{color:var(--warn-ink)}
+.stock-check{display:flex;align-items:center;gap:8px;color:var(--muted)}
+.stock-check .icon{flex:none;width:15px;height:15px}
+.stock-check.ok .icon{color:var(--accent-ink)}
+.stock-check.warn .icon{color:var(--warn-ink)}
+.stock-orders{display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
+.stock-orders .icon{width:13px;height:13px}
+.icon.up{transform:rotate(180deg)}
 .stock-track line{stroke:var(--ink);stroke-width:1;vector-effect:non-scaling-stroke}
 
 /* What happened: the evidence as a git log, then the compared runs */
