@@ -264,7 +264,7 @@ test('an unrecognised mode is shown as reported and never labelled offline or no
   for (const value of [other.short, other.long, other.method]) assert.doesNotMatch(value, /offline demo|without model|no model\b(?!-)/i);
 });
 
-// The five blocks before a summary row's "N of M" label, as letters: a amber, g green, r red, - empty.
+// The five blocks before a summary row's "N of M" label, as letters: a amber, k kept (muted green), r red, - empty.
 const fiveMarks = (html, label) => {
   const m = html.match(new RegExp(`<span class="cmp-blocks" aria-hidden="true">((?:<i[^>]*></i>){5})</span>${label}`));
   return m && [...m[1].matchAll(/<i(?: class="(\w)")?><\/i>/g)].map(x => x[1] || '-').join('');
@@ -272,15 +272,15 @@ const fiveMarks = (html, label) => {
 
 test('summary shares use observed counts in the compared runs\' five blocks, under the existing style policy', () => {
   const app = harness(), review = reviewRun('ready_for_review').review;
-  for (const [cancelled, preserved, marks] of [[20, 60, 'a----'], [40, 60, 'aa---'], [0, 60, '-----'], [1, 99, 'a----'], [99, 1, 'aaaa-'], [60, 0, 'aaaaa']]) {
+  for (const [cancelled, preserved, marks] of [[20, 60, 'akkkk'], [40, 60, 'aakkk'], [0, 60, 'kkkkk'], [1, 99, 'akkkk'], [99, 1, 'aaaak'], [60, 0, 'aaaaa']]) {
     const rendered = app.repairFlow({...review, cancellations: cancelled, untargeted_preserved: preserved,
       before_active: cancelled + preserved, after_active: preserved});
     assert.equal(fiveMarks(rendered, `${cancelled} of ${cancelled + preserved} changed`), marks, `${cancelled}/${preserved}`);
     assert.doesNotMatch(rendered, /\bstyle=|data-count/);
   }
-  // Later purchases: green for intact, red for any that were not.
-  assert.equal(fiveMarks(app.repairFlow(review), '10 of 10 intact'), 'ggggg');
-  assert.equal(fiveMarks(app.repairFlow({...review, checkout_preserved: 8}), '8 of 10 intact'), 'ggggr');
+  // Later purchases: muted green for intact, red for any that were not; never an empty-looking block.
+  assert.equal(fiveMarks(app.repairFlow(review), '10 of 10 intact'), 'kkkkk');
+  assert.equal(fiveMarks(app.repairFlow({...review, checkout_preserved: 8}), '8 of 10 intact'), 'kkkkr');
   assert.equal(fiveMarks(app.repairFlow({...review, checkout_preserved: 0}), '0 of 10 intact'), 'rrrrr');
 });
 
@@ -1631,11 +1631,11 @@ test('the active-order share excludes already-cancelled history', () => {
   const app = harness(), review = reviewRun('ready_for_review').review;
   const rendered = app.repairFlow({...review, untargeted_preserved: 61});
   assert.match(strip(rendered), /Active orders 80 → 60/);
-  assert.equal(fiveMarks(rendered, '20 of 80 changed'), 'a----');
+  assert.equal(fiveMarks(rendered, '20 of 80 changed'), 'akkkk');
   assert.doesNotMatch(rendered, /20 of 81 changed/);
   const withoutActiveCounts = app.repairFlow({...review, before_active: null, after_active: null, untargeted_preserved: 61});
   assert.match(strip(withoutActiveCounts), /Orders 20 orders cancelled/);
-  assert.equal(fiveMarks(withoutActiveCounts, '20 of 81 changed'), 'a----');
+  assert.equal(fiveMarks(withoutActiveCounts, '20 of 81 changed'), 'akkkk');
   assert.doesNotMatch(withoutActiveCounts, />Active orders</);
 });
 

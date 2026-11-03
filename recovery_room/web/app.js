@@ -2040,6 +2040,7 @@ function repairFlow(review, {run = null, recorded = false} = {}) {
 
 const isCount = (n) => Number.isSafeInteger(n) && n >= 0;
 // Five blocks for a share of a whole, as in the compared runs: none only for nothing, all five only for all.
+// In the summary the rest of the whole is kept, so it is muted green (k), never an empty-looking grey.
 function fiveBlocks(part, whole, on, off = '') {
   const n = part <= 0 ? 0 : part >= whole ? 5 : Math.min(4, Math.max(1, Math.round(5 * part / whole)));
   return `<span class="cmp-blocks" aria-hidden="true">${`<i class="${on}"></i>`.repeat(n)}${(off ? `<i class="${off}"></i>` : '<i></i>').repeat(5 - n)}</span>`;
@@ -2063,11 +2064,11 @@ function summaryRows(review) {
     const historyKept = review.checks.some(c => c.name === 'order_history_preserved' && c.passed === true);
     const pills = isCount(changed) ? `<span class="gl-pill${changed ? ' repeat' : ''}">${text(`${changed} ${word} cancelled`)}</span>${changed && historyKept ? '<span class="gl-pill">history kept</span>' : ''}` : '';
     rows.push(row('rv-cancelled', 'database', activeKnown ? 'Active orders' : 'Orders', `${moved ? `<span class="rv-move">${text(`${before} → ${after}`)}</span>` : ''}${pills}`,
-      shareKnown ? `${fiveBlocks(changed, whole, 'a')}${text(`${changed} of ${whole} changed`)}` : ''));
+      shareKnown ? `${fiveBlocks(changed, whole, 'a', 'k')}${text(`${changed} of ${whole} changed`)}` : ''));
   }
   const kept = review.checkout_preserved, total = review.checkout_total;
   if (isCount(kept) && isCount(total) && total > 0 && kept <= total) {
-    rows.push(row('rv-kept', 'shield-check', 'Later purchases', '', `${fiveBlocks(kept, total, 'g', 'r')}${text(`${kept} of ${total} intact`)}`));
+    rows.push(row('rv-kept', 'shield-check', 'Later purchases', '', `${fiveBlocks(kept, total, 'k', 'r')}${text(`${kept} of ${total} intact`)}`));
   }
   const stock = review.stock || [];
   if (stock.length && stock.every(p => Number.isSafeInteger(p.before) && Number.isSafeInteger(p.after))) {

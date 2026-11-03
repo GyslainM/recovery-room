@@ -923,6 +923,7 @@ details.tl-card>.tl-head:hover{background:var(--hover)}
 .cmp-blocks i.g{background:var(--accent)}
 .cmp-blocks i.a{background:var(--warn)}
 .cmp-blocks i.r{background:var(--danger)}
+.cmp-blocks i.k{background:var(--chart-preserved)}
 .cmp-diff{padding:0 var(--s2) 8px calc(var(--s2) + 16px + var(--s1))}
 .cmp-diff>summary{width:fit-content;cursor:pointer;font-size:var(--fs-2);color:var(--muted)}
 .cmp-diff>summary:hover{color:var(--ink)}
