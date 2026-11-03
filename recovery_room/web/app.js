@@ -376,11 +376,13 @@ function attemptsTree(caseId) {
   return `<div class="tree${at >= 0 ? ' has-current' : ''}" id="case-attempts" data-tree="${escape(caseId)}" role="group" aria-label="Attempts on this case">${SIDE_FORK}${items}${SIDE_MERGE}</div>`;
 }
 
-// A folded case's outcomes at a glance: one square per recorded Meta run (newest first), then the script's.
+// A folded case's outcomes at a glance: Meta runs, then the same newest three script runs as the open list.
 // It is the attempts list folded up: square i and dot i share a data-flip key, so folding moves one into the other.
 function caseStrip(caseId, run) {
   const recs = state.recordings.get(caseId)?.list || [];
-  const cells = [...recs.map(r => recOutcome(r)[1] || 'plain'), run ? (SCRIPT_TAG[run.status]?.[1] || 'plain') : 'empty'];
+  const runs = (state.history.get(caseId) || []).slice(0, 3);
+  const scriptTones = runs.length ? runs.map(r => SCRIPT_TAG[r.status]?.[1] || 'plain') : [run ? (SCRIPT_TAG[run.status]?.[1] || 'plain') : 'empty'];
+  const cells = [...recs.map(r => recOutcome(r)[1] || 'plain'), ...scriptTones];
   return `<span class="case-strip" aria-hidden="true">${cells.map((t, i) => `<i class="${tone(t)}" data-flip="${escape(caseId)}:${i}"></i>`).join('')}</span>`;
 }
 

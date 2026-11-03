@@ -1483,6 +1483,32 @@ test('in a branch with repeats, runs of unmarked commits fold into one row and s
 
 // ---------- Sidebar spine: the open case's attempts branch off the case line; closed cases show a strip ----------
 
+test('folding preserves the displayed script history and its square-to-dot mapping', () => {
+  const app = harness();
+  sidebarState(app);
+  const runs = [
+    {id: 'run-new', status: 'failed_checks'},
+    {id: 'run-selected', status: 'ready_for_review'},
+    {id: 'run-old', status: 'blocked'},
+    {id: 'run-outside-window', status: 'stopped'},
+  ].map(r => ({...r, incident_id: 'case-a'}));
+  app.state.history.set('case-a', runs);
+  app.state.source = 'script';
+  app.state.run = runs[1];
+  const dots = html => [...html.matchAll(/class="att-dot (t-[a-z]+)" data-flip="([^"]+)"/g)].map(m => [m[1], m[2]]);
+  const squares = html => [...html.matchAll(/<i class="(t-[a-z]+)" data-flip="([^"]+)"/g)].map(m => [m[1], m[2]]);
+  const tree = app.attemptsTree('case-a');
+  const strip = app.caseStrip('case-a', runs[0]);
+  assert.equal(dots(tree).length, 6); // three Meta runs and the three displayed script runs
+  assert.deepEqual(squares(strip), dots(tree));
+  assert.deepEqual(squares(strip).slice(3).map(([tone]) => tone), ['t-danger', 't-ok', 't-warn']);
+  assert.doesNotMatch(tree, /run-outside-window/);
+  app.renderCases();
+  app.setBranch(false);
+  const folded = app.nodes.get('#cases').innerHTML.match(/data-case="case-a".*?<\/button>/)[0];
+  assert.deepEqual(squares(folded), dots(tree));
+});
+
 function sidebarState(app) {
   app.state.cases = [{id: 'case-a', title: 'Case A'}, {id: 'case-b', title: 'Case B'}, {id: 'case-c', title: 'Case C'}];
   app.state.recordings.set('case-a', {status: 'ok', list: [
