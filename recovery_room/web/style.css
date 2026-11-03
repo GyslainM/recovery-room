@@ -112,10 +112,10 @@ a{color:inherit}
 .ring.danger .ring-track{stroke:var(--danger)}
 .ring.danger rect,.ring.danger circle:not(.ring-track){fill:var(--danger)}
 /* The open case's attempts hang off a thin neutral tree line. */
-/* The open case's attempts: a branch off the spine (x 33.5) at x 53.5 that rejoins it, lit to the attempt on screen. */
-.tree{position:relative;margin:0;padding:0 0 14px;animation:tree-in var(--dur-1) var(--ease-out)}
+/* The open case's attempts: a branch off the spine (x 33.5) at x 53.5 that rejoins it, lit to the attempt on screen.
+   Folding and unfolding are animated from app.js (foldPlay), and skipped when reduced motion is preferred. */
+.tree{position:relative;margin:0;padding:0 0 14px}
 .tree::before{top:0;bottom:0}
-@keyframes tree-in{from{opacity:0;transform:translateY(-3px)}}
 .tree-fork,.tree-merge{position:absolute;left:0;width:60px;height:14px;fill:none;stroke:var(--line-2);stroke-width:2;stroke-linecap:round;pointer-events:none}
 .tree-fork{top:0}
 .tree-merge{bottom:0}

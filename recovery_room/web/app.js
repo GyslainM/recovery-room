@@ -14,6 +14,8 @@ const state = {
   files: new Map(), ev: {name: 'events.jsonl', query: '', citedOnly: false, activeRef: null},
   // sheet: the narrow-screen details sheet is open (a selection, or the guide). nav: the phone case drawer.
   selection: null, sheet: false, lastFocus: null, filter: '', changeQuery: '', nav: false, guide: false,
+  // sideFolded: the open case's attempts are folded into its strip (opening another case unfolds).
+  sideFolded: false,
   // rechecking: run IDs with an explicit export recheck in flight (one per run, never a global lock).
   runMeta: new Map(), exportChecks: new Map(), sql: new Map(), rechecking: new Set(),
   // Recorded model runs (read-only history). source is per case: 'script' (offline) or 'recorded'.
@@ -370,15 +372,16 @@ function attemptsTree(caseId) {
       title: `Script baseline ${shortId(r.id)} · ${statusOf(r)[0]} · started ${started(r.created_at) || 'time not recorded'} · offline, no model`});
   } else entries.push({attrs: 'data-source="script"', current: !recordedMode(), tone: 'empty', label: 'Script baseline', tag: 'not run', meta: '', title: 'Offline script baseline · not run yet'});
   const at = entries.findIndex(e => e.current);
-  const items = entries.map((e, i) => `<button class="run-item attempt${e.current ? ' current' : at > i ? ' lit' : ''}" ${e.attrs} aria-current="${e.current ? 'true' : 'false'}" title="${escape(e.title)}"><i class="att-dot ${tone(e.tone)}" aria-hidden="true"></i><span class="attempt-label">${text(e.label)}</span><span class="sr-only"> · ${text(e.tag)}</span>${e.meta ? `<span class="attempt-meta${e.warn ? ' warn' : ''}">${text(e.meta)}</span>` : ''}</button>`).join('');
-  return `<div class="tree${at >= 0 ? ' has-current' : ''}" role="group" aria-label="Attempts on this case">${SIDE_FORK}${items}${SIDE_MERGE}</div>`;
+  const items = entries.map((e, i) => `<button class="run-item attempt${e.current ? ' current' : at > i ? ' lit' : ''}" ${e.attrs} aria-current="${e.current ? 'true' : 'false'}" ${state.switching ? 'disabled ' : ''}title="${escape(e.title)}"><i class="att-dot ${tone(e.tone)}" data-flip="${escape(caseId)}:${i}" aria-hidden="true"></i><span class="attempt-label">${text(e.label)}</span><span class="sr-only"> · ${text(e.tag)}</span>${e.meta ? `<span class="attempt-meta${e.warn ? ' warn' : ''}">${text(e.meta)}</span>` : ''}</button>`).join('');
+  return `<div class="tree${at >= 0 ? ' has-current' : ''}" id="case-attempts" data-tree="${escape(caseId)}" role="group" aria-label="Attempts on this case">${SIDE_FORK}${items}${SIDE_MERGE}</div>`;
 }
 
-// A closed case's outcomes at a glance: one square per recorded Meta run (newest first), then the script's.
+// A folded case's outcomes at a glance: one square per recorded Meta run (newest first), then the script's.
+// It is the attempts list folded up: square i and dot i share a data-flip key, so folding moves one into the other.
 function caseStrip(caseId, run) {
   const recs = state.recordings.get(caseId)?.list || [];
   const cells = [...recs.map(r => recOutcome(r)[1] || 'plain'), run ? (SCRIPT_TAG[run.status]?.[1] || 'plain') : 'empty'];
-  return `<span class="case-strip" aria-hidden="true">${cells.map(t => `<i class="${tone(t)}"></i>`).join('')}</span>`;
+  return `<span class="case-strip" aria-hidden="true">${cells.map((t, i) => `<i class="${tone(t)}" data-flip="${escape(caseId)}:${i}"></i>`).join('')}</span>`;
 }
 
 function renderCases() {
@@ -388,8 +391,11 @@ function renderCases() {
   const where = at >= 0 ? `Case ${pad(at + 1)} of ${pad(state.cases.length)}` : 'Cases';
   $('#nav-toggle-label').textContent = where;
   $('#nav-toggle').setAttribute('aria-label', `Cases · ${where}`);
-  $('#cases').innerHTML = state.cases.map((c, i) => {
+  const list = $('#cases'), before = foldRects(list);
+  list.innerHTML = state.cases.map((c, i) => {
     const active = c.id === (state.switching || state.incident?.id);
+    // The shown case keeps its attempts while the next one loads; both change in one render, so one move.
+    const opened = c.id === state.incident?.id, branch = opened && !state.sideFolded;
     const newest = state.history.get(c.id)?.[0], shown = state.runs.get(c.id);
     const run = shown && (!newest || shown.id === newest.id) ? shown : newest || null;
     const loading = state.switching === c.id;
@@ -397,9 +403,55 @@ function renderCases() {
     const repeats = ['proposed', 'ready_for_review', 'blocked', 'failed_checks'].includes(run?.status) ? run?.plan?.cancellations?.length : undefined;
     const recs = state.recordings.get(c.id)?.list || [];
     const name = `${pad(i + 1)} ${c.title} · ${label}${Number.isInteger(repeats) ? ` · ${repeats} repeats` : ''}${recs.length ? ` · ${recs.length} recorded ${recs.length === 1 ? 'run' : 'runs'}` : ''}`;
-    const row = `<button class="case${active ? ' active' : ''}${loading ? ' loading' : ''}" data-case="${escape(c.id)}" ${state.busy ? 'disabled' : ''} ${active ? 'aria-current="page"' : ''} aria-label="${escape(name)}" title="${escape(name)}"><span class="case-ix" aria-hidden="true">${pad(i + 1)}</span>${ringSvg(run?.status)}<span class="case-title">${text(c.title)}</span>${active ? '' : caseStrip(c.id, run)}</button>`;
-    return active && state.incident?.id === c.id ? row + attemptsTree(c.id) : row;
+    const row = `<button class="case${active ? ' active' : ''}${loading ? ' loading' : ''}" data-case="${escape(c.id)}" data-flip="case:${escape(c.id)}" ${state.busy ? 'disabled' : ''} ${active ? 'aria-current="page"' : ''} ${active && opened ? `aria-expanded="${branch}"${branch ? ' aria-controls="case-attempts"' : ''}` : ''} aria-label="${escape(name)}" title="${escape(name)}"><span class="case-ix" aria-hidden="true">${pad(i + 1)}</span>${ringSvg(run?.status)}<span class="case-title">${text(c.title)}</span>${branch ? '' : caseStrip(c.id, run)}</button>`;
+    return branch ? row + attemptsTree(c.id) : row;
   }).join('');
+  foldPlay(list, before);
+}
+
+// Fold or unfold the open case's attempts (clicking the open case, or ArrowLeft and ArrowRight on it).
+function setBranch(open) {
+  if (!state.incident || state.switching || open === !state.sideFolded) return;
+  const inList = !!document.activeElement?.closest?.('#cases');
+  state.sideFolded = !open;
+  renderCases();
+  if (inList) $('#cases .case.active')?.focus?.({preventScroll: true});
+}
+
+// Folding motion. A strip square and its dot share a data-flip key, and so does each case row: whatever moved
+// between two renders slides (and resizes) from where it was, so the squares unfold into the dots and the rows
+// below make room. A newly opened list fades its labels and rails in; re-rendering an open list moves nothing.
+const FOLD_MS = 220, FOLD_EASE = 'cubic-bezier(.2,.8,.2,1)';
+function foldRects(list) {
+  const rects = new Map();
+  if (typeof list?.querySelectorAll !== 'function' || prefersReducedMotion() || document.hidden) return rects;
+  for (const el of list.querySelectorAll('[data-flip]')) rects.set(el.dataset.flip, el.getBoundingClientRect());
+  rects.tree = list.querySelector('[data-tree]')?.dataset.tree;
+  return rects;
+}
+function foldPlay(list, before) {
+  if (!before.size || typeof list.querySelectorAll !== 'function') return;
+  // Measure every new place before anything starts moving; a square inside a row that slides then needs only
+  // its own part of the move.
+  const els = [...list.querySelectorAll('[data-flip]')], now = els.map(el => el.getBoundingClientRect()), moved = new Map();
+  for (const [i, el] of els.entries()) {
+    const a = before.get(el.dataset.flip), b = now[i];
+    if (!a || !a.width || !a.height || !b.width || !b.height || typeof el.animate !== 'function') continue;
+    const [hx, hy] = moved.get(el.parentElement?.closest('[data-flip]')) || [0, 0];
+    const dx = a.left - b.left - hx, dy = a.top - b.top - hy, sx = a.width / b.width, sy = a.height / b.height;
+    if (Math.abs(dx) < 1 && Math.abs(dy) < 1 && Math.abs(sx - 1) < 0.05 && Math.abs(sy - 1) < 0.05) continue; // no twitches
+    moved.set(el, [dx, dy]);
+    el.animate([{transformOrigin: '0 0', transform: `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`}, {transformOrigin: '0 0', transform: 'none'}], {duration: FOLD_MS, easing: FOLD_EASE});
+  }
+  const tree = list.querySelector('[data-tree]');
+  if (!tree || tree.dataset.tree === before.tree || typeof tree.animate !== 'function') return;
+  const fade = [{opacity: 0}, {opacity: 1}];
+  for (const curve of tree.querySelectorAll('.tree-fork, .tree-merge')) curve.animate(fade, {duration: FOLD_MS, easing: FOLD_EASE});
+  [...tree.querySelectorAll('.attempt')].forEach((item, i) => {
+    const timing = {duration: FOLD_MS, delay: Math.min(i, 5) * 25, easing: FOLD_EASE, fill: 'backwards'};
+    for (const part of item.querySelectorAll('.attempt-label, .attempt-meta')) part.animate([{opacity: 0, transform: 'translateX(-4px)'}, {opacity: 1, transform: 'none'}], timing);
+    for (const pseudoElement of ['::before', '::after']) { try { item.animate(fade, {...timing, pseudoElement}); } catch { /* the rails just appear */ } }
+  });
 }
 
 function parseHash() {
@@ -451,7 +503,7 @@ async function selectCase(identifier, tab = null) {
       const source = view?.source || (state.sourceChosen ? state.source : demoDefault(identifier) ? 'recorded' : 'script');
       resetReplay();
       Object.assign(state, {
-        incident, run, switching: null, sheet: false,
+        incident, run, switching: null, sheet: false, sideFolded: state.incident?.id === identifier && state.sideFolded,
         tab: tab || view?.tab || (source === 'script' && run?.review ? 'changes' : 'investigation'),
         ev: view?.ev ? {...view.ev} : {name: 'events.jsonl', query: '', citedOnly: false, activeRef: null},
         selection: view?.selection || null, filter: view?.filter || '', changeQuery: view?.changeQuery || '', reconActive: null,
@@ -2933,8 +2985,11 @@ document.addEventListener('click', event => {
   const d = el.dataset;
   let task;
   if (d.navToggle !== undefined) { if (state.nav) closeNav(); else setNav(true); return; }
-  // Choosing a case, run or recording in the phone drawer closes it.
-  if (state.nav && (d.case || d.run || d.recording)) setNav(false);
+  // Choosing a case, run or recording in the phone drawer closes it; folding the open case does not. The
+  // folded sidebar rail shows no list, so there the open case's ring folds nothing.
+  const foldsOpenCase = d.case && !state.switching && d.case === state.incident?.id && !$('.app')?.classList?.contains('nav-rail');
+  if (state.nav && ((d.case && !foldsOpenCase) || d.run || d.recording)) setNav(false);
+  if (foldsOpenCase) setBranch(state.sideFolded);
   if (d.openGuide !== undefined) toggleGuide(el);
   if (d.dismissWelcome !== undefined) dismissWelcome();
   if (d.palette !== undefined) openPalette();
@@ -3018,6 +3073,12 @@ document.addEventListener('keydown', event => {
     return;
   }
   const list = t.closest?.('#cases');
+  if (list && (key === 'ArrowRight' || key === 'ArrowLeft') && (t.closest('.case.active') || (key === 'ArrowLeft' && t.closest('.attempt')))) {
+    event.preventDefault();
+    setBranch(key === 'ArrowRight');
+    if (key === 'ArrowLeft') $('#cases .case.active')?.focus({preventScroll: true});
+    return;
+  }
   if (list && ['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(key)) {
     event.preventDefault();
     const items = [...list.querySelectorAll('.case, .run-item')].filter(el => el.offsetParent !== null), index = items.indexOf(t.closest('.case, .run-item'));

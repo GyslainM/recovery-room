@@ -27,7 +27,7 @@ function harness(handler, options = {}) {
     setInterval: (fn) => { intervals.push(fn); return intervals.length; }, clearInterval: (id) => { cleared.push(id); }, intervals, cleared,
   };
   vm.createContext(context);
-  vm.runInContext(source + '\nrender = () => { globalThis.renderCalls++; };\nrenderPanel = () => {};\nglobalThis.subject = {gitSegments, attemptsTree, caseStrip, renderCases, state, download, reviewView, exportStatus, recheckExport, act, changesView, checksTab, sqlView, modeInfo, repairFlow, stockVisual, transition, packageView, lineContext, evidenceWrites, reconstructionView, runsCompare, checkContext, checksTab, demoDefault, staticContract, demoStartCase, guardrailMoment, guardrailView, timelineItems, displayedSteps, evaluationData, evaluationView, renderActions, replayControls, startReplay, playReplay, pauseReplay, nextReplay, sqlView, paletteCommands, loadSql, copySql, api, statusOf, stepsView, recCitations, recordedConclusion, recordedChangesView, recordedChecksView, startup, timerOn: () => replayTimer !== null};', context);
+  vm.runInContext(source + '\nrender = () => { globalThis.renderCalls++; };\nrenderPanel = () => {};\nglobalThis.subject = {gitSegments, attemptsTree, caseStrip, renderCases, setBranch, state, download, reviewView, exportStatus, recheckExport, act, changesView, checksTab, sqlView, modeInfo, repairFlow, stockVisual, transition, packageView, lineContext, evidenceWrites, reconstructionView, runsCompare, checkContext, checksTab, demoDefault, staticContract, demoStartCase, guardrailMoment, guardrailView, timelineItems, displayedSteps, evaluationData, evaluationView, renderActions, replayControls, startReplay, playReplay, pauseReplay, nextReplay, sqlView, paletteCommands, loadSql, copySql, api, statusOf, stepsView, recCitations, recordedConclusion, recordedChangesView, recordedChecksView, startup, timerOn: () => replayTimer !== null};', context);
   return {context, nodes, ...context.subject};
 }
 
@@ -1500,7 +1500,7 @@ test('the open case branches off the spine and lights the rail down to the attem
   sidebarState(app);
   app.state.source = 'recorded'; app.state.recId = 'r2';
   const tree = app.attemptsTree('case-a');
-  assert.match(tree, /^<div class="tree has-current" role="group" aria-label="Attempts on this case"><svg class="tree-fork"/);
+  assert.match(tree, /^<div class="tree has-current" id="case-attempts" data-tree="case-a" role="group" aria-label="Attempts on this case"><svg class="tree-fork"/);
   assert.match(tree, /<svg class="tree-merge"[^>]*>.*<\/svg><\/div>$/);
   const items = attempts(tree);
   assert.deepEqual(items.map(i => i.cls), ['lit', 'current', '', '']); // lit above the current run, plain below it
@@ -1530,15 +1530,17 @@ test('a script run on screen lights every recording above it and shows its own o
   assert.match(items[3].body, /<span class="attempt-meta">[^<]+<\/span>/);
   // With nothing of this case on screen the fork stays unlit.
   app.state.run = {id: 'elsewhere'};
-  assert.match(app.attemptsTree('case-a'), /^<div class="tree" role="group"/);
+  assert.match(app.attemptsTree('case-a'), /^<div class="tree" id="case-attempts"/);
 });
 
 test('closed cases show one square per outcome, hollow while the script has not run', () => {
   const app = harness();
   sidebarState(app);
-  assert.equal(app.caseStrip('case-a', null), '<span class="case-strip" aria-hidden="true"><i class="t-ok"></i><i class="t-warn"></i><i class="t-danger"></i><i class="t-empty"></i></span>');
-  assert.equal(app.caseStrip('case-b', {status: 'stopped'}), '<span class="case-strip" aria-hidden="true"><i class="t-warn"></i><i class="t-warn"></i></span>');
-  assert.equal(app.caseStrip('case-c', {status: 'proposed'}), '<span class="case-strip" aria-hidden="true"><i class="t-plain"></i></span>');
+  const cells = (html) => [...html.matchAll(/<i class="([^"]+)" data-flip="([^"]+)"><\/i>/g)].map(m => `${m[1]} ${m[2]}`);
+  assert.deepEqual(cells(app.caseStrip('case-a', null)), ['t-ok case-a:0', 't-warn case-a:1', 't-danger case-a:2', 't-empty case-a:3']);
+  assert.deepEqual(cells(app.caseStrip('case-b', {status: 'stopped'})), ['t-warn case-b:0', 't-warn case-b:1']);
+  assert.deepEqual(cells(app.caseStrip('case-c', {status: 'proposed'})), ['t-plain case-c:0']);
+  assert.match(app.caseStrip('case-c', null), /^<span class="case-strip" aria-hidden="true"><i /);
   app.renderCases();
   const html = app.nodes.get('#cases').innerHTML;
   const rows = [...html.matchAll(/<button class="case[^"]*" data-case="([^"]+)"[^>]*aria-label="([^"]+)"[^>]*>(.*?)<\/button>/g)];
@@ -1546,8 +1548,45 @@ test('closed cases show one square per outcome, hollow while the script has not 
   assert.deepEqual(rows.map(r => r[2]), ['01 Case A · Not started · 3 recorded runs', '02 Case B · Not started · 1 recorded run', '03 Case C · Not started']);
   assert.deepEqual(rows.map(r => r[3].match(/<span class="case-ix" aria-hidden="true">(\d+)<\/span>/)[1]), ['01', '02', '03']);
   assert.doesNotMatch(rows[0][3], /case-strip/); // the open case shows its attempts instead
-  assert.match(rows[1][3], /<span class="case-strip" aria-hidden="true"><i class="t-warn"><\/i><i class="t-empty"><\/i><\/span>/);
+  assert.match(rows[1][3], /<span class="case-strip" aria-hidden="true"><i class="t-warn" data-flip="case-b:0"><\/i><i class="t-empty" data-flip="case-b:1"><\/i><\/span>/);
   assert.match(html, /<\/button><div class="tree/); // the attempts follow the open case's row
   assert.doesNotMatch(html, /case-count/);
   assert.ok(!classes(html).includes('empty'));
+});
+
+test('the open case folds its attempts into its strip and unfolds them, square by square', () => {
+  const app = harness();
+  sidebarState(app);
+  app.renderCases();
+  const open = app.nodes.get('#cases').innerHTML;
+  assert.match(open, /data-case="case-a"[^>]*aria-current="page" aria-expanded="true" aria-controls="case-attempts"/);
+  assert.doesNotMatch(open.match(/data-case="case-a".*?<\/button>/)[0], /case-strip/);
+  const dots = [...open.matchAll(/class="att-dot [^"]+" data-flip="([^"]+)"/g)].map(m => m[1]);
+  app.setBranch(false);
+  assert.equal(app.state.sideFolded, true);
+  const folded = app.nodes.get('#cases').innerHTML;
+  assert.doesNotMatch(folded, /class="tree|aria-controls/);
+  const row = folded.match(/data-case="case-a".*?<\/button>/)[0];
+  assert.match(row, /aria-current="page" aria-expanded="false" aria-label/);
+  const squares = [...row.matchAll(/<i class="t-[a-z]+" data-flip="([^"]+)">/g)].map(m => m[1]);
+  assert.deepEqual(squares, ['case-a:0', 'case-a:1', 'case-a:2', 'case-a:3']);
+  assert.deepEqual(dots, squares); // each square unfolds into its own dot
+  app.setBranch(false); // already folded: nothing changes
+  assert.equal(app.state.sideFolded, true);
+  app.setBranch(true);
+  assert.equal(app.state.sideFolded, false);
+  assert.match(app.nodes.get('#cases').innerHTML, /<\/button><div class="tree has-current|<\/button><div class="tree"/);
+  // Nothing folds while a case is loading; a closed case has no expanded state.
+  app.state.switching = 'case-b';
+  app.setBranch(false);
+  assert.equal(app.state.sideFolded, false);
+  // While case B loads, case A keeps its attempts (disabled), so both change in the same later render.
+  app.renderCases();
+  const loading = app.nodes.get('#cases').innerHTML;
+  assert.match(loading, /data-case="case-a"[^>]*>.*?<\/button><div class="tree/);
+  assert.equal((loading.match(/class="run-item attempt[^"]*"[^>]*\sdisabled /g) || []).length, 4);
+  assert.doesNotMatch(loading.match(/data-case="case-a"[^>]*>/)[0], /aria-expanded/);
+  assert.match(loading, /<button class="case active loading" data-case="case-b"/);
+  assert.doesNotMatch(loading.match(/data-case="case-b"[^>]*>/)[0], /aria-expanded/);
+  assert.match(loading.match(/data-case="case-b".*?<\/button>/)[0], /case-strip/);
 });
