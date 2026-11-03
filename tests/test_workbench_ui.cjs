@@ -273,7 +273,8 @@ const fiveMarks = (html, label) => {
 test('summary shares use observed counts in the compared runs\' five blocks, under the existing style policy', () => {
   const app = harness(), review = reviewRun('ready_for_review').review;
   for (const [cancelled, preserved, marks] of [[20, 60, 'a----'], [40, 60, 'aa---'], [0, 60, '-----'], [1, 99, 'a----'], [99, 1, 'aaaa-'], [60, 0, 'aaaaa']]) {
-    const rendered = app.repairFlow({...review, cancellations: cancelled, untargeted_preserved: preserved});
+    const rendered = app.repairFlow({...review, cancellations: cancelled, untargeted_preserved: preserved,
+      before_active: cancelled + preserved, after_active: preserved});
     assert.equal(fiveMarks(rendered, `${cancelled} of ${cancelled + preserved} changed`), marks, `${cancelled}/${preserved}`);
     assert.doesNotMatch(rendered, /\bstyle=|data-count/);
   }
@@ -1625,6 +1626,47 @@ test('the open case folds its attempts into its strip and unfolds them, square b
 });
 
 // ---------- Changes summary rows ----------
+
+test('the active-order share excludes already-cancelled history', () => {
+  const app = harness(), review = reviewRun('ready_for_review').review;
+  const rendered = app.repairFlow({...review, untargeted_preserved: 61});
+  assert.match(strip(rendered), /Active orders 80 → 60/);
+  assert.equal(fiveMarks(rendered, '20 of 80 changed'), 'a----');
+  assert.doesNotMatch(rendered, /20 of 81 changed/);
+  const withoutActiveCounts = app.repairFlow({...review, before_active: null, after_active: null, untargeted_preserved: 61});
+  assert.match(strip(withoutActiveCounts), /Orders 20 orders cancelled/);
+  assert.equal(fiveMarks(withoutActiveCounts, '20 of 81 changed'), 'a----');
+  assert.doesNotMatch(withoutActiveCounts, />Active orders</);
+});
+
+test('unknown stock values and cancelled quantities do not produce a preservation or restock claim', () => {
+  const app = harness(), review = reviewRun('ready_for_review').review;
+  for (const stock of [
+    [{sku: 'A'}], [{sku: 'A', before: null, after: null}],
+    [{sku: 'A', before: 10}], [{sku: 'A', before: '10', after: 12}],
+    [{sku: 'A', before: Number.MAX_SAFE_INTEGER, after: Number.MAX_SAFE_INTEGER}, {sku: 'B', before: 1, after: 2}],
+  ]) assert.doesNotMatch(app.repairFlow({...review, stock}), /data-open-file="rv-stock"/);
+  const unknownQuantity = app.repairFlow({...review,
+    cancellations: 2,
+    stock: [{sku: 'A', before: 10, after: 10}, {sku: 'B', before: 10, after: 11}],
+    changes: [{before: {sku: 'A'}}, {before: {sku: 'B', quantity: 1}}],
+  });
+  assert.match(strip(unknownQuantity), /Stock 20 → 21 1 of 2 products changed \+1 units/);
+  assert.doesNotMatch(unknownQuantity, /restocked by the cancelled orders/);
+  // Signed inventory quantities remain legitimate observations.
+  assert.match(strip(app.repairFlow({...review, stock: [{sku: 'A', before: -3, after: -1}]})), /Stock -3 → -1/);
+});
+
+test('history kept is shown only when the preservation check confirms it', () => {
+  const app = harness(), review = reviewRun('ready_for_review').review;
+  assert.doesNotMatch(app.repairFlow(review), />history kept</);
+  for (const passed of [true, false]) {
+    const result = app.repairFlow({...review, passed,
+      checks: [...review.checks, {name: 'order_history_preserved', passed, detail: 'Recorded history result.'}],
+    });
+    assert.equal(result.includes('>history kept<'), passed);
+  }
+});
 
 test('each summary row opens its own section below, and stock credits the cancellations only when the units match', () => {
   const data = publicData();

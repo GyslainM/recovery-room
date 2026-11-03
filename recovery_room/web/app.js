@@ -2052,30 +2052,40 @@ function summaryRows(review) {
   const row = (target, sym, name, middle, stat) => `<li><button class="rv-row" type="button" data-open-file="${target}">${icon(sym, 'rv-row-icon')}<span class="rv-row-name">${text(name)}</span>${middle}<span class="cmp-stat">${stat}</span><span class="sr-only">, show this section below</span>${icon('arrow-down', 'rv-row-go')}</button></li>`;
   const rows = [], changes = review.changes || [];
   const changed = review.cancellations, preserved = review.untargeted_preserved, before = review.before_active, after = review.after_active;
-  const known = isCount(changed) && isCount(preserved) && changed + preserved > 0, moved = isCount(before) && isCount(after);
+  const known = isCount(changed) && isCount(preserved) && isCount(changed + preserved) && changed + preserved > 0;
+  const moved = isCount(before) && isCount(after), activeKnown = isCount(before);
+  // Preserved records can include already-cancelled history; only before_active counts active orders.
+  const whole = activeKnown ? before : changed + preserved;
+  const shareKnown = known && whole > 0 && changed <= whole;
   if (known || moved) {
     const repeats = changed > 0 && changes.length === changed && changes.every(c => c.duplicate_of);
     const word = repeats ? (changed === 1 ? 'repeat' : 'repeats') : (changed === 1 ? 'order' : 'orders');
-    const pills = isCount(changed) ? `<span class="gl-pill${changed ? ' repeat' : ''}">${text(`${changed} ${word} cancelled`)}</span>${changed ? '<span class="gl-pill">history kept</span>' : ''}` : '';
-    rows.push(row('rv-cancelled', 'database', 'Active orders', `${moved ? `<span class="rv-move">${text(`${before} → ${after}`)}</span>` : ''}${pills}`,
-      known ? `${fiveBlocks(changed, changed + preserved, 'a')}${text(`${changed} of ${changed + preserved} changed`)}` : ''));
+    const historyKept = review.checks.some(c => c.name === 'order_history_preserved' && c.passed === true);
+    const pills = isCount(changed) ? `<span class="gl-pill${changed ? ' repeat' : ''}">${text(`${changed} ${word} cancelled`)}</span>${changed && historyKept ? '<span class="gl-pill">history kept</span>' : ''}` : '';
+    rows.push(row('rv-cancelled', 'database', activeKnown ? 'Active orders' : 'Orders', `${moved ? `<span class="rv-move">${text(`${before} → ${after}`)}</span>` : ''}${pills}`,
+      shareKnown ? `${fiveBlocks(changed, whole, 'a')}${text(`${changed} of ${whole} changed`)}` : ''));
   }
   const kept = review.checkout_preserved, total = review.checkout_total;
   if (isCount(kept) && isCount(total) && total > 0 && kept <= total) {
     rows.push(row('rv-kept', 'shield-check', 'Later purchases', '', `${fiveBlocks(kept, total, 'g', 'r')}${text(`${kept} of ${total} intact`)}`));
   }
   const stock = review.stock || [];
-  if (stock.length) {
+  if (stock.length && stock.every(p => Number.isSafeInteger(p.before) && Number.isSafeInteger(p.after))) {
     const units = new Map();
-    for (const ch of changes) units.set(ch.before?.sku, (units.get(ch.before?.sku) || 0) + ch.before?.quantity);
+    const quantitiesKnown = changes.length === changed && changes.every(ch => typeof ch.before?.sku === 'string'
+      && ch.before.sku.length > 0 && isCount(ch.before.quantity) && ch.before.quantity > 0);
+    if (quantitiesKnown) for (const ch of changes) units.set(ch.before.sku, (units.get(ch.before.sku) || 0) + ch.before.quantity);
     const shifted = stock.filter(p => p.after !== p.before), plural = (n) => (n === 1 ? 'product' : 'products');
-    const fromCancelled = shifted.length > 0 && [...units.keys()].every(sku => stock.some(p => p.sku === sku))
+    const fromCancelled = quantitiesKnown && [...units.values()].every(isCount) && shifted.length > 0
+      && [...units.keys()].every(sku => stock.some(p => p.sku === sku))
       && stock.every(p => p.after - p.before === (units.get(p.sku) || 0));
     const sumBefore = stock.reduce((n, p) => n + p.before, 0), sumAfter = stock.reduce((n, p) => n + p.after, 0);
-    const finite = Number.isFinite(sumBefore) && Number.isFinite(sumAfter), delta = sumAfter - sumBefore;
+    const delta = sumAfter - sumBefore;
     const note = !shifted.length ? 'no product changed' : fromCancelled ? `${shifted.length} ${plural(shifted.length)} restocked by the cancelled orders` : `${shifted.length} of ${stock.length} ${plural(stock.length)} changed`;
-    rows.push(row('rv-stock', 'package', 'Stock', `${finite ? `<span class="rv-move">${text(`${sumBefore} → ${sumAfter}`)}</span>` : ''}<span class="rv-row-note">${text(note)}</span>`,
-      finite ? text(`${delta > 0 ? '+' : delta < 0 ? '−' : '±'}${Math.abs(delta)} units`) : ''));
+    if ([sumBefore, sumAfter, delta].every(Number.isSafeInteger)) {
+      rows.push(row('rv-stock', 'package', 'Stock', `<span class="rv-move">${text(`${sumBefore} → ${sumAfter}`)}</span><span class="rv-row-note">${text(note)}</span>`,
+        text(`${delta > 0 ? '+' : delta < 0 ? '−' : '±'}${Math.abs(delta)} units`)));
+    }
   }
   return rows.length ? `<ul class="rv-rows" aria-label="What the test changed">${rows.join('')}</ul>` : '';
 }
