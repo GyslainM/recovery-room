@@ -1683,7 +1683,7 @@ test('stock shows one block per returned unit, grouped by cancelled order, with 
     app.state.incident = data.api_get[`/api/incidents/${caseId}`];
     app.state.run = run;
     const view = app.reviewView(), rows = stockRows(view);
-    assert.match(view, /class="table-note stock-check ok">.*?On the copy, each product went up by exactly the units of its cancelled orders\. One block is one unit; each group is one order\./);
+    assert.match(view, /class="table-note stock-check ok">.*?On the copy, stock changes match the units of the cancelled orders\. One block is one unit; each group is one order\./);
     assert.doesNotMatch(view, /Bars start at zero|stock-track|From cancellations/);
     assert.equal(rows.length, review.stock.length);
     for (const {sku, row} of rows) {
@@ -1713,10 +1713,10 @@ test('a stock change the cancelled orders do not explain is flagged, never drawn
   assert.match(first.row, /<span class="unit-grp odd" title="1 unit not explained by a cancelled order"><i><\/i><\/span>/);
   assert.match(first.row, /<span class="unit-text warn">\+10 units · 5 repeats hold 9<\/span>/);
   assert.match(strip(app.repairFlow(app.state.run.review)), /4 of 4 products changed/);
-  // Two units short: no blocks are added for them; the words say the shortfall.
+  // Two units short: do not draw nine returned units when only seven were recorded.
   app.state.run = run(review.stock.map((p, i) => i === 0 ? {...p, after: p.after - 2} : p));
   first = stockRows(app.reviewView())[0];
-  assert.doesNotMatch(first.row, /unit-grp odd/);
+  assert.doesNotMatch(first.row, /unit-cells/);
   assert.match(first.row, /\+7 units · 5 repeats hold 9/);
   // A fall in stock draws no blocks.
   app.state.run = run(review.stock.map((p, i) => i === 0 ? {...p, after: p.before - 3} : p));
@@ -1732,6 +1732,7 @@ test('a stock change the cancelled orders do not explain is flagged, never drawn
   assert.match(mouse.row, /<span class="unit-text">unchanged<\/span>/);
   assert.doesNotMatch(mouse.row, /data-stock-orders/);
   assert.match(view, /stock-check ok/);
+  assert.doesNotMatch(view, /each product went up/);
 });
 
 test('showing a product\'s orders filters the cancelled list with its own product filter', () => {
@@ -1755,12 +1756,43 @@ test('with quantities or stock counts unknown, the Stock section compares nothin
   const view = (review) => { app.state.run = {...base, review: {...base.review, ...review}}; return app.reviewView(); };
   // One cancellation is not listed: quantities are unknown for every product.
   let html = view({cancellations: base.review.cancellations + 1});
-  assert.match(html, /The cancelled orders' quantities are not all recorded, so stock is not compared with them\./);
+  assert.match(html, /The cancelled orders' quantities are missing or cannot be compared reliably, so stock is not compared with them\./);
   assert.doesNotMatch(html, /unit-cells|stock-check|unit-text warn|restocked by the cancelled orders/);
   assert.match(stockRows(html)[0].row, /<span class="unit-text">\+9 units<\/span>/);
   // A stock count that is not a whole number: the summary leaves the stock row out, the section says why.
   html = view({stock: base.review.stock.map((p, i) => i === 0 ? {...p, after: '169'} : p)});
-  assert.match(html, /Some stock counts are not whole numbers, so stock is not compared with the cancelled orders\./);
-  assert.doesNotMatch(html, /data-open-file="rv-stock"|stock-check|unit-text warn/);
+  assert.match(html, /Some stock counts are missing or cannot be compared reliably, so stock is not compared with the cancelled orders\./);
+  assert.doesNotMatch(html, /data-open-file="rv-stock"|stock-check|unit-text warn|unit-cells| units from /);
   assert.match(stockRows(html)[0].row, /<span class="unit-text">change unknown<\/span>/);
+  assert.match(html, /<span class="rv-count">Change unavailable<\/span>/);
+});
+
+test('showing a product\'s orders clears an earlier search in state and in the field', () => {
+  const data = publicData(), app = harness();
+  const runId = data.api_get['/api/runs?incident=import-retry'].runs[0].id;
+  app.state.incident = data.api_get['/api/incidents/import-retry'];
+  app.state.run = data.api_get[`/api/runs/${runId}`];
+  app.state.changeQuery = 'HEADPHONES';
+  const search = {value: 'HEADPHONES'}, select = {value: ''}, list = {innerHTML: ''};
+  app.context.document.getElementById = id => ({'change-search': search, 'change-filter': select, 'change-table': list})[id];
+  app.showProductOrders('KEYBOARD');
+  assert.equal(app.state.changeQuery, '');
+  assert.equal(search.value, '');
+  assert.equal(select.value, 'KEYBOARD');
+  assert.equal((list.innerHTML.match(/<tr [^>]*data-key="order:/g) || []).length, 5);
+  assert.doesNotMatch(list.innerHTML, /No changed records match|HEADPHONES/);
+});
+
+test('unsafe cancelled-unit totals cannot produce a stock success claim', () => {
+  const data = publicData(), app = harness();
+  const runId = data.api_get['/api/runs?incident=import-retry'].runs[0].id, base = data.api_get[`/api/runs/${runId}`];
+  app.state.incident = data.api_get['/api/incidents/import-retry'];
+  const review = {...base.review, cancellations: 2,
+    changes: base.review.changes.slice(0, 2).map((ch, i) => ({...ch, before: {...ch.before, sku: 'A', quantity: i ? 1 : Number.MAX_SAFE_INTEGER}})),
+    stock: [{sku: 'A', name: 'A', before: 10, after: 12}]};
+  app.state.run = {...base, review};
+  const html = app.reviewView();
+  assert.doesNotMatch(html, /stock-check|unit-cells| units from |restocked by the cancelled orders/);
+  assert.match(stockRows(html)[0].row, /<span class="unit-text">\+2 units<\/span>/);
+  assert.match(strip(html), /quantities.*cannot be compared reliably/);
 });

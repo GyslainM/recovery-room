@@ -690,7 +690,10 @@ details.tl-card>.tl-head:hover{background:var(--hover)}
 /* Command palette */
 .demo-label{flex:none;order:3;padding:2px 8px;border-radius:var(--r-pill);background:var(--raised);color:var(--muted);font-size:var(--fs-1);font-weight:500;white-space:nowrap}
 .demo-label[hidden]{display:none}
-@media (max-width:420px){ .demo-label-more{display:none} }
+@media (max-width:420px){
+  .demo-label-more{display:none}
+  .demo-label{padding-inline:calc(var(--s1)/2)}
+}
 .eval-story{margin:0 0 var(--s2);font-size:var(--fs-3);line-height:1.6}
 .palette-trigger{display:inline-flex;align-items:center;gap:8px;min-width:0;width:min(360px,40vw);margin-left:auto;padding:5px 6px 5px 10px;border-radius:var(--r-md);border:1px solid var(--line-2);background:var(--surface);color:var(--faint);font-size:var(--fs-3);text-align:left}
 .palette-trigger:hover{border-color:var(--line-3);color:var(--muted)}
@@ -831,7 +834,6 @@ details.tl-card>.tl-head:hover{background:var(--hover)}
 .stock-orders{display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
 .stock-orders .icon{width:13px;height:13px}
 .icon.up{transform:rotate(180deg)}
-.stock-track line{stroke:var(--ink);stroke-width:1;vector-effect:non-scaling-stroke}
 
 /* What happened: the evidence as a git log, then the compared runs */
 .recon{margin:var(--s3) 0 var(--s4);padding:var(--s3) 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}

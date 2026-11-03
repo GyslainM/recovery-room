@@ -2092,29 +2092,35 @@ function summaryRows(review) {
 function stockLedger(review) {
   const stock = review.stock || [], bySku = new Map();
   const changes = [...(review.changes || [])].sort((a, b) => String(a.before?.created_at || '').localeCompare(String(b.before?.created_at || '')));
-  const quantitiesKnown = changes.length === review.cancellations && changes.every(ch => typeof ch.before?.sku === 'string'
-    && ch.before.sku.length > 0 && isCount(ch.before.quantity) && ch.before.quantity > 0);
   for (const ch of changes) { const sku = ch.before?.sku; if (!bySku.has(sku)) bySku.set(sku, []); bySku.get(sku).push(ch); }
+  const quantitiesKnown = changes.length === review.cancellations && changes.every(ch => typeof ch.before?.sku === 'string'
+    && ch.before.sku.length > 0 && isCount(ch.before.quantity) && ch.before.quantity > 0)
+    && [...bySku.values()].every(orders => isCount(orders.reduce((n, ch) => n + ch.before.quantity, 0)));
   const products = stock.map(p => {
     const orders = bySku.get(p.sku) || [];
     const units = quantitiesKnown ? orders.reduce((n, ch) => n + ch.before.quantity, 0) : NaN;
     const delta = Number.isSafeInteger(p.before) && Number.isSafeInteger(p.after) ? p.after - p.before : NaN;
-    const known = isCount(units) && Number.isSafeInteger(delta);
-    return {p, orders, units, delta, matches: known && delta === units, flagged: known && delta !== units};
+    return {p, orders, units, delta};
   });
   const countsKnown = products.every(x => Number.isSafeInteger(x.delta));
-  const orphan = [...bySku.keys()].some(sku => !stock.some(p => p.sku === sku)), shifted = products.filter(x => x.delta !== 0);
+  for (const x of products) {
+    x.known = quantitiesKnown && countsKnown;
+    x.matches = x.known && x.delta === x.units;
+    x.flagged = x.known && x.delta !== x.units;
+  }
+  const orphan = [...bySku.keys()].some(sku => !stock.some(p => p.sku === sku));
+  const shifted = products.filter(x => Number.isSafeInteger(x.delta) && x.delta !== 0);
   return {products, shifted, orphan, quantitiesKnown, countsKnown,
     fromCancelled: quantitiesKnown && countsKnown && shifted.length > 0 && !orphan && products.every(x => x.matches)};
 }
 
 // One block per unit of a product's cancelled orders, grouped by order (amber, like the repeats in What happened);
 // hollow blocks for any part of the change no cancelled order explains. Left out for a fall in stock, a
-// quantity that is not a whole number, or more than 60 blocks: the words beside it still say the counts.
+// shortfall, unknown counts, quantity that is not a whole number, or more than 60 blocks: words keep the counts.
 const UNIT_CAP = 60;
 function unitCells(x) {
   const qty = x.orders.map(ch => ch.before?.quantity), extra = x.delta - x.units;
-  if (!isCount(x.units) || !qty.every(q => Number.isSafeInteger(q) && q > 0) || !Number.isSafeInteger(x.delta) || x.delta < 0) return '';
+  if (!x.known || !isCount(x.units) || !qty.every(q => Number.isSafeInteger(q) && q > 0) || !Number.isSafeInteger(x.delta) || x.delta < x.units) return '';
   const total = x.units + Math.max(0, extra);
   if (!total || total > UNIT_CAP) return '';
   const groups = x.orders.map((ch, i) => `<span class="unit-grp" title="${escape(`${ch.before.id} · ${qty[i]} ${qty[i] === 1 ? 'unit' : 'units'}${ch.duplicate_of ? ` · repeat of ${ch.duplicate_of}` : ''}`)}">${'<i></i>'.repeat(qty[i])}</span>`).join('');
@@ -2135,8 +2141,11 @@ function unitLabel(x) {
 // "Show its N orders": the cancelled list above, filtered to this product with its existing filter.
 function showProductOrders(sku) {
   state.filter = sku;
+  state.changeQuery = '';
   const select = document.getElementById?.('change-filter'), list = document.getElementById?.('change-table');
+  const search = document.getElementById?.('change-search');
   if (select) select.value = sku;
+  if (search) search.value = '';
   if (list && active().review) { list.innerHTML = changesTable(active().review.changes); markSelection(); }
   openReviewFile('rv-cancelled');
 }
@@ -2165,7 +2174,6 @@ function keptTable(rows) {
 
 function diffView(review) {
   const skus = [...new Set(review.changes.map(c => c.before.sku))].sort();
-  const stockChanged = review.stock.filter(p => p.after !== p.before);
   const later = laterIds(review);
   const checkout = review.preserved_orders.filter(o => later.has(o.id)), others = review.preserved_orders.filter(o => !later.has(o.id));
   const n = review.changes.length, kept = review.preserved_orders.length;
@@ -2178,23 +2186,24 @@ function diffView(review) {
     <div id="change-table">${changesTable(review.changes)}</div>`);
   const ledger = stockLedger(review), odd = ledger.products.filter(x => x.flagged).length;
   // The change symbol is said once in the heading when every product changed; a column only when they differ.
-  const mixed = ledger.shifted.length > 0 && ledger.shifted.length < review.stock.length;
+  const mixed = ledger.countsKnown && ledger.shifted.length > 0 && ledger.shifted.length < review.stock.length;
   const check = !ledger.countsKnown
-    ? '<p class="table-note">Some stock counts are not whole numbers, so stock is not compared with the cancelled orders.</p>'
+    ? '<p class="table-note">Some stock counts are missing or cannot be compared reliably, so stock is not compared with the cancelled orders.</p>'
     : !ledger.quantitiesKnown
-      ? '<p class="table-note">The cancelled orders\' quantities are not all recorded, so stock is not compared with them.</p>'
+      ? '<p class="table-note">The cancelled orders\' quantities are missing or cannot be compared reliably, so stock is not compared with them.</p>'
       : odd || ledger.orphan
     ? `<p class="table-note stock-check warn">${icon('triangle-alert')}<span>${text(odd ? `${odd} ${odd === 1 ? 'product' : 'products'} changed by a different amount than ${odd === 1 ? 'its' : 'their'} cancelled orders hold, on the copy.` : 'Some cancelled orders are for products not listed in stock.')}</span></p>`
     : ledger.shifted.length
-      ? `<p class="table-note stock-check ok">${icon('circle-check')}<span>On the copy, each product went up by exactly the units of its cancelled orders. One block is one unit; each group is one order.</span></p>`
+      ? `<p class="table-note stock-check ok">${icon('circle-check')}<span>On the copy, stock changes match the units of the cancelled orders. One block is one unit; each group is one order.</span></p>`
       : '<p class="table-note">No product changed on the copy.</p>';
-  const stock = reviewFile('rv-stock', stockChanged.length ? '~' : '=', 'Stock', `${stockChanged.length} of ${review.stock.length} ${review.stock.length === 1 ? 'product' : 'products'} changed`, `
+  const stockCount = ledger.countsKnown ? `${ledger.shifted.length} of ${review.stock.length} ${review.stock.length === 1 ? 'product' : 'products'} changed` : 'Change unavailable';
+  const stock = reviewFile('rv-stock', !ledger.countsKnown || ledger.shifted.length ? '~' : '=', 'Stock', stockCount, `
     ${check}
     ${table([...(mixed ? [''] : []), 'Product', 'Stock on hand', 'Returned to stock', ''], ledger.products.map(x => {
       const p = x.p, n = x.orders.length;
       return [...(mixed ? [`<span class="sym ${x.delta ? 'mod' : 'same'}">${x.delta ? '~' : '='}</span>`] : []),
         `${text(p.name)} <span class="mono faint">${text(p.sku)}</span>`,
-        `<span class="stock-move"><span class="was">${text(p.before)}</span> → ${text(p.after)}</span>`,
+        `<span class="stock-move"><span class="was">${text(Number.isSafeInteger(p.before) ? p.before : 'unknown')}</span> → ${text(Number.isSafeInteger(p.after) ? p.after : 'unknown')}</span>`,
         `<span class="unit-row">${unitCells(x)}<span class="unit-text${x.flagged ? ' warn' : ''}">${text(unitLabel(x))}</span></span>`,
         n ? `<button class="link small stock-orders" type="button" data-stock-orders="${escape(p.sku)}">${text(`Show its ${n} ${n === 1 ? 'order' : 'orders'}`)}${icon('arrow-down', 'up')}</button>` : ''];
     }), review.stock.map(p => selAttrs(`product:${p.sku}`)))}`);
