@@ -27,7 +27,7 @@ function harness(handler, options = {}) {
     setInterval: (fn) => { intervals.push(fn); return intervals.length; }, clearInterval: (id) => { cleared.push(id); }, intervals, cleared,
   };
   vm.createContext(context);
-  vm.runInContext(source + '\nrender = () => { globalThis.renderCalls++; };\nrenderPanel = () => {};\nglobalThis.subject = {gitSegments, state, download, reviewView, exportStatus, recheckExport, act, changesView, checksTab, sqlView, modeInfo, repairFlow, stockVisual, transition, packageView, lineContext, evidenceWrites, reconstructionView, runsCompare, checkContext, checksTab, demoDefault, staticContract, demoStartCase, guardrailMoment, guardrailView, timelineItems, displayedSteps, evaluationData, evaluationView, renderActions, replayControls, startReplay, playReplay, pauseReplay, nextReplay, sqlView, paletteCommands, loadSql, copySql, api, statusOf, stepsView, recCitations, recordedConclusion, recordedChangesView, recordedChecksView, startup, timerOn: () => replayTimer !== null};', context);
+  vm.runInContext(source + '\nrender = () => { globalThis.renderCalls++; };\nrenderPanel = () => {};\nglobalThis.subject = {gitSegments, attemptsTree, caseStrip, renderCases, state, download, reviewView, exportStatus, recheckExport, act, changesView, checksTab, sqlView, modeInfo, repairFlow, stockVisual, transition, packageView, lineContext, evidenceWrites, reconstructionView, runsCompare, checkContext, checksTab, demoDefault, staticContract, demoStartCase, guardrailMoment, guardrailView, timelineItems, displayedSteps, evaluationData, evaluationView, renderActions, replayControls, startReplay, playReplay, pauseReplay, nextReplay, sqlView, paletteCommands, loadSql, copySql, api, statusOf, stepsView, recCitations, recordedConclusion, recordedChangesView, recordedChecksView, startup, timerOn: () => replayTimer !== null};', context);
   return {context, nodes, ...context.subject};
 }
 
@@ -1479,4 +1479,75 @@ test('in a branch with repeats, runs of unmarked commits fold into one row and s
   assert.match(view, /<li class="recon-tick repeat" data-i="1"/);
   // Without marks nothing folds: the branch itself starts folded instead.
   assert.doesNotMatch(app.reconstructionView(), /gl-fold/);
+});
+
+// ---------- Sidebar spine: the open case's attempts branch off the case line; closed cases show a strip ----------
+
+function sidebarState(app) {
+  app.state.cases = [{id: 'case-a', title: 'Case A'}, {id: 'case-b', title: 'Case B'}, {id: 'case-c', title: 'Case C'}];
+  app.state.recordings.set('case-a', {status: 'ok', list: [
+    {id: 'r3', outcome: 'repair', fixture_matches: true, recorded_at: '2026-10-28T15:25:38Z'},
+    {id: 'r2', outcome: 'stop', fixture_matches: false, recorded_at: '2026-10-28T15:22:43Z'},
+    {id: 'r1', outcome: 'error', fixture_matches: true, recorded_at: '2026-10-28T14:21:56Z'}]});
+  app.state.recordings.set('case-b', {status: 'ok', list: [{id: 'b1', outcome: 'incomplete', fixture_matches: true}]});
+  app.state.incident = {id: 'case-a', title: 'Case A'};
+}
+const classes = (html) => [...html.matchAll(/class="([^"]*)"/g)].flatMap(m => m[1].split(' '));
+const attempts = (html) => [...html.matchAll(/<button class="run-item attempt([^"]*)"[^>]*>(.*?)<\/button>/g)].map(m => ({cls: m[1].trim(), body: m[2]}));
+
+test('the open case branches off the spine and lights the rail down to the attempt on screen', () => {
+  const app = harness();
+  sidebarState(app);
+  app.state.source = 'recorded'; app.state.recId = 'r2';
+  const tree = app.attemptsTree('case-a');
+  assert.match(tree, /^<div class="tree has-current" role="group" aria-label="Attempts on this case"><svg class="tree-fork"/);
+  assert.match(tree, /<svg class="tree-merge"[^>]*>.*<\/svg><\/div>$/);
+  const items = attempts(tree);
+  assert.deepEqual(items.map(i => i.cls), ['lit', 'current', '', '']); // lit above the current run, plain below it
+  assert.deepEqual(items.map(i => i.body.match(/class="att-dot ([^"]+)"/)[1]), ['t-ok', 't-warn', 't-danger', 't-empty']);
+  assert.deepEqual(items.map(i => i.body.match(/class="attempt-label">([^<]+)/)[1]), ['Meta run 3', 'Meta run 2', 'Meta run 1', 'Script baseline']);
+  // The outcome word is in the name, not on screen; a recording on different inputs says so.
+  assert.deepEqual(items.map(i => i.body.match(/class="sr-only"> · ([^<]+)/)[1]), ['repair', 'stopped', 'error', 'not run']);
+  assert.match(items[1].body, /<span class="attempt-meta warn">inputs differ<\/span>/);
+  assert.match(tree, /aria-current="true" title="Meta run 2 · Stopped · recorded · [^"]+ · recorded, not live · inputs differ from this case"/);
+  assert.equal((tree.match(/aria-current="true"/g) || []).length, 1);
+  assert.doesNotMatch(items[3].body, /attempt-meta/); // a script that has not run has no time
+  // Tone classes never collide with the app's own .empty panel.
+  assert.ok(!classes(tree).includes('empty'));
+  assert.doesNotMatch(tree, /att-tag/);
+});
+
+test('a script run on screen lights every recording above it and shows its own outcome', () => {
+  const app = harness();
+  sidebarState(app);
+  const runs = [{id: 'run-new', incident_id: 'case-a', status: 'failed_checks', created_at: '2026-11-02T23:57:51Z'}, {id: 'run-old', incident_id: 'case-a', status: 'ready_for_review'}];
+  app.state.history.set('case-a', runs);
+  app.state.source = 'script'; app.state.run = runs[0];
+  const items = attempts(app.attemptsTree('case-a'));
+  assert.deepEqual(items.map(i => i.cls), ['lit', 'lit', 'lit', 'current', '']);
+  assert.deepEqual(items.slice(3).map(i => i.body.match(/class="att-dot ([^"]+)"/)[1]), ['t-danger', 't-ok']);
+  assert.deepEqual(items.slice(3).map(i => i.body.match(/class="sr-only"> · ([^<]+)/)[1]), ['failed', 'passed']);
+  assert.match(items[3].body, /<span class="attempt-meta">[^<]+<\/span>/);
+  // With nothing of this case on screen the fork stays unlit.
+  app.state.run = {id: 'elsewhere'};
+  assert.match(app.attemptsTree('case-a'), /^<div class="tree" role="group"/);
+});
+
+test('closed cases show one square per outcome, hollow while the script has not run', () => {
+  const app = harness();
+  sidebarState(app);
+  assert.equal(app.caseStrip('case-a', null), '<span class="case-strip" aria-hidden="true"><i class="t-ok"></i><i class="t-warn"></i><i class="t-danger"></i><i class="t-empty"></i></span>');
+  assert.equal(app.caseStrip('case-b', {status: 'stopped'}), '<span class="case-strip" aria-hidden="true"><i class="t-warn"></i><i class="t-warn"></i></span>');
+  assert.equal(app.caseStrip('case-c', {status: 'proposed'}), '<span class="case-strip" aria-hidden="true"><i class="t-plain"></i></span>');
+  app.renderCases();
+  const html = app.nodes.get('#cases').innerHTML;
+  const rows = [...html.matchAll(/<button class="case[^"]*" data-case="([^"]+)"[^>]*aria-label="([^"]+)"[^>]*>(.*?)<\/button>/g)];
+  assert.deepEqual(rows.map(r => r[1]), ['case-a', 'case-b', 'case-c']);
+  assert.deepEqual(rows.map(r => r[2]), ['01 Case A · Not started · 3 recorded runs', '02 Case B · Not started · 1 recorded run', '03 Case C · Not started']);
+  assert.deepEqual(rows.map(r => r[3].match(/<span class="case-ix" aria-hidden="true">(\d+)<\/span>/)[1]), ['01', '02', '03']);
+  assert.doesNotMatch(rows[0][3], /case-strip/); // the open case shows its attempts instead
+  assert.match(rows[1][3], /<span class="case-strip" aria-hidden="true"><i class="t-warn"><\/i><i class="t-empty"><\/i><\/span>/);
+  assert.match(html, /<\/button><div class="tree/); // the attempts follow the open case's row
+  assert.doesNotMatch(html, /case-count/);
+  assert.ok(!classes(html).includes('empty'));
 });

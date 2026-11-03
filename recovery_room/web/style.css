@@ -82,13 +82,26 @@ a{color:inherit}
 .side-icon{width:28px;height:28px;color:var(--faint)}
 .side-icon .icon{width:16px;height:16px}
 .side-label{display:flex;justify-content:space-between;height:26px;align-items:center;margin:0;padding:0 8px;font-size:var(--fs-2);color:var(--faint)}
-#cases{display:flex;flex-direction:column;gap:1px}
-.case{display:flex;align-items:center;gap:9px;width:100%;height:30px;padding:0 8px;border-radius:var(--r-md);border:0;color:var(--muted);text-align:left;font-size:var(--fs-3);line-height:1}
+#cases{position:relative;display:flex;flex-direction:column;gap:0}
+.case{position:relative;display:flex;align-items:center;gap:6px;width:100%;height:32px;padding:0 8px 0 4px;border-radius:var(--r-md);border:0;color:var(--muted);text-align:left;font-size:var(--fs-3);line-height:1}
+/* The case spine: one line through every case's ring, drawn as the segments between rings. */
+.case::before,.case::after,.tree::before{content:'';position:absolute;left:32.5px;width:2px;background:var(--line-2);pointer-events:none}
+.case::before{top:0;height:calc(50% - 9px)}
+.case::after{top:calc(50% + 9px);bottom:0}
+#cases>.case:first-child::before,#cases>.case:last-child::after{display:none}
+.case-ix{flex:none;width:16px;font:var(--fs-1)/1 var(--mono);color:var(--faint);text-align:right}
+.case.active .case-ix{color:var(--muted)}
+.case.active .ring{border-radius:50%;box-shadow:0 0 0 2px var(--raised),0 0 0 3.5px var(--accent-line)}
+.case-strip{display:inline-flex;flex:none;gap:2px}
+.case-strip i{width:5px;height:10px;border-radius:var(--r-xs);background:var(--chart-neutral)}
+.case-strip i.t-ok{background:var(--accent)}
+.case-strip i.t-warn{background:var(--warn)}
+.case-strip i.t-danger{background:var(--danger)}
+.case-strip i.t-empty{background:none;box-shadow:inset 0 0 0 1px var(--faint)}
 .case:hover:not(:disabled){background:var(--hover);color:var(--ink)}
 .case.active{background:var(--raised);color:var(--ink)}
 .case.loading .ring{animation:pulse 1.1s ease-in-out infinite}
 .case-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.case-count{flex:none;font-size:var(--fs-2);color:var(--faint);font-variant-numeric:tabular-nums}
 .ring{flex:none;display:block}
 .ring-track{fill:none;stroke:var(--line-2);stroke-width:1.4}
 .ring.none .ring-track{stroke-dasharray:2.2 2}
@@ -99,16 +112,35 @@ a{color:inherit}
 .ring.danger .ring-track{stroke:var(--danger)}
 .ring.danger rect,.ring.danger circle:not(.ring-track){fill:var(--danger)}
 /* The open case's attempts hang off a thin neutral tree line. */
-.tree{margin:1px 0 6px 15px;padding-left:7px;border-left:1px solid var(--line-2)}
-.attempt{display:flex;align-items:center;gap:8px;width:100%;height:28px;padding:0 8px;border-radius:var(--r-md);border:0;color:var(--muted);text-align:left;font-size:var(--fs-3);white-space:nowrap}
+/* The open case's attempts: a branch off the spine (x 33.5) at x 53.5 that rejoins it, lit to the attempt on screen. */
+.tree{position:relative;margin:0;padding:0 0 14px;animation:tree-in var(--dur-1) var(--ease-out)}
+.tree::before{top:0;bottom:0}
+@keyframes tree-in{from{opacity:0;transform:translateY(-3px)}}
+.tree-fork,.tree-merge{position:absolute;left:0;width:60px;height:14px;fill:none;stroke:var(--line-2);stroke-width:2;stroke-linecap:round;pointer-events:none}
+.tree-fork{top:0}
+.tree-merge{bottom:0}
+.tree.has-current .tree-fork{stroke:var(--accent)}
+.attempt{position:relative;display:flex;align-items:center;gap:6px;width:100%;height:28px;padding:0 8px 0 64px;border-radius:var(--r-md);border:0;color:var(--muted);text-align:left;font-size:var(--fs-3);white-space:nowrap}
+.attempt::before,.attempt::after{content:'';position:absolute;left:52.5px;width:2px;background:var(--line-2);pointer-events:none}
+.attempt::before{top:0;height:50%}
+.attempt::after{top:50%;bottom:0}
+.tree>.attempt:first-of-type::before{display:none}
+.attempt.lit::before,.attempt.lit::after,.attempt.current::before{background:var(--accent)}
+.att-dot{position:absolute;z-index:1;left:48.5px;top:50%;width:10px;height:10px;margin-top:-5px;border-radius:50%;box-sizing:border-box;border:2px solid var(--surface);background:var(--chart-neutral)}
+.att-dot.t-ok{background:var(--accent)}
+.att-dot.t-warn{background:var(--warn)}
+.att-dot.t-danger{background:var(--danger)}
+.att-dot.t-empty{background:var(--surface);box-shadow:inset 0 0 0 1.5px var(--faint)}
+.attempt.current .att-dot{box-shadow:0 0 0 1.5px var(--accent)}
+.attempt.current .att-dot.t-empty{box-shadow:inset 0 0 0 1.5px var(--faint),0 0 0 1.5px var(--accent)}
 .attempt:hover{background:var(--hover);color:var(--ink)}
-.attempt.current{background:var(--raised);color:var(--ink)}
+.attempt.current{background:var(--raised);color:var(--ink);font-weight:500}
 .attempt-icon{flex:none;width:14px;height:14px;color:var(--faint)}
 .attempt-icon.tone-ok{color:var(--accent-ink)}
 .attempt-icon.tone-warn{color:var(--warn-ink)}
 .attempt-icon.tone-danger{color:var(--danger-ink)}
 .attempt-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
-.attempt-meta{flex:none;font-size:var(--fs-2);color:var(--faint);font-variant-numeric:tabular-nums}
+.attempt-meta{flex:none;margin-left:auto;font:var(--fs-1) var(--mono);color:var(--faint);font-variant-numeric:tabular-nums}
 .attempt-meta.warn{color:var(--warn-ink)}
 .warn-chip{border-color:var(--warn-line);color:var(--warn-ink)}
 .link.small{font-size:var(--fs-2)}
@@ -912,7 +944,8 @@ details.tl-card>.tl-head:hover{background:var(--hover)}
   .app.nav-rail .sidebar{padding:12px 8px;align-items:center}
   .app.nav-rail .side-head{flex-direction:column;height:auto;gap:4px;padding:0;margin-bottom:12px}
   .app.nav-rail .brand{flex:none;margin-bottom:6px}
-  .app.nav-rail .brand-name,.app.nav-rail .side-label,.app.nav-rail .case-title,.app.nav-rail .case-count,.app.nav-rail .tree,.app.nav-rail .side-footer-text{display:none}
+  .app.nav-rail .brand-name,.app.nav-rail .side-label,.app.nav-rail .case-title,.app.nav-rail .case-ix,.app.nav-rail .case-strip,.app.nav-rail .tree,.app.nav-rail .side-footer-text{display:none}
+  .app.nav-rail .case::before,.app.nav-rail .case::after{left:calc(50% - 1px)}
   .app.nav-rail .case{width:36px;justify-content:center;padding:0}
   .app.nav-rail .side-footer{padding:10px 0 2px;justify-content:center}
 }

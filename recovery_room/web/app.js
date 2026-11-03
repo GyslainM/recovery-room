@@ -342,25 +342,43 @@ function ringSvg(status) {
   return `<svg class="ring ${tone}" viewBox="0 0 15 15" width="15" height="15" aria-hidden="true" focusable="false"><circle class="ring-track" cx="7.5" cy="7.5" r="6.2"/>${inner}</svg>`;
 }
 
-// The open case lists its attempts on one thread: script runs (newest three) and recorded Meta runs,
-// each with its own outcome icon. Choosing one opens it in its source.
+// Short times for the sidebar's attempts: a script run's clock time, a recording's day.
 const clockShort = (iso) => { const d = asDate(iso); return d ? d.toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'}) : ''; };
 const dayShort = (iso) => { const d = asDate(iso); return d ? d.toLocaleDateString([], {month: 'short', day: 'numeric'}) : 'no date'; };
 
+// Short outcome words and tones for the sidebar: a recording's saved outcome, or a script run's status.
+const REC_TAG = {repair: 'repair', stop: 'stopped', error: 'error', incomplete: 'unfinished'};
+const SCRIPT_TAG = {proposed: ['proposal', 'plain'], ready_for_review: ['passed', 'ok'], failed_checks: ['failed', 'danger'], stopped: ['stopped', 'warn'], blocked: ['blocked', 'warn']};
+const tone = (t) => `t-${t || 'plain'}`;
+const SIDE_FORK = '<svg class="tree-fork" viewBox="0 0 60 14" aria-hidden="true" focusable="false"><path d="M33.5 0C33.5 8,53.5 6,53.5 14"/></svg>';
+const SIDE_MERGE = '<svg class="tree-merge" viewBox="0 0 60 14" aria-hidden="true" focusable="false"><path d="M53.5 0C53.5 8,33.5 6,33.5 14"/></svg>';
+
+// The open case's attempts branch off the case spine and rejoin it, newest Meta run first, then the script
+// runs (newest three). Each has a dot in its outcome's colour (the word is in its name and tooltip); the
+// rail is lit from the case down to the attempt on screen. Choosing one opens it in its source.
 function attemptsTree(caseId) {
   const runs = (state.history.get(caseId) || []).slice(0, 3), recs = state.recordings.get(caseId)?.list || [];
-  const item = (attrs, current, iconHtml, label, meta, title, warn = false) =>
-    `<button class="run-item attempt${current ? ' current' : ''}" ${attrs} aria-current="${current ? 'true' : 'false'}" title="${escape(title)}">${iconHtml}<span class="attempt-label">${text(label)}</span><span class="attempt-meta${warn ? ' warn' : ''}">${text(meta)}</span></button>`;
-  const script = runs.length
-    ? runs.map(r => item(`data-source="script" data-run="${escape(r.id)}"`, !recordedMode() && r.id === state.run?.id, icon('git-compare', 'attempt-icon'),
-        'Script baseline', clockShort(r.created_at), `Script baseline ${shortId(r.id)} · ${statusOf(r)[0]} · started ${started(r.created_at) || 'time not recorded'} · offline, no model`))
-    : [item('data-source="script"', !recordedMode(), icon('git-compare', 'attempt-icon'), 'Script baseline', 'not run', 'Offline script baseline · not run yet')];
-  const meta = recs.map((r, i) => {
-    const n = recs.length - i, [label, tone, iconName] = recOutcome(r), differs = r.fixture_matches === false;
-    return item(`data-source="recorded" data-recording="${escape(r.id)}"`, recordedMode() && r.id === state.recId, icon(iconName, `attempt-icon tone-${tone}`),
-      `Meta run ${n}`, differs ? 'inputs differ' : dayShort(r.recorded_at), `Meta run ${n} · ${label} · ${recordedAt(r.recorded_at) || 'time not recorded'} · recorded, not live${differs ? ' · inputs differ from this case' : ''}`, differs);
+  const entries = recs.map((r, i) => {
+    const n = recs.length - i, [label, look] = recOutcome(r), differs = r.fixture_matches === false;
+    return {attrs: `data-source="recorded" data-recording="${escape(r.id)}"`, current: recordedMode() && r.id === state.recId, tone: look || 'plain',
+      label: `Meta run ${n}`, tag: REC_TAG[r.outcome] || String(r.outcome || 'unknown').replaceAll('_', ' '), meta: differs ? 'inputs differ' : dayShort(r.recorded_at), warn: differs,
+      title: `Meta run ${n} · ${label} · ${recordedAt(r.recorded_at) || 'time not recorded'} · recorded, not live${differs ? ' · inputs differ from this case' : ''}`};
   });
-  return `<div class="tree" role="group" aria-label="Attempts on this case">${meta.join('')}${script.join('')}</div>`;
+  if (runs.length) for (const r of runs) {
+    const [tag, look] = SCRIPT_TAG[r.status] || [String(r.status || '').replaceAll('_', ' '), 'plain'];
+    entries.push({attrs: `data-source="script" data-run="${escape(r.id)}"`, current: !recordedMode() && r.id === state.run?.id, tone: look, label: 'Script baseline', tag, meta: clockShort(r.created_at),
+      title: `Script baseline ${shortId(r.id)} · ${statusOf(r)[0]} · started ${started(r.created_at) || 'time not recorded'} · offline, no model`});
+  } else entries.push({attrs: 'data-source="script"', current: !recordedMode(), tone: 'empty', label: 'Script baseline', tag: 'not run', meta: '', title: 'Offline script baseline · not run yet'});
+  const at = entries.findIndex(e => e.current);
+  const items = entries.map((e, i) => `<button class="run-item attempt${e.current ? ' current' : at > i ? ' lit' : ''}" ${e.attrs} aria-current="${e.current ? 'true' : 'false'}" title="${escape(e.title)}"><i class="att-dot ${tone(e.tone)}" aria-hidden="true"></i><span class="attempt-label">${text(e.label)}</span><span class="sr-only"> · ${text(e.tag)}</span>${e.meta ? `<span class="attempt-meta${e.warn ? ' warn' : ''}">${text(e.meta)}</span>` : ''}</button>`).join('');
+  return `<div class="tree${at >= 0 ? ' has-current' : ''}" role="group" aria-label="Attempts on this case">${SIDE_FORK}${items}${SIDE_MERGE}</div>`;
+}
+
+// A closed case's outcomes at a glance: one square per recorded Meta run (newest first), then the script's.
+function caseStrip(caseId, run) {
+  const recs = state.recordings.get(caseId)?.list || [];
+  const cells = [...recs.map(r => recOutcome(r)[1] || 'plain'), run ? (SCRIPT_TAG[run.status]?.[1] || 'plain') : 'empty'];
+  return `<span class="case-strip" aria-hidden="true">${cells.map(t => `<i class="${tone(t)}"></i>`).join('')}</span>`;
 }
 
 function renderCases() {
@@ -377,8 +395,9 @@ function renderCases() {
     const loading = state.switching === c.id;
     const [label] = loading ? ['Loading…'] : statusOf(run);
     const repeats = ['proposed', 'ready_for_review', 'blocked', 'failed_checks'].includes(run?.status) ? run?.plan?.cancellations?.length : undefined;
-    const name = `${pad(i + 1)} ${c.title} · ${label}${Number.isInteger(repeats) ? ` · ${repeats} repeats` : ''}`;
-    const row = `<button class="case${active ? ' active' : ''}${loading ? ' loading' : ''}" data-case="${escape(c.id)}" ${state.busy ? 'disabled' : ''} ${active ? 'aria-current="page"' : ''} aria-label="${escape(name)}" title="${escape(name)}">${ringSvg(run?.status)}<span class="case-title">${text(c.title)}</span>${Number.isInteger(repeats) ? `<span class="case-count">${repeats}</span>` : ''}</button>`;
+    const recs = state.recordings.get(c.id)?.list || [];
+    const name = `${pad(i + 1)} ${c.title} · ${label}${Number.isInteger(repeats) ? ` · ${repeats} repeats` : ''}${recs.length ? ` · ${recs.length} recorded ${recs.length === 1 ? 'run' : 'runs'}` : ''}`;
+    const row = `<button class="case${active ? ' active' : ''}${loading ? ' loading' : ''}" data-case="${escape(c.id)}" ${state.busy ? 'disabled' : ''} ${active ? 'aria-current="page"' : ''} aria-label="${escape(name)}" title="${escape(name)}"><span class="case-ix" aria-hidden="true">${pad(i + 1)}</span>${ringSvg(run?.status)}<span class="case-title">${text(c.title)}</span>${active ? '' : caseStrip(c.id, run)}</button>`;
     return active && state.incident?.id === c.id ? row + attemptsTree(c.id) : row;
   }).join('');
 }
