@@ -35,6 +35,16 @@ inbox recording, can replay saved steps, and shows actual rejected proposals,
 failed checks and corrections. Playback pacing is not recorded step timing.
 No additional API calls are needed to view that dataset.
 
+A separate [November 4 prospective batch](docs/PROSPECTIVE_RESULTS.md) retained two
+correct repairs, a refusal that failed the strict complete-reading requirement,
+and a connection error; the last two planned cases were not attempted. The
+competent script passed all six offline controls. These results are separate
+from the 16 recordings currently shown in the demo.
+
+Project source: [MIT licence](LICENSE). Bundled fonts and icons retain their
+[third-party notices](THIRD_PARTY_NOTICES.md). [Origin and development assistance](docs/CONTRIBUTIONS.md)
+identify the implementation's provenance and coding tools.
+
 Build and view the recorded demo without a key:
 
 ~~~bash
