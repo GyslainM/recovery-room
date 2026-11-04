@@ -1,4 +1,4 @@
-# Design of the first slice
+# Design
 
 ## Goal
 
@@ -12,7 +12,7 @@ and produce a reviewable artifact with checks that the model cannot edit.
 | --- | --- | --- |
 | Fixture generator | Seed and scenario selection | Synthetic incident, evidence, separate evaluation truth |
 | Agent's SQL tool | Allowlisted original tables | Nothing |
-| Agent's artifact tool | Four allowlisted evidence files | Nothing |
+| Agent's artifact tool | Allowlisted evidence files | Nothing |
 | Rehearsal engine | Snapshot, cited logs, source import and opening stock | Fresh candidate copy |
 | Operational checks | Before/after states and declared evidence | Check results |
 | Exporter | Successful rehearsal and current source/evidence fingerprints | SQL, JSON and HTML artifacts |
@@ -71,7 +71,7 @@ agent tool.
 
 Operational checks are application rules, not a formal proof. Incorrect rules,
 missing real-world side effects, or a different schema can invalidate their value.
-External shipments, payments and refunds are outside this starter's scope.
+External shipments, payments and refunds are outside this project's scope.
 
 ## Export and changing state
 
@@ -88,19 +88,19 @@ sets would need additional concurrency reasoning and tests.
 The application never applies the export to the original. Human review remains
 required; "ready for review" must not be displayed as "production approved."
 
-## Evidence limits and future work
+## Evidence limits
 
-One fixture family, two evidence variants, and several seeds do not measure
-general agent reliability. No live model outcome is established by mock transport
-tests. The next experiment must compare actual model attempts to the competent
-event-aware baseline, retain failures, and use failure patterns withheld during
-development.
+One incident family, a few evidence formats and several seeds do not measure
+general agent reliability. Mock transport tests establish no model outcome. The
+README lists the actual model attempts, failures included, beside the competent
+event-aware baseline. A stronger evaluation would use failure patterns withheld
+during development.
 
-## Local workbench (October 27, 2026)
+## Local workbench
 
 The standard-library HTTP adapter binds to **127.0.0.1** and serves bundled
-HTML/CSS/JavaScript. It creates three curated synthetic cases in a new session
-directory. Routes accept case/run identifiers and allowlisted artifact names;
+HTML/CSS/JavaScript. It creates curated synthetic cases (three by default;
+**--cases** selects from six) in a new session directory. Routes accept case/run identifiers and allowlisted artifact names;
 there are no browser endpoints for arbitrary paths, database uploads, SQL,
 candidate databases, the fixture evaluator, model credentials or live calls.
 Host and Origin checks reject cross-site requests and DNS-rebinding hosts;
@@ -123,13 +123,12 @@ HTML/JSON reports, never a browser action that applies SQL to the source.
 
 Run registries live for one server process; persisted investigation JSON and
 engine artifacts survive shutdown. Browser case-switching retains current runs
-in page memory. Reload/restart recovery and live model integration are future
-work. No frontend dependency or separate implementation of repair rules is used.
+in page memory. The browser never calls a model: the agent runs from the command
+line, and **--recordings** shows its saved runs read-only. No frontend dependency or separate implementation of repair rules is used.
 
 ## Multiple retries and offline evaluation
 
-The workbench now supplies three cases. The additional multiple-retries variant
-adds a second partial attempt before the final full retry: 20 + 20 + 50 imported
+The multiple-retries case adds a second partial attempt before the final full retry: 20 + 20 + 50 imported
 writes, then 10 later purchases. Forty repeated writes can be cancelled using
 the existing grammar. No schema, repair authority, 40-action limit or operational
 checker was extended. Existing complete/missing-evidence generation remains

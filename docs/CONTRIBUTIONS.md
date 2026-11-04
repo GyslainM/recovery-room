@@ -1,30 +1,20 @@
-# Origin and development assistance
+# Contributors
 
-Recovery Room is a new implementation directed by **Gyslain Mucyo**. The build log
-records that an earlier September ambiguous-write study motivated the problem;
-its report and implementation were not copied into this project.
+Recovery Room was built by **Gyslain Mucyo** for the Meta Global AI Developer
+Hackathon. Gyslain chose the problem, set the project's direction and rules,
+reviewed and approved the work, and ran the live Meta experiments. The Git
+history is the full record of the build. An earlier study of ambiguous writes
+motivated the problem; none of its code or report is reused here.
 
-The retained Git history and `docs/BUILD_LOG.md` document the implementation and
-review milestones. The first retained implementation commit is `9b4188d`, dated
-October 27, 2026. Synthetic incident timestamps are fixture data, not evidence
-of when the application was written.
+Tools used:
 
-Development assistance used:
+- **OpenAI Codex**, for development assistance: the Python engine, the agent's
+  tool loop, tests, evaluation tooling, release preparation, and parts of the
+  frontend and branding.
+- **Claude Code**, for development assistance: the web interface's design and
+  implementation, and its frontend tests.
+- **Meta Muse Spark 1.3**, the model inside the product. It investigates
+  incidents through the bounded tool loop. The demo shows its saved runs as
+  recordings, labelled separately from the offline script.
 
-- **OpenAI Codex:** implementation and review of the bounded Python/SQLite engine,
-  tool loop, verification, API contracts, tests, integration, release preparation,
-  and parts of the frontend and branding.
-- **Claude / Claude Code:** frontend design, interaction work, frontend tests,
-  handoff documents, and implementation/review fixes recorded in the history.
-- **Meta Muse Spark 1.3:** actual incident investigations through the bounded tool
-  loop. The demo displays saved calls and outcomes as recordings. Offline script
-  investigations are labelled separately.
-
-Coding assistants and the investigation model are tools, not human teammates.
-The participant must confirm the official submission's human contributor list
-and any participant declarations. This document does not submit that form.
-
-The October 31 locked experiment and November 4 prospective results are separate
-experiments. Their contracts, failures, incomplete attempts and competent-script
-controls are retained in the evaluation documents. The prospective results have
-not been added to the public demo's existing 16-recording library.
+These are tools, not team members.

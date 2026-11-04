@@ -3,7 +3,7 @@
 Base: 7543e3a. Scope: an opt-in synthetic receipt-inbox format and an ambiguous
 variant, a locked three-attempt Meta evaluation, and read-only demo data export.
 No production writes, refunds, image evidence, live browser endpoint or public
-mutable workbench. Claude owns presentation and replay on a separate UI branch.
+mutable workbench.
 
 ## Freeze
 
