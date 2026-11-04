@@ -45,6 +45,10 @@ Project source: [MIT licence](LICENSE). Bundled fonts and icons retain their
 [third-party notices](THIRD_PARTY_NOTICES.md). [Origin and development assistance](docs/CONTRIBUTIONS.md)
 identify the implementation's provenance and coding tools.
 
+Built by **Gyslain Mucyo**, with development assistance from **OpenAI Codex** and
+**Claude Code**. **Meta Muse Spark 1.3** performs the recorded product
+investigations; those runs and the offline script baseline are labelled separately.
+
 Build and view the recorded demo without a key:
 
 ~~~bash

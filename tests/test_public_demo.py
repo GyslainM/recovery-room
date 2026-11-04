@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+from urllib.parse import urljoin
 
 from recovery_room.packaging import package_demo
 from recovery_room.public_server import FILES, load_public, make_public_server
@@ -62,6 +63,30 @@ class PublicDemoTests(unittest.TestCase):
         (self.output / "public/app.js").write_text("changed after packaging")
         with self.assertRaisesRegex(ValueError, "changed after verification"):
             load_public(self.output / "public", self.output / "public-manifest.json")
+
+    def test_public_assets_resolve_at_root_and_repository_mount_without_changing_workbench(self):
+        original = ('<html><head><link href="/style.css"><link href="/favicon.svg">'
+                    '<link href="/fonts/InterVariable.woff2"><script src="/app.js"></script></head>'
+                    '<body><a href="/">Recovery Room home</a></body></html>')
+        style = '@font-face{src:url("/fonts/InterVariable.woff2")} .other{background:none}'
+        (self.web / "index.html").write_text(original, encoding="utf-8")
+        (self.web / "style.css").write_text(style, encoding="utf-8")
+        self.package()
+        index = (self.output / "public/index.html").read_text(encoding="utf-8")
+        css = (self.output / "public/style.css").read_text(encoding="utf-8")
+        for base in ('https://example.test/', 'https://example.test/recovery-room/'):
+            self.assertIn('href="./"', index)
+            self.assertEqual(urljoin(base, './'), base)
+            for name in ('style.css', 'favicon.svg', 'fonts/InterVariable.woff2', 'app.js'):
+                self.assertIn(f'"./{name}"', index)
+                self.assertEqual(urljoin(base, './' + name), base + name)
+            self.assertIn('url("./fonts/InterVariable.woff2")', css)
+            self.assertEqual(urljoin(base + 'style.css', './fonts/InterVariable.woff2'),
+                             base + 'fonts/InterVariable.woff2')
+        self.assertEqual((self.web / "index.html").read_text(encoding="utf-8"), original)
+        self.assertEqual((self.web / "style.css").read_text(encoding="utf-8"), style)
+        self.assertEqual(set(load_public(self.output / 'public', self.output / 'public-manifest.json')),
+                         {'/' + name for name in FILES} | {'/'})
 
     def test_real_http_serves_fixed_get_head_resources_and_refuses_all_actions(self):
         self.package()

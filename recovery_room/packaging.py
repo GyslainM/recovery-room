@@ -24,12 +24,22 @@ def package_demo(data: Path, out: Path, *, web: Path | None = None) -> dict:
     if len(re.findall(r"<html\b[^>]*>", index, flags=re.I)) != 1:
         raise ValueError("Expected exactly one HTML root for the explicit public-demo mode.")
     index = re.sub(r"<html\b([^>]*)>", r'<html\1 data-demo-mode="read-only">', index, count=1, flags=re.I)
+    # Static hosts may mount the demo below /repository/. Keep its asset requests
+    # inside that directory; the local workbench's root URLs are unchanged.
+    for name in FILES:
+        for quote in ('"', "'"):
+            index = index.replace(f'{quote}/{name}{quote}', f'{quote}./{name}{quote}')
+    index = index.replace('href="/"', 'href="./"').replace("href='/'", "href='./'")
     payloads = {"demo-data.json": raw, "index.html": index.encode()}
     for name in FILES.keys() - payloads.keys():
         source = web / name
         if source.is_symlink() or source.resolve().is_relative_to(web.resolve()) is False:
             raise ValueError("Public assets must be regular files inside the frontend.")
-        payloads[name] = source.read_bytes()
+        encoded = source.read_bytes()
+        if name == "style.css":
+            for quote in ('"', "'"):
+                encoded = encoded.replace(f'url({quote}/fonts/'.encode(), f'url({quote}./fonts/'.encode())
+        payloads[name] = encoded
     out = out.resolve()
     out.mkdir(parents=True, exist_ok=False)
     public = out / "public"
