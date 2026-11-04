@@ -72,7 +72,7 @@ node --test tests/test_workbench_ui.cjs
 
 Node is needed only for these frontend tests, not to run the Python workbench.
 
-### Local investigation and review while credits are pending
+### Local investigation and repair review
 
 From CMD on this Windows checkout:
 
@@ -86,13 +86,15 @@ Use **--port 8766** if the default port is busy. No frontend installation, model
 key, external fonts or API access is required. The server binds only to loopback.
 
 1. Choose a supplied synthetic case and inspect its records and paginated evidence.
-2. Start an **offline script** investigation. The timeline records actual function
-   calls and results, including evidence pagination; it is not model reasoning.
+2. Click **Investigate incident** to start an **offline script** investigation.
+   The timeline records actual function calls and results, including evidence
+   pagination; it is not model reasoning.
 3. Inspect the bounded proposal and click citations to open exact evidence lines.
-4. Rehearse on a disposable copy, then choose **Review repair**. Follow changes,
-   checks and SQL; select a record or citation to open its closable Details panel.
-5. Download guarded SQL, the plan, and HTML/JSON reports for human review. Each
-   download checks source, evidence and candidate freshness again.
+4. Click **Test repair on a copy**. A successful test opens **Changes**. Review
+   **Changes**, **Checks** and **SQL**; select a record or citation to open Details.
+5. Use **Download repair SQL** or the repair package's plan and HTML/JSON report
+   downloads for human review. Each download checks source, evidence and candidate
+   freshness again.
 
 The missing-evidence case stops with the missing event IDs and a specific request
 for commit records. It produces no candidate or repair export. This demonstrates
