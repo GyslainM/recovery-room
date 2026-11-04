@@ -136,7 +136,7 @@ class HTTPTests(WorkbenchCase):
     def test_http_flow_and_real_artifact_download(self):
         status, headers, body = self.request("/")
         self.assertEqual(status, 200)
-        self.assertIn(b"Offline demo", body)
+        self.assertIn("Script run · No model".encode(), body)
         self.assertIn(b"No model", body)
         self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
         status, _, body = self.request("/api/incidents/import-retry/investigate", "POST", "{}", {"Content-Type": "application/json"})

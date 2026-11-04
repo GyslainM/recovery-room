@@ -65,7 +65,7 @@ class RecordingHTTPTests(RecordingCase):
             self.assertEqual(self.request('/api/recordings/'+identifier+'/artifacts/repair.sql')[0],404)
             self.assertEqual(self.request('/api/runs/'+identifier+'/rehearse','POST','{}',{'Content-Type':'application/json'})[0],404)
             self.assertEqual(json.loads(self.request('/api/incidents')[2])['mode'],MODE)
-            self.assertIn(b'Offline demo',self.request('/')[2])
+            self.assertIn('Script run · No model'.encode(), self.request('/')[2])
 
     def test_exact_recording_routes_reject_queries_paths_and_unknown_ids(self):
         identifier = json.loads(self.request('/api/incidents/import-retry/recordings')[2])[0]['id']

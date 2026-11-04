@@ -257,7 +257,7 @@ test('a run blocked before rehearsal points to a new investigation, never to reh
 test('an unrecognised mode is shown as reported and never labelled offline or no-model', () => {
   const app = harness();
   const offline = app.modeInfo('offline_deterministic_engine_demo_NOT_a_model_run');
-  assert.equal(offline.short, 'Offline demo · No model');
+  assert.equal(offline.short, 'Script run · No model');
   const other = app.modeInfo('live_meta_agent');
   assert.equal(other.unverified, true);
   assert.match(other.short, /live meta agent/);
@@ -1088,7 +1088,7 @@ test('the public demo reads demo-data.json once and opens on its default case an
   assert.equal(app.state.recId, 'rec-b1');
   assert.equal(app.state.recording.id, 'rec-b1');
   assert.equal(app.nodes.get('#demo-label').hidden, false);
-  assert.equal(app.nodes.get('.side-footer-text').textContent, 'Recorded demo · No live API calls');
+  assert.equal(app.nodes.get('.side-footer-text').textContent, 'Recorded Muse Spark runs');
   assert.equal(app.nodes.get('#notice').hidden, true);
 });
 
@@ -1169,7 +1169,7 @@ test('the public demo blocks every test, file check, SQL, copy and download path
     () => app.loadSql(), () => app.copySql(null)]) {
     app.nodes.get('#notice').innerHTML = '';
     await call();
-    assert.match(app.nodes.get('#notice').innerHTML, /read-only: it cannot investigate, test on a copy, check files, copy SQL or export/);
+    assert.match(app.nodes.get('#notice').innerHTML, /read-only: this page cannot investigate, test on a copy, check files, copy SQL or export/);
   }
   assert.deepEqual(fetches, ['./demo-data.json']);
   assert.equal(app.state.busy, false);
@@ -1183,7 +1183,7 @@ test('the public demo blocks every test, file check, SQL, copy and download path
   const labels = app.paletteCommands('').map(i => i.label);
   assert.ok(!labels.some(l => /investigation|Test repair|Check files|Download/.test(l)), labels.join(' | '));
   assert.ok(labels.includes('Copy run ID'));
-  assert.match(app.sqlView(), /No SQL in this demo/);
+  assert.match(app.sqlView(), /The guarded repair script/);
   assert.doesNotMatch(app.sqlView(), /data-copy-sql|data-reload-sql/);
   assert.doesNotMatch(app.checksTab(), /data-recheck-export/);
   assert.match(app.checksTab(), /Recorded when this baseline was built, not a current check/);
