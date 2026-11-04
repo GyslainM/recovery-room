@@ -1,6 +1,6 @@
 {
   "source_repository": "https://github.com/GyslainM/recovery-room",
-  "source_revision": "4fa19cdf6de924265bb030057af462059117688c",
+  "source_revision": "707ad0c9cae84f7ffbc0ede39d8836bcbca55de6",
   "label": "Recorded demo, not live",
   "model": "muse-spark-1.3",
   "live_api_calls": false,
