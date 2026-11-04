@@ -60,7 +60,8 @@ a{color:inherit}
 .eyebrow{font-size:var(--fs-2);letter-spacing:.02em;color:var(--faint)}
 
 /* App frame */
-.app{--side-default:240px;position:relative;display:grid;grid-template-columns:var(--side-w,var(--side-default)) minmax(0,1fr);height:100dvh;min-height:0;overflow:hidden}
+/* clip, not hidden: a step scrolled into view must move only its own panel, never the fixed frame around it */
+.app{--side-default:240px;position:relative;display:grid;grid-template-columns:var(--side-w,var(--side-default)) minmax(0,1fr);height:100dvh;min-height:0;overflow:hidden;overflow:clip}
 /* Sidebar splitter: invisible until hovered, focused or dragged; then a thin neutral line on the edge. */
 .resizer{position:absolute;top:0;bottom:0;left:calc(var(--side-w,var(--side-default)) - 4px);z-index:5;width:8px;cursor:col-resize;touch-action:none;border-radius:0}
 .resizer:before{content:"";position:absolute;top:0;bottom:0;left:3px;width:2px;background:var(--faint);opacity:0;transition:opacity var(--dur-2) var(--ease-out)}
@@ -70,7 +71,7 @@ a{color:inherit}
 .resizer:focus-visible:before{background:var(--accent);opacity:1}
 .app.resizing{cursor:col-resize;user-select:none}
 .app.resizing .sidebar,.app.resizing .main{pointer-events:none}
-.main{display:flex;flex-direction:column;min-width:0;min-height:0;height:100%;overflow:hidden}
+.main{display:flex;flex-direction:column;min-width:0;min-height:0;height:100%;overflow:hidden;overflow:clip}
 
 /* Sidebar */
 .sidebar{position:relative;height:100%;min-height:0;overflow:auto;display:flex;flex-direction:column;padding:12px 8px 12px;border-right:1px solid var(--line);background:var(--surface)}
@@ -260,7 +261,7 @@ button.step:hover{background:var(--hover);color:var(--ink)}
 
 /* Workspace */
 /* The details column opens for a selection or the guide; otherwise the workspace takes the full width. */
-.workspace{flex:1;display:grid;grid-template-columns:minmax(0,1fr) 360px;align-items:stretch;min-height:0;overflow:hidden}
+.workspace{flex:1;display:grid;grid-template-columns:minmax(0,1fr) 360px;align-items:stretch;min-height:0;overflow:hidden;overflow:clip}
 .workspace.ctx-closed{grid-template-columns:minmax(0,1fr)}
 .workspace.ctx-closed>.context{display:none}
 .guide-toggle[aria-expanded=true]{color:var(--ink)}
