@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import getpass
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -14,6 +16,24 @@ from .checks import evaluate_fixture
 from .fixtures import SCENARIOS, create_incident
 from .recordings import CASE_IDS
 from .repairs import finalize_report, rehearse
+
+
+def ask_for_key() -> bool:
+    """Ask for the Meta key on an interactive terminal, without echo, for this process only.
+
+    The key goes into this process's environment, where the live client reads it. It is never printed,
+    written to a file or sent to the browser. Returns whether a key is now set."""
+    if os.environ.get("MODEL_API_KEY", "").strip():
+        return True
+    if not sys.stdin.isatty():
+        return False
+    try:
+        key = getpass.getpass("Meta API key (hidden; kept in memory for this session only, Enter to skip): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        key = ""
+    if key:
+        os.environ["MODEL_API_KEY"] = key
+    return bool(key)
 
 
 def default_output(prefix: str) -> Path:
@@ -89,8 +109,8 @@ def main(argv: list[str] | None = None) -> int:
     local.add_argument("--port", type=int, default=8765)
     local.add_argument("--recordings", type=Path, help="Server-owned sanitized recording library; no live execution.")
     local.add_argument("--live", action="store_true",
-                       help="Allow Investigate with Muse Spark in the browser. Needs MODEL_API_KEY in this shell; "
-                            "sends the selected case's records and evidence to Meta.")
+                       help="Allow Investigate with Muse Spark in the browser. Asks for the Meta key here, hidden, "
+                            "unless MODEL_API_KEY is already set; sends the selected case's records and evidence to Meta.")
     local.add_argument("--cases", nargs="+", choices=CASE_IDS,
                        help="Opt into distinct built-in cases; defaults remain the original three.")
     benchmark = sub.add_parser("benchmark", help="Evaluate the offline event-aware script on development fixtures; no API calls.")
@@ -129,6 +149,8 @@ def main(argv: list[str] | None = None) -> int:
             value = {key: value for key, value in benchmark_result.items() if key != "trials"}
         elif args.command == "serve":
             from .workbench import serve
+            if args.live:
+                ask_for_key()
             serve(args.out or default_output("workbench"), args.port, recordings=args.recordings,
                   case_ids=tuple(args.cases) if args.cases is not None else None, live=args.live)
             return 0

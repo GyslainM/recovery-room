@@ -112,6 +112,42 @@ class LiveRunTests(unittest.TestCase):
         self.assertGreaterEqual(len(seen), 6)
 
 
+
+class KeyPromptTests(unittest.TestCase):
+    """serve --live asks for the key on the terminal, hidden; it never prints, saves or sends it."""
+
+    def run_serve(self, argv, *, tty, typed=None, env=None):
+        from recovery_room import cli
+        calls = []
+        stdin = type("Stdin", (), {"isatty": lambda self: tty})()
+        with patch.dict(os.environ, env or {}, clear=False),                 patch.object(cli.sys, "stdin", stdin),                 patch.object(cli.getpass, "getpass", side_effect=lambda prompt: calls.append(prompt) or (typed or "")) as prompt,                 patch("recovery_room.workbench.serve", side_effect=lambda *a, **k: calls.append(("serve", k.get("live"), os.environ.get("MODEL_API_KEY")))),                 patch("sys.stdout", new_callable=__import__("io").StringIO) as out:
+            if env is None:
+                os.environ.pop("MODEL_API_KEY", None)
+            code = cli.main(argv)
+            return code, calls, prompt.call_count, out.getvalue()
+
+    def test_live_serve_asks_once_and_keeps_the_key_in_this_process_only(self):
+        code, calls, prompts, out = self.run_serve(["serve", "--live", "--out", self.temp_out()], tty=True, typed="test-key-not-real")
+        self.assertEqual((code, prompts), (0, 1))
+        self.assertIn("hidden", calls[0])
+        self.assertEqual(calls[-1], ("serve", True, "test-key-not-real"))
+        self.assertNotIn("test-key-not-real", out)
+
+    def test_no_prompt_without_a_terminal_without_live_or_with_a_key_already_set(self):
+        _, calls, prompts, _ = self.run_serve(["serve", "--live", "--out", self.temp_out()], tty=False)
+        self.assertEqual((prompts, calls[-1][2]), (0, None))
+        _, _, prompts, _ = self.run_serve(["serve", "--out", self.temp_out()], tty=True, typed="unused")
+        self.assertEqual(prompts, 0)
+        _, calls, prompts, _ = self.run_serve(["serve", "--live", "--out", self.temp_out()], tty=True, typed="unused",
+                                              env={"MODEL_API_KEY": "already-set"})
+        self.assertEqual((prompts, calls[-1][2]), (0, "already-set"))
+
+    def temp_out(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        return str(Path(temp.name) / "session")
+
+
 class LiveHTTPTests(_tw.WorkbenchCase):
     def setUp(self):
         super().setUp()

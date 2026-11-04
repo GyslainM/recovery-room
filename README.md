@@ -76,14 +76,13 @@ model.
 
 ### Local workbench, with the agent live
 
-Set your Meta key in the shell first; it stays in this process and never
-reaches the browser.
-
-```powershell
-$secret = Read-Host "Meta API key" -AsSecureString
-$env:MODEL_API_KEY = [System.Net.NetworkCredential]::new("", $secret).Password
+```bash
 python -m recovery_room serve --live --cases import-retry missing-evidence multiple-retries split-evidence inbox-evidence inbox-ambiguous
 ```
+
+It asks for your Meta API key in the terminal, hidden as you type. The key stays
+in that process's memory: it is never shown, saved, logged or sent to the
+browser. If `MODEL_API_KEY` is already set, it doesn't ask.
 
 Open `http://127.0.0.1:8765`, choose a case and click **Investigate with Muse
 Spark**. The agent runs now, and its steps appear as it reads evidence, queries
@@ -98,9 +97,6 @@ investigation** runs the offline event-aware script instead, then **Test repair
 on a copy** and the guarded SQL download. Add `--recordings <library>` to show
 saved agent runs.
 
-On macOS or Linux, set the key with `read -r -s -p "Meta API key: " MODEL_API_KEY`
-and `export MODEL_API_KEY`.
-
 ### Run the agent from the command line
 
 ```bash
@@ -108,7 +104,8 @@ python -m recovery_room fixture --out runs/live-case --seed 23
 python -m recovery_room agent --incident runs/live-case/incident --out runs/live-case/agent-runs --max-completion-tokens 8192 --max-rounds 24
 ```
 
-The key is read from the environment only and never logged. The default model
+The command-line agent reads the key from `MODEL_API_KEY` only (on Windows,
+`$env:MODEL_API_KEY`; on macOS or Linux, `export MODEL_API_KEY`) and never logs it. The default model
 is `muse-spark-1.3`; choose another with `--model`. Add
 `--scenario missing-evidence` to the fixture to test stopping. Score a run
 against the private answer key afterwards:
