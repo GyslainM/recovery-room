@@ -49,14 +49,13 @@ these results show safe, checked repairs, not that AI is required.
   inbox among people's messages. The original script refused the format in all
   three cases. The unchanged agent made two correct repairs and one justified
   stop. A script adapted to the format reached the same outcomes.
-  [Contract](docs/EVIDENCE_STORY_CONTRACT.md) · [results](docs/EVIDENCE_STORY_RESULTS.md)
 - **A locked batch on fresh cases:** two correct repairs, one stop that failed
   the strict complete-reading rule, and one connection error; the last two cases
   were not run. The script passed all six.
-  [Plan](docs/PROSPECTIVE_EVALUATION.md) · [results](docs/PROSPECTIVE_RESULTS.md)
 
-Every attempt is kept, including failures. The demo shows all 16 recorded runs
-under **How we evaluated**.
+Every attempt is kept, including failures. The [evaluation](docs/EVALUATION.md)
+has the method, every result and the [locked plans](docs/plans/README.md); the
+demo shows all 16 recorded runs under **How we evaluated**.
 
 ## Try it
 
