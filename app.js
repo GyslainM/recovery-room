@@ -10,6 +10,7 @@ const TAB_META = {investigation: ['scan-search', 'Investigation'], evidence: ['f
 const state = {
   // runs: the full run record shown for each case. history: server run summaries per case, newest first.
   incident: null, run: null, cases: [], runs: new Map(), history: new Map(), views: new Map(),
+  liveModel: false, live: new Map(), // live Muse Spark runs: only when the local server was started with --live
   tab: 'investigation', busy: false, switching: null, version: 0,
   files: new Map(), ev: {name: 'events.jsonl', query: '', citedOnly: false, activeRef: null},
   // sheet: the narrow-screen details sheet is open (a selection, or the guide). nav: the phone case drawer.
@@ -560,7 +561,8 @@ function renderSourceSwitch() {
 // Recorded mode header: the fixed provenance label is prominent; no rehearse, SQL or download action exists.
 function renderRecordedHeader() {
   const r = state.recording, list = recordedList();
-  $('#mode-indicator').textContent = r ? recordingLabel(r) : 'Recorded model runs · not live';
+  const justLive = r && liveFor(state.incident?.id)?.status === 'done' && liveFor(state.incident?.id)?.recording_id === r.id;
+  $('#mode-indicator').textContent = r ? (justLive ? 'Muse Spark run · saved just now' : recordingLabel(r)) : 'Recorded model runs · not live';
   $('#mode-indicator').classList.remove('unverified');
   $('#mode-indicator').classList.add('recorded');
   if (r) {
@@ -592,6 +594,14 @@ function renderHeader() {
   $('#title').textContent = incident.title;
   renderSourceSwitch();
   renderActions();
+  if (liveRunning(incident.id)) {
+    $('#mode-indicator').classList.remove('recorded', 'unverified');
+    $('#mode-indicator').textContent = 'Live Muse Spark run · in progress';
+    $('#title-status').innerHTML = '<span class="status warn">Investigating live</span>';
+    $('#incident-meta').innerHTML = '';
+    $('#run-details').hidden = true;
+    return;
+  }
   if (recordedMode()) { renderRecordedHeader(); return; }
   $('#mode-indicator').classList.remove('recorded');
   const mode = run?.mode || incident.mode, info = modeInfo(mode);
@@ -614,12 +624,14 @@ function renderHeader() {
 // setTab re-renders only these buttons. Busy buttons keep their place and show the work in progress.
 function renderActions() {
   if (!state.incident) return;
+  // While Muse Spark works on this case, its progress is the only action on screen.
+  if (liveRunning(state.incident.id)) { $('#header-actions').innerHTML = liveButton(true); return; }
   const {run, busy, tab} = state;
   const button = (cls, attrs, iconName, label) => `<button class="${cls}" ${attrs}>${icon(iconName)}<span>${text(label)}</span></button>`;
   if (recordedMode()) {
     // A recording replays its saved steps; there is no rehearse, SQL or download action.
     const replay = state.recording && displayedSteps(state.recording).length ? button('primary', 'data-replay-start', 'play', 'Replay recorded steps') : '';
-    $('#header-actions').innerHTML = `${button('secondary', 'data-source="script"', 'git-compare', 'Script baseline')}${replay}`;
+    $('#header-actions').innerHTML = `${liveButton(false)}${button('secondary', 'data-source="script"', 'git-compare', 'Script baseline')}${replay}`;
     return;
   }
   if (historicalRun(run)) {
@@ -633,9 +645,9 @@ function renderActions() {
   }
   const working = (label) => `${icon('loader-circle', 'spin')}<span>${label}</span>`;
   const hold = busy ? 'disabled aria-busy="true"' : '';
-  const investigate = (primary) => `<button class="${primary ? 'primary' : 'secondary'}" data-action="investigate" ${run && !primary ? 'title="New offline investigation"' : ''} ${hold}>${busy && state.busyAction === 'investigate' ? working('Reading local evidence…') : `${icon(run ? 'refresh-cw' : 'play')}<span>${run ? 'New offline investigation' : 'Investigate incident'}</span>`}</button>`;
+  const investigate = (primary) => `<button class="${primary ? 'primary' : 'secondary'}" data-action="investigate" ${run && !primary ? 'title="New offline investigation"' : ''} ${hold}>${busy && state.busyAction === 'investigate' ? working('Reading local evidence…') : `${icon(run ? 'refresh-cw' : 'play')}<span>${run ? 'New offline investigation' : state.liveModel ? 'Script investigation' : 'Investigate incident'}</span>`}</button>`;
   let primary = '', secondary = run ? investigate(false) : '';
-  if (!run) primary = investigate(true);
+  if (!run) { primary = state.liveModel ? liveButton(true) : investigate(true); if (state.liveModel) secondary = investigate(false); }
   else if (run.status === 'proposed') primary = `<button class="primary" data-action="rehearse" ${hold}>${busy && state.busyAction === 'rehearse' ? working('Testing on a copy…') : `${icon('flask-conical')}<span>Test repair on a copy</span>`}</button>`;
   else if (run.status === 'stopped') primary = button('primary', 'data-view-missing', 'file-search', 'View missing evidence');
   else if (run.status === 'ready_for_review') primary = ['changes', 'checks', 'sql'].includes(tab)
@@ -644,7 +656,8 @@ function renderActions() {
   else if (run.status === 'failed_checks') primary = tab === 'checks' ? '' : button('primary', 'data-tab="checks"', 'shield-check', 'Review failed checks');
   // Blocked: recovery is a new investigation. Only a run that was rehearsed has a repair to review.
   else if (run.status === 'blocked') { primary = investigate(true); secondary = run.review ? button('secondary', 'data-review-repair', 'git-compare', 'Review blocked repair') : ''; }
-  $('#header-actions').innerHTML = `${secondary}${primary}`;
+  const live = state.liveModel && run ? liveButton(false) : '';
+  $('#header-actions').innerHTML = `${live}${secondary}${primary}`;
 }
 
 function olderRunNote(run) {
@@ -730,7 +743,8 @@ function renderPanel() {
   const views = recordedMode()
     ? {investigation: recordedInvestigationView, evidence: evidenceView, changes: recordedChangesView, checks: recordedChecksView, sql: recordedSqlView}
     : {investigation: investigationView, evidence: evidenceView, changes: changesView, checks: checksTab, sql: sqlView};
-  $('#content').innerHTML = views[state.tab]();
+  const liveNow = state.tab === 'investigation' && liveRunning(state.incident?.id);
+  $('#content').innerHTML = liveNow ? liveView() : (state.tab === 'investigation' ? `${liveView()}${liveSavedNote()}` : '') + views[state.tab]();
   if (state.tab === 'evidence') renderEvidence();
   if (state.tab === 'sql' && !recordedMode()) maybeLoadSql();
   markSelection();
@@ -1276,6 +1290,85 @@ function demoDefault(caseId) {
 function demoStartCase() {
   const def = state.demo?.defaults;
   return def && state.cases.some(c => c.id === def.incident_id) && demoDefault(def.incident_id)?.id === def.recording_id ? def.incident_id : null;
+}
+
+/* ---------- Live Muse Spark runs (local workbench started with --live only) ---------- */
+
+// The server owns the key and the agent's limits. The page can only start a run for the case on screen and
+// read its progress; when the run ends the server saves it as a recording, which then opens like any other.
+const LIVE_POLL_MS = 1200;
+const liveFor = (caseId) => state.live.get(caseId) || null;
+const liveRunning = (caseId) => liveFor(caseId)?.status === 'running';
+
+function liveButton(primary) {
+  const caseId = state.incident?.id;
+  if (!state.liveModel || !caseId) return '';
+  if (liveRunning(caseId)) return `<button class="${primary ? 'primary' : 'secondary'}" disabled aria-busy="true">${icon('loader-circle', 'spin')}<span>Muse Spark is investigating…</span></button>`;
+  return `<button class="${primary ? 'primary' : 'secondary'}" data-live-start title="Runs the Muse Spark agent now. Sends this case's records and evidence to Meta.">${icon('bot')}<span>Investigate with Muse Spark</span></button>`;
+}
+
+async function startLive() {
+  const caseId = state.incident?.id;
+  if (!state.liveModel || !caseId || liveRunning(caseId)) return;
+  try {
+    state.live.set(caseId, await api(`/api/incidents/${encodeURIComponent(caseId)}/live`, true));
+  } catch (error) {
+    notice(`Muse Spark run not started: ${error.message}`);
+    return;
+  }
+  if (state.tab !== 'investigation') state.tab = 'investigation';
+  render();
+  pollLive(caseId);
+}
+
+async function pollLive(caseId) {
+  while (liveRunning(caseId)) {
+    await new Promise(resolve => setTimeout(resolve, LIVE_POLL_MS));
+    try {
+      state.live.set(caseId, await api(`/api/incidents/${encodeURIComponent(caseId)}/live`));
+    } catch (error) {
+      state.live.set(caseId, {...liveFor(caseId), status: 'error', error: error.message});
+    }
+    if (state.incident?.id === caseId) renderLive();
+  }
+  const done = liveFor(caseId);
+  // The saved run joins its case's Meta runs even if the reader moved to another case meanwhile.
+  if (done?.status === 'done' && done.recording_id) await refreshRecordings(caseId);
+  if (state.incident?.id !== caseId) { renderCases(); return; }
+  if (done?.status === 'done' && done.recording_id) setSource('recorded', done.recording_id);
+  else renderLive();
+}
+
+// While steps arrive, redraws only the live panel and the header, so the page does not jump; once the run
+// has ended, the whole page is drawn again.
+function renderLive() {
+  if (!liveRunning(state.incident?.id)) { render(); return; }
+  renderHeader();
+  const panel = document.getElementById?.('live-panel');
+  if (panel && state.tab === 'investigation') panel.outerHTML = liveView();
+  else if (state.tab === 'investigation') renderPanel();
+}
+
+// The run in progress (or its error), above the Investigation tab. Steps are the server's own projection of
+// the transcript, drawn with the same timeline as recordings.
+function liveView() {
+  const caseId = state.incident?.id, live = caseId ? liveFor(caseId) : null;
+  if (!live || !['running', 'error'].includes(live.status)) return '';
+  const steps = Array.isArray(live.steps) ? live.steps : [];
+  const calls = steps.filter(s => s.kind === 'tool_call').length;
+  const head = live.status === 'running'
+    ? `<div class="live-head">${icon('loader-circle', 'spin')}<div><strong>Muse Spark is investigating, live</strong><span>${text(`${live.model || 'Meta model'} · ${calls} ${calls === 1 ? 'tool call' : 'tool calls'} so far · started ${started(live.started_at) || 'just now'}`)}</span></div></div>`
+    : `<div class="callout stop">${icon('circle-x')}<span>${text(`The live run ended with an error: ${String(live.error || 'no detail reported').replace(/\.+$/, '')}. Nothing was changed.`)}</span></div>`;
+  const list = steps.length ? `<ol class="timeline">${timelineItems({id: `live:${caseId}`, steps, incident_id: caseId})}</ol>`
+    : '<p class="small muted">Waiting for the model’s first response…</p>';
+  return `<section class="live-panel" id="live-panel" aria-live="polite" aria-label="Live Muse Spark run">${head}${list}</section>`;
+}
+
+// A run that just finished live opens as a saved recording; say where it came from.
+function liveSavedNote() {
+  const caseId = state.incident?.id, live = caseId ? liveFor(caseId) : null;
+  if (!recordedMode() || !live || live.status !== 'done' || live.recording_id !== state.recId) return '';
+  return `<div class="callout success live-saved">${icon('circle-check')}<span>This run just finished live with Muse Spark and was saved. Everything below comes from it.</span></div>`;
 }
 
 async function refreshRecordings(caseId) {
@@ -3136,6 +3229,7 @@ document.addEventListener('click', event => {
   if (d.run && d.run !== state.run?.id && !state.busy) task = loadRun(d.run);
   if (d.tab) setTab(d.tab);
   if (d.openFile) openReviewFile(d.openFile);
+  if (d.liveStart !== undefined) startLive();
   if (d.stockOrders) showProductOrders(d.stockOrders);
   if (d.reviewRepair !== undefined) reviewRepair();
   if (d.viewMissing !== undefined) viewMissing();
@@ -3300,6 +3394,7 @@ if (STATIC_DEMO) showStaticLabel();
 const startup = api('/api/incidents').then(async data => {
   document.querySelectorAll('.palette-key').forEach(k => { k.textContent = paletteKeyLabel(); });
   state.cases = data.incidents;
+  state.liveModel = !STATIC_DEMO && data.live_model === true;
   if (STATIC_DEMO) state.demo = staticContract(await staticDataset());
   state.guide = !isNarrow() && guidePreferred();
   applyRail();
