@@ -91,7 +91,7 @@ Node is needed only for these frontend tests, not to run the Python workbench.
 From CMD on this Windows checkout:
 
 ~~~cmd
-cd /d "C:\Users\mucyo\projects\recovery-room\recovery-room"
+cd recovery-room
 py -3 -m recovery_room serve
 ~~~
 
@@ -248,9 +248,9 @@ partial response are executed, and no repair is exported on the strength of
 an incomplete response. Raw responses and usage remain saved, with no automatic
 retry. Increasing the ceiling does not guarantee completion. Preserve failed
 attempts and report changed-budget runs separately. The browser remains an
-explicitly offline demonstration. Approved proposal C now supplies a separate
-read-only recording API; frontend integration is handed to Claude in
-**[docs/RECORDED_RUNS_HANDOFF.md](docs/RECORDED_RUNS_HANDOFF.md)**.
+explicitly offline demonstration. A separate read-only recording API supplies
+saved model runs. Its boundaries and verification are described in the
+[design](docs/DESIGN.md) and [validation](VALIDATION.md) documents.
 
 ### Recorded model runs (read-only)
 
@@ -424,8 +424,7 @@ Use the actual model trace when claiming model behavior.
 - **tests/** — data integrity, evidence, stale state and agent-boundary tests.
 - **docs/DESIGN.md** — the trust model and architecture.
 - **docs/BUILD_LOG.md** — work origin and outstanding validation.
-- **docs/UI_HANDOFF.md** — Claude's UI handoff and the subsequent integration review.
-- **docs/PARALLEL_WORK.md** — frontend/backend ownership and the API contract.
+- **VALIDATION.md** — current checks and dated validation observations.
 
 ## Technical references
 

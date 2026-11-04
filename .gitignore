@@ -13,3 +13,4 @@ build/
 dist/
 runs/
 .pytest_cache/
+internal-notes/
