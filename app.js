@@ -56,7 +56,7 @@ const RUN_STATUS = {
 // with no offline or no-model claim, so a future recorded or live mode cannot be mislabelled.
 const MODE_INFO = {
   offline_deterministic_engine_demo_NOT_a_model_run: {
-    short: 'Offline demo · No model', long: 'Offline deterministic script · no model',
+    short: 'Script run · No model', long: 'Event-aware script · no model',
     method: 'Actual local function calls, without model or API calls. Recorded Meta runs are shown separately as read-only history.',
   },
 };
@@ -91,9 +91,9 @@ function setLoading(on) {
 // and answers each GET from it by exact path. Nothing reaches an API and nothing falls back to one. Without
 // the attribute (the local workbench) startup is unchanged. RR_STATIC_DEMO_V1 marks this adapter.
 const STATIC_DEMO = document.documentElement?.dataset?.demoMode === 'read-only';
-const STATIC_LABEL = 'Recorded demo · No live API calls';
+const STATIC_LABEL = 'Recorded Muse Spark runs';
 const STATIC_CAPABILITIES = ['investigate', 'rehearse', 'export', 'live_model'];
-const READ_ONLY_NOTE = 'This recorded demo is read-only: it cannot investigate, test on a copy, check files, copy SQL or export.';
+const READ_ONLY_NOTE = 'These recorded runs are read-only: this page cannot investigate, test on a copy, check files, copy SQL or export.';
 const plainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const own = (o, key) => plainObject(o) && Object.prototype.hasOwnProperty.call(o, key);
 const copyJson = (v) => JSON.parse(JSON.stringify(v));
@@ -1340,9 +1340,9 @@ function recBanner(r, compact = false, observation = false) {
   const when = recordedAt(p.recorded_at) || 'time not recorded';
   const source = p.timestamp_source ? ` (${TIMESTAMP_SOURCE[p.timestamp_source] || p.timestamp_source.replaceAll('_', ' ')})` : '';
   const line = compact
-    ? `<span>${text(`${p.model || 'Model not recorded'} · recorded ${recordedShort(p.recorded_at)}`)}</span>`
-    : `<span>${text(`${p.model || 'Model not recorded'} · recorded ${when}${source}`)}</span>`;
-  return `<div class="rec-banner${compact ? ' compact' : ''}">${icon('history')}<div><strong>${text(recordingLabel(r))}</strong>${line}</div></div>
+    ? `<strong>${text(p.model || 'Model not recorded')}</strong><span>${text(`Recorded ${recordedShort(p.recorded_at)}`)}</span>`
+    : `<strong>${text(p.model || 'Model not recorded')}</strong><span>${text(`Recorded ${when}${source}`)}</span>`;
+  return `<div class="rec-banner${compact ? ' compact' : ''}" title="${escape(recordingLabel(r))}">${icon('history')}<div>${line}</div></div>
     ${observation ? `<p class="rec-observation">${icon('history')}<span>${text(r.review_observation || 'Recorded in the test on a copy; not a current export check.')}</span></p>` : ''}
     ${r.fixture_matches === false || r.fixture_warning ? `<div class="callout stop rec-warning">${icon('triangle-alert')}<span>${text(r.fixture_warning || 'Recording inputs do not match the served case. Current-case citations are disabled.')}</span></div>` : ''}
     ${r.incident_id !== state.incident?.id ? `<div class="callout stop rec-warning">${icon('triangle-alert')}<span>${text(`This recording belongs to another case (${r.incident_id}). Links into the current case are disabled.`)}</span></div>` : ''}`;
@@ -1836,8 +1836,12 @@ function recordedChecksView() {
     ${checksView(review.checks)}`;
 }
 
+// One real guarded script from the repository, so a reader of recorded runs can still see what a repair delivers.
+const EXAMPLE_SQL = 'https://github.com/GyslainM/recovery-room/blob/main/examples/rehearsal/repair.sql';
+const exampleSqlLink = () => `<p class="small"><a class="link" href="${EXAMPLE_SQL}" target="_blank" rel="noopener noreferrer">See a guarded repair script from a test of the first case</a></p>`;
+
 function recordedSqlView() {
-  return `${state.recording ? recBanner(state.recording, true) : ''}${emptyState('No SQL for recorded runs', 'Recordings are read-only history with no downloads. Guarded SQL comes only from a current offline test, and it is refused if files changed since testing.', 'database')}`;
+  return `${state.recording ? recBanner(state.recording, true) : ''}${emptyState('Recorded runs keep their review, not a script', 'A guarded SQL script is issued only for a fresh, passing test on a copy, and refused if anything changed since. Recordings are history, so they carry none.', 'database')}${exampleSqlLink()}`;
 }
 
 /* ---------- Evidence ---------- */
@@ -2328,9 +2332,9 @@ function sqlTint(line) {
 function sqlView() {
   const run = state.run;
   if (!run?.review) return noReview(run, 'the guarded repair script');
-  if (historicalRun(run)) return `<div class="section-heading"><h2>No SQL in this demo</h2>${badge('Read-only', true)}</div>
-    <div class="callout">A repair package needs a current local test on a copy, which this recorded demo does not run. No SQL file is included, so there is nothing to copy or download.</div>
-    <p class="small muted">In the local workbench the server serves repair.sql only for a current, passing test on a copy, and refuses it if files changed since testing.</p>`;
+  if (historicalRun(run)) return `<div class="section-heading"><h2>The guarded repair script</h2>${badge('Read-only', true)}</div>
+    <div class="callout">A repair script is issued only for a fresh, passing test on a copy, and refused if anything changed since. This page shows recorded runs, so it carries none to copy or download.</div>
+    ${exampleSqlLink()}`;
   if (run.status !== 'ready_for_review') return `<div class="section-heading"><h2>Export unavailable</h2>${badge(statusOf(run)[0], true)}</div>
     <div class="callout stop">${text(run.summary)}</div>
     <p class="small muted">The server only serves SQL for a current, passing test on a copy. Every request is refused if files changed since testing.</p>`;
