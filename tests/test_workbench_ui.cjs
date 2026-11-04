@@ -27,7 +27,7 @@ function harness(handler, options = {}) {
     setInterval: (fn) => { intervals.push(fn); return intervals.length; }, clearInterval: (id) => { cleared.push(id); }, intervals, cleared,
   };
   vm.createContext(context);
-  vm.runInContext(source + '\nrender = () => { globalThis.renderCalls++; };\nrenderPanel = () => {};\nglobalThis.subject = {gitSegments, attemptsTree, caseStrip, renderCases, setBranch, state, download, reviewView, exportStatus, recheckExport, act, changesView, checksTab, sqlView, modeInfo, repairFlow, stockLedger, showProductOrders, transition, packageView, lineContext, evidenceWrites, reconstructionView, runsCompare, checkContext, checksTab, demoDefault, staticContract, demoStartCase, guardrailMoment, guardrailView, timelineItems, displayedSteps, evaluationData, evaluationView, renderActions, replayControls, startReplay, playReplay, pauseReplay, nextReplay, sqlView, paletteCommands, loadSql, copySql, api, statusOf, stepsView, recCitations, recordedConclusion, recordedChangesView, recordedChecksView, startup, timerOn: () => replayTimer !== null};', context);
+  vm.runInContext(source + '\nrender = () => { globalThis.renderCalls++; };\nrenderPanel = () => {};\nglobalThis.subject = {gitSegments, attemptsTree, caseStrip, renderCases, setBranch, state, download, reviewView, exportStatus, recheckExport, act, changesView, checksTab, sqlView, modeInfo, repairFlow, stockLedger, showProductOrders, transition, packageView, lineContext, evidenceWrites, reconstructionView, runsCompare, checkContext, checksTab, demoDefault, staticContract, demoStartCase, guardrailMoment, guardrailView, timelineItems, displayedSteps, evaluationData, evaluationView, renderActions, replayControls, startReplay, playReplay, pauseReplay, nextReplay, sqlView, paletteCommands, loadSql, copySql, api, statusOf, stepsView, recCitations, recordedConclusion, recordedChangesView, recordedChecksView, liveView, liveButton, liveSavedNote, startup, timerOn: () => replayTimer !== null};', context);
   return {context, nodes, ...context.subject};
 }
 
@@ -1795,4 +1795,51 @@ test('unsafe cancelled-unit totals cannot produce a stock success claim', () => 
   assert.doesNotMatch(html, /stock-check|unit-cells| units from |restocked by the cancelled orders/);
   assert.match(stockRows(html)[0].row, /<span class="unit-text">\+2 units<\/span>/);
   assert.match(strip(html), /quantities.*cannot be compared reliably/);
+});
+
+
+// ---------- live Muse Spark runs (local workbench started with --live) ----------
+
+test('without a live-capable server there is no Muse Spark button or live panel', () => {
+  const app = harness();
+  app.state.incident = {id: 'case-a', title: 'Case A'};
+  assert.equal(app.state.liveModel, false);
+  assert.equal(app.liveButton(true), '');
+  assert.equal(app.liveView(), '');
+});
+
+test('a live run in progress shows its own steps, the model and a busy button', () => {
+  const data = publicData(), app = harness();
+  const recId = data.api_get['/api/incidents/inbox-evidence/recordings'][0].id;
+  const steps = data.api_get[`/api/recordings/${recId}`].steps.slice(0, 6);
+  app.state.incident = {id: 'case-a', title: 'Case A'};
+  app.state.liveModel = true;
+  assert.match(app.liveButton(true), /data-live-start[^>]*>.*Investigate with Muse Spark/);
+  app.state.live.set('case-a', {status: 'running', model: 'muse-spark-1.3', started_at: '2026-11-04T20:00:00+00:00', steps});
+  const button = app.liveButton(true);
+  assert.match(button, /disabled aria-busy="true"/);
+  assert.doesNotMatch(button, /data-live-start/);
+  const view = app.liveView();
+  const calls = steps.filter(s => s.kind === 'tool_call').length;
+  assert.match(view, /id="live-panel"/);
+  assert.match(view, /Muse Spark is investigating, live/);
+  assert.match(view, new RegExp(`muse-spark-1\.3 · ${calls} tool calls? so far`));
+  assert.match(view, /<ol class="timeline">/);
+  assert.equal((view.match(/<li[ >]/g) || []).length >= 1, true);
+});
+
+test('a live run that fails says so and changes nothing; a finished one hands over to its saved recording', () => {
+  const app = harness();
+  app.state.incident = {id: 'case-a', title: 'Case A'};
+  app.state.liveModel = true;
+  app.state.live.set('case-a', {status: 'error', error: 'Meta API connection failed or timed out.', steps: []});
+  assert.match(app.liveView(), /The live run ended with an error: Meta API connection failed or timed out\. Nothing was changed\./);
+  assert.match(app.liveButton(true), /data-live-start/);
+  app.state.live.set('case-a', {status: 'done', recording_id: 'recording-abc', steps: []});
+  assert.equal(app.liveView(), '');
+  app.state.source = 'recorded';
+  app.state.recId = 'recording-abc';
+  assert.match(app.liveSavedNote(), /just finished live with Muse Spark and was saved/);
+  app.state.recId = 'recording-other';
+  assert.equal(app.liveSavedNote(), '');
 });

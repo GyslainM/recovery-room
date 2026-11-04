@@ -5,8 +5,9 @@ A Meta Muse Spark agent investigates the evidence and proposes a repair. The
 runtime tests it on a disposable copy, checks it independently, and hands a
 person a guarded repair script to review.
 
-**[Open the recorded demo](https://gyslainm.github.io/recovery-room/)**: saved
-agent runs, no key or sign-in needed.
+**[Open the recorded demo](https://gyslainm.github.io/recovery-room/)** to replay
+saved agent runs, no key or sign-in needed. Run the agent yourself in the
+[local workbench](#local-workbench-with-the-agent-live) with your own Meta key.
 
 ## The problem
 
@@ -73,35 +74,43 @@ python public_server.py
 Open `http://127.0.0.1:8080`. The page replays saved runs and never calls a
 model.
 
-### Local workbench
+### Local workbench, with the agent live
 
-```bash
-python -m recovery_room serve
-```
-
-Open `http://127.0.0.1:8765`. Choose a case, click **Investigate incident**,
-then **Test repair on a copy**, and review **Changes**, **Checks** and **SQL**.
-Downloads check again that nothing changed since the test. In the workbench,
-investigations use the offline event-aware script and are labelled
-**Offline demo · No model**. Add `--recordings <library>` to show saved agent
-runs, and `--cases` to choose from the six built-in cases.
-
-### Run the agent live
-
-The agent sends the selected case's records and evidence to Meta. Use the
-synthetic cases.
+Set your Meta key in the shell first; it stays in this process and never
+reaches the browser.
 
 ```powershell
-python -m recovery_room fixture --out runs/live-case --seed 23
 $secret = Read-Host "Meta API key" -AsSecureString
 $env:MODEL_API_KEY = [System.Net.NetworkCredential]::new("", $secret).Password
+python -m recovery_room serve --live --cases import-retry missing-evidence multiple-retries split-evidence inbox-evidence inbox-ambiguous
+```
+
+Open `http://127.0.0.1:8765`, choose a case and click **Investigate with Muse
+Spark**. The agent runs now, and its steps appear as it reads evidence, queries
+the data and tests repairs. When it finishes, the run is saved and opens in
+**Changes**, **Checks** and the full step list. A run sends the case's records
+and evidence to Meta and costs roughly $0.20. Runs use the same limits as the
+evaluation batches: 20 model responses, 40 tool calls and 16,384 completion
+tokens per response.
+
+Without `--live` or a key, the workbench makes no model calls. **Script
+investigation** runs the offline event-aware script instead, then **Test repair
+on a copy** and the guarded SQL download. Add `--recordings <library>` to show
+saved agent runs.
+
+On macOS or Linux, set the key with `read -r -s -p "Meta API key: " MODEL_API_KEY`
+and `export MODEL_API_KEY`.
+
+### Run the agent from the command line
+
+```bash
+python -m recovery_room fixture --out runs/live-case --seed 23
 python -m recovery_room agent --incident runs/live-case/incident --out runs/live-case/agent-runs --max-completion-tokens 8192 --max-rounds 24
 ```
 
-On macOS or Linux, set the key with `read -r -s -p "Meta API key: " MODEL_API_KEY`
-and `export MODEL_API_KEY`. The key is read from the environment only and never
-logged. The default model is `muse-spark-1.3`; choose another with `--model`.
-Add `--scenario missing-evidence` to the fixture to test stopping. Score a run
+The key is read from the environment only and never logged. The default model
+is `muse-spark-1.3`; choose another with `--model`. Add
+`--scenario missing-evidence` to the fixture to test stopping. Score a run
 against the private answer key afterwards:
 
 ```bash

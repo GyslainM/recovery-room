@@ -145,13 +145,20 @@ calls.
 
 The local workbench binds to `127.0.0.1` and serves the bundled interface. Routes
 take case and run IDs and allowlisted artifact names only. There are no endpoints
-for arbitrary paths, uploads, SQL, candidate databases, the evaluator,
-credentials or model calls. Host and Origin checks reject cross-site requests,
+for arbitrary paths, uploads, SQL, candidate databases, the evaluator or
+credentials. Host and Origin checks reject cross-site requests,
 and the few actions accept only a small empty JSON body. It is a local
 development tool, not an authenticated service.
 
-In the workbench, **Investigate incident** runs the offline event-aware script,
-labelled as such. Downloads repeat every freshness check. With `--recordings`,
+Started with `--live` and `MODEL_API_KEY` in the server's own environment, the
+workbench offers **Investigate with Muse Spark**. The browser can only start a
+run for the case on screen and read its progress: the server holds the key,
+runs the agent in a background thread with the evaluation batches' limits, and
+reports each step as the agent takes it. One run per case can be active. When it
+ends, the run is saved through the same export as any recording and opens in
+the usual review. Without `--live` or a key, the workbench makes no model calls.
+
+**Script investigation** runs the offline event-aware script, labelled as such. Downloads repeat every freshness check. With `--recordings`,
 the workbench also shows saved agent runs read-only. Each recording's input
 fingerprints are compared with the served case, and its citations are disabled
 on a mismatch.

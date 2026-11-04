@@ -1099,3 +1099,12 @@ html[data-demo-mode="read-only"] #mode-indicator:not(.recorded){visibility:hidde
 .eval-limits{margin:0 0 10px;padding-left:18px;font-size:var(--fs-3);line-height:1.6;color:var(--muted)}
 .evaluation h3{margin:16px 0 6px;font-size:var(--fs-4)}
 .disclosure .link{margin-left:6px;font-size:inherit;color:var(--muted)}
+
+/* Live Muse Spark run: the run in progress above the Investigation tab (local workbench with --live only) */
+.live-panel{margin:0 0 var(--s4);padding:var(--s3);border:1px solid var(--line-2);border-radius:var(--r-md);background:var(--raised)}
+.live-head{display:flex;align-items:flex-start;gap:var(--s2);margin-bottom:var(--s2)}
+.live-head .icon{flex:none;width:18px;height:18px;margin-top:2px;color:var(--accent)}
+.live-head strong{display:block;color:var(--ink)}
+.live-head span{color:var(--muted);font-size:var(--fs-2)}
+.live-panel .timeline{margin:0}
+.live-saved{display:flex;align-items:flex-start;gap:var(--s2);margin-bottom:var(--s3)}
