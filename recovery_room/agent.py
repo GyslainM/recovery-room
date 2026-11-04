@@ -242,7 +242,10 @@ def _final_outcome(content) -> dict:
     return parsed
 
 
-def run_agent(incident: Path, output: Path, client, max_rounds: int = 16, max_calls: int = 32) -> dict:
+def run_agent(incident: Path, output: Path, client, max_rounds: int = 16, max_calls: int = 32,
+              on_step=None) -> dict:
+    """on_step, if given, receives a copy of the transcript after each model message and tool result.
+    It only observes: an exception from it is ignored and never changes the run."""
     if not 1 <= max_rounds <= 24 or not 1 <= max_calls <= 48:
         raise ValueError("Choose 1 to 24 model rounds and 1 to 48 local tool calls.")
     session = output / ("agent-" + uuid.uuid4().hex[:12])
@@ -266,6 +269,15 @@ def run_agent(incident: Path, output: Path, client, max_rounds: int = 16, max_ca
     error_code = None
     last_finish_reason = None
     input_fingerprints = None
+
+    def report() -> None:
+        if on_step is None:
+            return
+        try:
+            on_step([dict(item) for item in messages])
+        except Exception:  # an observer never alters the investigation
+            pass
+
     try:
         # Capture provenance before the first transport call, including runs that stop/fail.
         input_fingerprints = {"source": fingerprint(snapshot(incident / "orders.db")),
@@ -277,6 +289,7 @@ def run_agent(incident: Path, output: Path, client, max_rounds: int = 16, max_ca
             last_finish_reason = finish_reason
             usage.append(observed_usage)
             messages.append(message)
+            report()
             if finish_reason == "length":
                 error_code = "completion_token_limit"
                 limit = getattr(client, "max_completion_tokens", None)
@@ -311,6 +324,7 @@ def run_agent(incident: Path, output: Path, client, max_rounds: int = 16, max_ca
                     value = {"error": str(exc)}
                 calls += 1
                 messages.append({"role": "tool", "tool_call_id": call_id, "content": json.dumps(value)})
+                report()
         else:
             error_code = "model_round_limit"
     except (ValueError, KeyError, TypeError, IndexError, sqlite3.Error, OSError) as exc:

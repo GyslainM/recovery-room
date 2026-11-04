@@ -1,4 +1,7 @@
-"""Loopback-only review UI for curated synthetic cases; no model transport.
+"""Loopback-only review UI for curated synthetic cases.
+
+The model is called only when the operator starts the server with --live and MODEL_API_KEY in the
+server's own environment; the browser never sees the key and cannot change the agent's limits.
 
 HTTP identifiers select server-owned cases and runs, never filesystem paths.
 The existing engine owns plan validation, copy-only execution and export checks.
@@ -10,8 +13,10 @@ import copy
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
+import os
 from pathlib import Path
 import sqlite3
+import threading
 import time
 from urllib.parse import parse_qs, urlsplit
 import uuid
@@ -20,7 +25,8 @@ from .baselines import event_aware_plan
 from .db import fingerprint, query_database, schema_for_agent, snapshot
 from .fixtures import create_incident, evidence_index, list_artifacts, read_artifact
 from .repairs import evidence_fingerprint, finalize_report, rehearse
-from .recordings import RecordingCatalog
+from .agent import MetaClient, run_agent
+from .recordings import RecordingCatalog, _project_steps, _timeline, export_recording
 
 
 MODE = "offline_deterministic_engine_demo_NOT_a_model_run"
@@ -40,6 +46,8 @@ ASSETS = {"/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascri
           "/fonts/InterVariable.woff2": ("fonts/InterVariable.woff2", "font/woff2"),
           "/favicon.svg": ("favicon.svg", "image/svg+xml")}
 RUN_SUMMARY_FIELDS = ("id", "incident_id", "status", "summary", "mode", "created_at")
+# Live runs use the same limits as the locked evaluation batches; the browser cannot change them.
+LIVE_LIMITS = {"max_rounds": 20, "max_calls": 40, "max_completion_tokens": 16384}
 
 
 class ReviewConflict(ValueError):
@@ -54,7 +62,7 @@ def _public_review_error(exc: Exception) -> str:
 
 class Workbench:
     def __init__(self, root: Path, seed: int = 23, *, case_ids: tuple[str, ...] | None = None,
-                 recordings: Path | None = None):
+                 recordings: Path | None = None, live: bool = False):
         identifiers = tuple(CASES) if case_ids is None else case_ids
         if (not isinstance(identifiers, tuple) or not identifiers
                 or any(not isinstance(key, str) or key not in CASE_CATALOG for key in identifiers)
@@ -71,6 +79,13 @@ class Workbench:
         }
         self.runs: dict[str, dict] = {}
         self.results: dict[str, dict] = {}
+        # Live runs: one per case at a time, saved into the recording library when they finish.
+        self.live = live
+        self.live_runs: dict[str, dict] = {}
+        self.live_library = recordings if recordings is not None else self.root / "live-recordings"
+        if live and recordings is None:
+            self.live_library.mkdir()
+        self.client_factory = lambda: MetaClient(max_completion_tokens=LIVE_LIMITS["max_completion_tokens"])
 
     def incident(self, identifier: str) -> Path:
         if identifier not in self.incidents:
@@ -99,6 +114,47 @@ class Workbench:
 
     def recording(self, identifier: str) -> dict:
         return self.recordings.detail(identifier, self.incidents)
+
+    def live_available(self) -> bool:
+        return self.live and bool(os.environ.get("MODEL_API_KEY", "").strip())
+
+    def start_live(self, identifier: str) -> dict:
+        incident = self.incident(identifier)
+        if not self.live_available():
+            raise ReviewConflict("Live Muse Spark runs are off. Start the workbench with --live, "
+                                 "with MODEL_API_KEY set in the same shell.")
+        current = self.live_runs.get(identifier)
+        if current is not None and current["status"] == "running":
+            raise ReviewConflict("A Muse Spark run is already in progress for this case.")
+        client = self.client_factory()
+        record = {"incident_id": identifier, "status": "running", "model": getattr(client, "model", None),
+                  "started_at": datetime.now(timezone.utc).isoformat(), "steps": [], "tool_calls": 0,
+                  "outcome": None, "summary": None, "recording_id": None, "error": None}
+        self.live_runs[identifier] = record
+        threading.Thread(target=self._live, args=(identifier, incident, client, record), daemon=True).start()
+        return self.live_status(identifier)
+
+    def _live(self, identifier: str, incident: Path, client, record: dict) -> None:
+        def observe(messages):
+            steps, count = _timeline(messages)
+            record["steps"], record["tool_calls"] = _project_steps(steps), count
+        try:
+            result = run_agent(incident, self.root / "live-runs" / identifier, client,
+                               max_rounds=LIVE_LIMITS["max_rounds"], max_calls=LIVE_LIMITS["max_calls"], on_step=observe)
+            record.update(outcome=result["final"]["outcome"], summary=str(result["final"]["summary"])[:2000])
+            exported = export_recording(incident, Path(result["session"]), identifier, self.live_library)
+            record["recording_id"] = self.recordings.add(Path(exported["recording_folder"]), identifier, self.live_library)
+            record["status"] = "done"
+        except Exception as exc:  # reported to the page; the server keeps running
+            record.update(status="error", error=str(exc)[:300] or exc.__class__.__name__)
+
+    def live_status(self, identifier: str) -> dict:
+        self.incident(identifier)
+        record = self.live_runs.get(identifier)
+        if record is None:
+            return {"incident_id": identifier, "status": "idle", "available": self.live_available()}
+        return {**{key: value for key, value in record.items() if key != "steps"},
+                "steps": list(record["steps"]), "available": self.live_available()}
 
     def overview(self, identifier: str) -> dict:
         incident = self.incident(identifier)
@@ -343,12 +399,17 @@ def make_server(workbench: Workbench, port: int = 8765) -> HTTPServer:
                         return self._json(workbench.investigate(parts[2]), 201)
                     if len(parts) == 4 and parts[:2] == ["api", "runs"] and parts[3] == "rehearse":
                         return self._json(workbench.rehearse(parts[2]))
+                    if len(parts) == 4 and parts[:2] == ["api", "incidents"] and parts[3] == "live":
+                        return self._json(workbench.start_live(parts[2]), 202)
                 else:
                     if self.path in ASSETS:
                         filename, mime = ASSETS[self.path]
                         return self._send((Path(__file__).parent / "web" / filename).read_bytes(), mime)
                     if parts == ["api", "incidents"]:
-                        return self._json({"mode": MODE, "incidents": workbench.cases()})
+                        return self._json({"mode": MODE, "incidents": workbench.cases(),
+                                           "live_model": workbench.live_available()})
+                    if len(parts) == 4 and parts[:2] == ["api", "incidents"] and parts[3] == "live":
+                        return self._json(workbench.live_status(parts[2]))
                     if parts == ["api", "runs"]:
                         query = parse_qs(url.query, keep_blank_values=True, strict_parsing=True)
                         if (set(query) != {"incident"} or len(query["incident"]) != 1
@@ -393,13 +454,17 @@ def make_server(workbench: Workbench, port: int = 8765) -> HTTPServer:
 
 
 def serve(root: Path, port: int = 8765, *, recordings: Path | None = None,
-          case_ids: tuple[str, ...] | None = None) -> None:
+          case_ids: tuple[str, ...] | None = None, live: bool = False) -> None:
     if not 0 <= port <= 65535:
         raise ValueError("Port must be from 0 to 65535 (0 selects a free local port).")
-    workbench = Workbench(root, recordings=recordings, case_ids=case_ids)
+    workbench = Workbench(root, recordings=recordings, case_ids=case_ids, live=live)
     with make_server(workbench, port) as server:
         print(f"Recovery Room local workbench: http://127.0.0.1:{server.server_port}", flush=True)
-        print("OFFLINE deterministic script. Synthetic cases. No model or API calls.", flush=True)
+        print("Synthetic cases. Investigate incident runs the offline event-aware script, with no model calls.", flush=True)
+        if live:
+            print("LIVE: Investigate with Muse Spark sends the selected case's records and evidence to Meta."
+                  if workbench.live_available() else
+                  "LIVE requested, but MODEL_API_KEY is not set in this shell: live runs stay off.", flush=True)
         if recordings is not None:
             print(f"{len(workbench.recordings.records)} recordings available: Recorded model run, not live.", flush=True)
         print(f"Session artifacts: {workbench.root}\nPress Ctrl+C to stop.", flush=True)

@@ -422,74 +422,90 @@ class RecordingCatalog:
                 seen += 1
                 if seen > MAX_RECORDINGS or not _IDENTIFIER.fullmatch(folder.name):
                     raise ValueError("Recording library exceeds its directory/name limits.")
-                _contained(folder, root)
-                bundle = _read(folder/"recording.json", root, MAX_BUNDLE_BYTES)
-                if (not isinstance(bundle, dict) or type(bundle.get("schema_version")) is not int
-                        or bundle["schema_version"] != 1 or bundle.get("incident_id") != case):
-                    raise ValueError("Recording bundle does not match its case directory.")
-                provenance = bundle.get("provenance")
-                inputs = bundle.get("input_fingerprints")
-                if (not isinstance(provenance, dict) or provenance.get("mode") != "live_meta_agent"
-                        or not isinstance(provenance.get("model"),str) or not 1 <= len(provenance["model"]) <= 80
-                        or provenance.get("input_provenance") not in {"native_capture","verified_legacy_file_manifest"}
-                        or provenance.get("timestamp_source") not in {"agent_result","result_file_mtime"}
-                        or not isinstance(inputs, dict) or set(inputs) != {"source", "evidence"}
-                        or any(not isinstance(value,str) or not _HASH.fullmatch(value) for value in inputs.values())):
-                    raise ValueError("Recording provenance is invalid.")
-                if bundle.get("outcome") not in {"repair", "stop", "error", "incomplete"}:
-                    raise ValueError("Recording outcome is invalid.")
-                if not isinstance(bundle.get("steps"),list) or len(bundle["steps"]) > 160:
-                    raise ValueError("Recording steps exceed the size limit.")
-                bundle = _clean(bundle)
-                bundle["provenance"] = {key: bundle["provenance"].get(key) for key in
-                    ("mode", "model", "timestamp_source", "input_provenance")}
-                bundle["provenance"].update(recorded_at=_utc(provenance.get("recorded_at")), label=LABEL)
-                bundle["tool_calls"] = _number(bundle.get("tool_calls"), integer=True)
-                bundle["elapsed_seconds"] = _number(bundle.get("elapsed_seconds"))
-                bundle["steps"] = _project_steps(bundle["steps"])
-                if bundle["tool_calls"] != sum(row["kind"]=="tool_result" for row in bundle["steps"]):
-                    raise ValueError("Recorded tool count does not match the observed results.")
-                review = bundle.get("review")
-                if (bundle["outcome"] == "repair") != isinstance(review,dict):
-                    raise ValueError("Only a verified recorded repair may contain a review.")
-                if review is not None:
-                    if not isinstance(review,dict) or any(field not in review for field in REVIEW_FIELDS):
-                        raise ValueError("Recorded review is incomplete.")
-                    if (type(review["passed"]) is not bool or not isinstance(review["checks"],list) or len(review["checks"]) > 32
-                            or not isinstance(review["changes"],list) or len(review["changes"]) > 40
-                            or any(not isinstance(review[field],list) or len(review[field]) > 200 for field in
-                                   ("stock","preserved_orders","checkout_order_ids"))):
-                        raise ValueError("Recorded review exceeds the public shape or size limits.")
-                    for field in ("before_active","after_active","cancellations","untargeted_preserved",
-                                  "checkout_total","checkout_preserved"):
-                        _number(review[field],integer=True)
-                    if (review["passed"] is not True or not review["checks"] or not 1 <= review["cancellations"] <= 40
-                            or len(review["changes"]) != review["cancellations"]
-                            or any(not isinstance(check,dict) or check.get("passed") is not True
-                                   or not isinstance(check.get("name"),str) or not isinstance(check.get("detail"),str)
-                                   for check in review["checks"])):
-                        raise ValueError("Recorded repair review does not describe a passed rehearsal.")
-                    bundle["review"] = {field:review[field] for field in REVIEW_FIELDS}
-                    bundle["review"]["checks"] = [_public_check(check) for check in review["checks"]]
-                final = bundle.get("final")
-                if not isinstance(final,dict) or final.get("outcome") != bundle["outcome"]:
-                    raise ValueError("Recorded final outcome is inconsistent.")
-                if not isinstance(bundle.get("summary"),str) or not isinstance(final.get("summary"),str):
-                    raise ValueError("Recorded summary must be text.")
-                bundle["summary"] = _text(bundle["summary"])
-                bundle["final"] = {"outcome":bundle["outcome"], "summary":_text(final.get("summary", ""))}
-                usage = bundle.get("usage")
-                if not isinstance(usage,dict):
-                    raise ValueError("Recorded usage totals are invalid.")
-                bundle["usage"] = {key:_number(usage.get(key),integer=True) for key in
-                    ("input_tokens","output_tokens","cached_input_tokens","reasoning_tokens","total_tokens","response_count")}
-                if usage["response_count"] > 24 or usage["cached_input_tokens"] > usage["input_tokens"] or usage["reasoning_tokens"] > usage["output_tokens"]:
-                    raise ValueError("Recorded usage totals exceed their bounds.")
-                bundle["usage"].update(available=usage.get("available") is True, reasoning_included_in_output=True)
+                bundle = self._bundle(folder, case, root)
                 if case not in incident_ids:
                     continue
                 identifier = "recording-" + uuid.uuid4().hex[:12]
                 self.records[identifier] = (case, bundle)
+
+    @staticmethod
+    def _bundle(folder: Path, case: str, root: Path) -> dict:
+        """Validate and project one recording folder; raises ValueError on anything outside the public shape."""
+        _contained(folder, root)
+        bundle = _read(folder/"recording.json", root, MAX_BUNDLE_BYTES)
+        if (not isinstance(bundle, dict) or type(bundle.get("schema_version")) is not int
+                or bundle["schema_version"] != 1 or bundle.get("incident_id") != case):
+            raise ValueError("Recording bundle does not match its case directory.")
+        provenance = bundle.get("provenance")
+        inputs = bundle.get("input_fingerprints")
+        if (not isinstance(provenance, dict) or provenance.get("mode") != "live_meta_agent"
+                or not isinstance(provenance.get("model"),str) or not 1 <= len(provenance["model"]) <= 80
+                or provenance.get("input_provenance") not in {"native_capture","verified_legacy_file_manifest"}
+                or provenance.get("timestamp_source") not in {"agent_result","result_file_mtime"}
+                or not isinstance(inputs, dict) or set(inputs) != {"source", "evidence"}
+                or any(not isinstance(value,str) or not _HASH.fullmatch(value) for value in inputs.values())):
+            raise ValueError("Recording provenance is invalid.")
+        if bundle.get("outcome") not in {"repair", "stop", "error", "incomplete"}:
+            raise ValueError("Recording outcome is invalid.")
+        if not isinstance(bundle.get("steps"),list) or len(bundle["steps"]) > 160:
+            raise ValueError("Recording steps exceed the size limit.")
+        bundle = _clean(bundle)
+        bundle["provenance"] = {key: bundle["provenance"].get(key) for key in
+            ("mode", "model", "timestamp_source", "input_provenance")}
+        bundle["provenance"].update(recorded_at=_utc(provenance.get("recorded_at")), label=LABEL)
+        bundle["tool_calls"] = _number(bundle.get("tool_calls"), integer=True)
+        bundle["elapsed_seconds"] = _number(bundle.get("elapsed_seconds"))
+        bundle["steps"] = _project_steps(bundle["steps"])
+        if bundle["tool_calls"] != sum(row["kind"]=="tool_result" for row in bundle["steps"]):
+            raise ValueError("Recorded tool count does not match the observed results.")
+        review = bundle.get("review")
+        if (bundle["outcome"] == "repair") != isinstance(review,dict):
+            raise ValueError("Only a verified recorded repair may contain a review.")
+        if review is not None:
+            if not isinstance(review,dict) or any(field not in review for field in REVIEW_FIELDS):
+                raise ValueError("Recorded review is incomplete.")
+            if (type(review["passed"]) is not bool or not isinstance(review["checks"],list) or len(review["checks"]) > 32
+                    or not isinstance(review["changes"],list) or len(review["changes"]) > 40
+                    or any(not isinstance(review[field],list) or len(review[field]) > 200 for field in
+                           ("stock","preserved_orders","checkout_order_ids"))):
+                raise ValueError("Recorded review exceeds the public shape or size limits.")
+            for field in ("before_active","after_active","cancellations","untargeted_preserved",
+                          "checkout_total","checkout_preserved"):
+                _number(review[field],integer=True)
+            if (review["passed"] is not True or not review["checks"] or not 1 <= review["cancellations"] <= 40
+                    or len(review["changes"]) != review["cancellations"]
+                    or any(not isinstance(check,dict) or check.get("passed") is not True
+                           or not isinstance(check.get("name"),str) or not isinstance(check.get("detail"),str)
+                           for check in review["checks"])):
+                raise ValueError("Recorded repair review does not describe a passed rehearsal.")
+            bundle["review"] = {field:review[field] for field in REVIEW_FIELDS}
+            bundle["review"]["checks"] = [_public_check(check) for check in review["checks"]]
+        final = bundle.get("final")
+        if not isinstance(final,dict) or final.get("outcome") != bundle["outcome"]:
+            raise ValueError("Recorded final outcome is inconsistent.")
+        if not isinstance(bundle.get("summary"),str) or not isinstance(final.get("summary"),str):
+            raise ValueError("Recorded summary must be text.")
+        bundle["summary"] = _text(bundle["summary"])
+        bundle["final"] = {"outcome":bundle["outcome"], "summary":_text(final.get("summary", ""))}
+        usage = bundle.get("usage")
+        if not isinstance(usage,dict):
+            raise ValueError("Recorded usage totals are invalid.")
+        bundle["usage"] = {key:_number(usage.get(key),integer=True) for key in
+            ("input_tokens","output_tokens","cached_input_tokens","reasoning_tokens","total_tokens","response_count")}
+        if usage["response_count"] > 24 or usage["cached_input_tokens"] > usage["input_tokens"] or usage["reasoning_tokens"] > usage["output_tokens"]:
+            raise ValueError("Recorded usage totals exceed their bounds.")
+        bundle["usage"].update(available=usage.get("available") is True, reasoning_included_in_output=True)
+        return bundle
+
+    def add(self, folder: Path, case: str, root: Path) -> str:
+        """Register one newly exported recording without renumbering the others."""
+        _contained(folder, root)
+        if len(self.records) >= MAX_RECORDINGS:
+            raise ValueError("Recording library exceeds its directory/name limits.")
+        bundle = self._bundle(folder, case, root)
+        identifier = "recording-" + uuid.uuid4().hex[:12]
+        self.records[identifier] = (case, bundle)
+        return identifier
 
     def _detail(self, identifier, incident):
         if identifier not in self.records:

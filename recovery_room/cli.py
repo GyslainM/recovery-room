@@ -88,6 +88,9 @@ def main(argv: list[str] | None = None) -> int:
     local.add_argument("--out", type=Path, help="Fresh session directory; existing runs are never overwritten.")
     local.add_argument("--port", type=int, default=8765)
     local.add_argument("--recordings", type=Path, help="Server-owned sanitized recording library; no live execution.")
+    local.add_argument("--live", action="store_true",
+                       help="Allow Investigate with Muse Spark in the browser. Needs MODEL_API_KEY in this shell; "
+                            "sends the selected case's records and evidence to Meta.")
     local.add_argument("--cases", nargs="+", choices=CASE_IDS,
                        help="Opt into distinct built-in cases; defaults remain the original three.")
     benchmark = sub.add_parser("benchmark", help="Evaluate the offline event-aware script on development fixtures; no API calls.")
@@ -127,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "serve":
             from .workbench import serve
             serve(args.out or default_output("workbench"), args.port, recordings=args.recordings,
-                  case_ids=tuple(args.cases) if args.cases is not None else None)
+                  case_ids=tuple(args.cases) if args.cases is not None else None, live=args.live)
             return 0
         elif args.command == "recording":
             from .recordings import export_recording
