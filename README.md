@@ -1,4 +1,4 @@
-# Recovery Room
+<h1 align="center"><img src="docs/assets/banner.jpg" alt="Recovery Room: AI repairs you can verify before they touch your data." width="100%"></h1>
 
 Repair the damage from a failed, retried import without touching anything else.
 A Meta Muse Spark agent investigates the evidence and proposes a repair. The
@@ -8,6 +8,15 @@ person a guarded repair script to review.
 **[Open the recorded demo](https://gyslainm.github.io/recovery-room/)** to replay
 saved agent runs, no key or sign-in needed. Run the agent yourself in the
 [local workbench](#local-workbench-with-the-agent-live) with your own Meta key.
+
+## Demo video
+
+[![Demo video: a live Muse Spark run, the runtime rejecting a wrong evidence citation, the agent's correction, the guarded repair script and the evaluation](docs/assets/demo-video.jpg)](https://youtu.be/NQRHuGjj458)
+
+**[Watch the demo on YouTube](https://youtu.be/NQRHuGjj458)** (2:38): a live Muse
+Spark run in the app, the runtime rejecting a wrong evidence citation, the
+agent's correction, the guarded repair script a person receives, and how the
+runs were evaluated.
 
 ## The problem
 
@@ -22,7 +31,8 @@ the evidence which writes were repeats, and leave every other order alone.
 1. **Investigate.** The agent gets five tools: read the database schema, list
    the evidence files, read evidence with exact line numbers, run read-only SQL
    on the original database, and test a repair on a new disposable copy. It has
-   no shell, no file access, no write access and no view of the answer key.
+   no shell, no unrestricted filesystem access, no write access to the original
+   database and no view of the answer key.
 2. **Propose.** Each cancellation must cite the evidence lines that tie the
    repeated order and the kept order to the same source event. The runtime
    rejects wrong or invented citations and tells the agent why.
