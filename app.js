@@ -592,6 +592,8 @@ function renderHeader() {
   const {incident, run, busy} = state;
   const [label, tone] = statusOf(run);
   $('#title').textContent = incident.title;
+  // The public demo hides the label only until this first header is drawn, so a script run is always labelled.
+  $('#mode-indicator').classList.add('ready');
   renderSourceSwitch();
   renderActions();
   if (liveRunning(incident.id)) {
@@ -1319,6 +1321,19 @@ async function startLive() {
   if (state.tab !== 'investigation') state.tab = 'investigation';
   render();
   pollLive(caseId);
+}
+
+// After a reload, pick up any live run the server is still doing, so the page shows its progress again
+// instead of offering to start a second run.
+async function restoreLive(caseIds) {
+  if (!state.liveModel) return;
+  await Promise.all(caseIds.map(async caseId => {
+    try {
+      const live = await api(`/api/incidents/${encodeURIComponent(caseId)}/live`);
+      if (live?.status === 'running') state.live.set(caseId, live);
+    } catch { /* the page still works; starting a run reports any conflict */ }
+  }));
+  for (const caseId of caseIds) if (liveRunning(caseId)) pollLive(caseId);
 }
 
 async function pollLive(caseId) {
@@ -3403,6 +3418,7 @@ const startup = api('/api/incidents').then(async data => {
   await Promise.all(state.cases.flatMap(c => [
     refreshHistory(c.id).then(runs => runs[0] && !state.runs.has(c.id) ? api(`/api/runs/${encodeURIComponent(runs[0].id)}`).then(run => { state.runs.set(c.id, run); }) : null).catch(() => null),
     refreshRecordings(c.id)]));
+  await restoreLive(state.cases.map(c => c.id));
   const target = parseHash();
   await selectCase(target?.id || demoStartCase() || data.incidents[0].id, target?.tab || null);
 }).catch(showStartFailure);
