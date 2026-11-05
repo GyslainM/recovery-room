@@ -19,8 +19,8 @@ from recovery_room.agent import MetaClient, run_agent
 from recovery_room.baselines import event_aware_plan
 from recovery_room.workbench import LIVE_LIMITS, ReviewConflict, Workbench, make_server
 
-from test_agent import ScriptedTransport, response
-import test_workbench as _tw
+from tests.test_agent import ScriptedTransport, response
+from tests import test_workbench as _tw
 
 
 class StandInMeta(ScriptedTransport, MetaClient):
@@ -97,6 +97,26 @@ class LiveRunTests(unittest.TestCase):
             done = wait(app, "missing-evidence")
         self.assertEqual((done["status"], done["outcome"]), ("done", "stop"), done)
         self.assertEqual(app.recording(done["recording_id"])["outcome"], "stop")
+
+    def test_a_failed_live_run_shows_a_plain_reason_never_paths_internals_or_the_key(self):
+        cases = [
+            (FileNotFoundError(2, "No such file or directory", "C:/Users/someone/private/live-runs/x.json"),
+             "Local files for this run were unavailable"),
+            (RuntimeError("internal state /home/someone/app/secret.py line 9"), "stopped unexpectedly (RuntimeError)"),
+            (ValueError("Meta API returned HTTP 401. No automatic retry was made."), "Meta API returned HTTP 401"),
+            (ValueError("Bad file C:/Users/someone/x.db with test-key-not-real"), "[local path]"),
+        ]
+        for index, (error, shown) in enumerate(cases):
+            with self.subTest(index=index), patch.dict(os.environ, {"MODEL_API_KEY": "test-key-not-real"}), \
+                    patch("recovery_room.workbench.run_agent", side_effect=error):
+                app = Workbench(Path(self.temp.name) / f"error-{index}", live=True)
+                app.client_factory = StoppingMeta
+                app.start_live("import-retry")
+                done = wait(app, "import-retry")
+                self.assertEqual(done["status"], "error")
+                self.assertIn(shown, done["error"])
+                for secret in ("someone", "test-key-not-real", "secret.py"):
+                    self.assertNotIn(secret, done["error"])
 
     def test_an_observer_failure_never_changes_the_run(self):
         incident = Workbench(Path(self.temp.name) / "observer").incident("import-retry")

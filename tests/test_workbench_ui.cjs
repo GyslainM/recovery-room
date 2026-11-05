@@ -27,7 +27,7 @@ function harness(handler, options = {}) {
     setInterval: (fn) => { intervals.push(fn); return intervals.length; }, clearInterval: (id) => { cleared.push(id); }, intervals, cleared,
   };
   vm.createContext(context);
-  vm.runInContext(source + '\nrender = () => { globalThis.renderCalls++; };\nrenderPanel = () => {};\nglobalThis.subject = {gitSegments, attemptsTree, caseStrip, renderCases, setBranch, state, download, reviewView, exportStatus, recheckExport, act, changesView, checksTab, sqlView, modeInfo, repairFlow, stockLedger, showProductOrders, transition, packageView, lineContext, evidenceWrites, reconstructionView, runsCompare, checkContext, checksTab, demoDefault, staticContract, demoStartCase, guardrailMoment, guardrailView, timelineItems, displayedSteps, evaluationData, evaluationView, renderActions, replayControls, startReplay, playReplay, pauseReplay, nextReplay, sqlView, paletteCommands, loadSql, copySql, api, statusOf, stepsView, recCitations, recordedConclusion, recordedChangesView, recordedChecksView, liveView, liveButton, liveSavedNote, startup, timerOn: () => replayTimer !== null};', context);
+  vm.runInContext(source + '\nrender = () => { globalThis.renderCalls++; };\nrenderPanel = () => {};\nglobalThis.subject = {gitSegments, attemptsTree, caseStrip, renderCases, setBranch, state, download, reviewView, exportStatus, recheckExport, act, changesView, checksTab, sqlView, modeInfo, repairFlow, stockLedger, showProductOrders, transition, packageView, lineContext, evidenceWrites, reconstructionView, runsCompare, checkContext, checksTab, demoDefault, staticContract, demoStartCase, guardrailMoment, guardrailView, timelineItems, displayedSteps, evaluationData, evaluationView, renderActions, replayControls, startReplay, playReplay, pauseReplay, nextReplay, sqlView, paletteCommands, loadSql, copySql, api, statusOf, stepsView, recCitations, recordedConclusion, recordedChangesView, recordedChecksView, liveView, liveButton, liveSavedNote, restoreLive, startup, timerOn: () => replayTimer !== null};', context);
   return {context, nodes, ...context.subject};
 }
 
@@ -1842,4 +1842,41 @@ test('a live run that fails says so and changes nothing; a finished one hands ov
   assert.match(app.liveSavedNote(), /just finished live with Muse Spark and was saved/);
   app.state.recId = 'recording-other';
   assert.equal(app.liveSavedNote(), '');
+});
+
+test('after a reload the page picks up a live run still in progress, keeps polling it, and ignores idle cases', async () => {
+  const calls = [];
+  let polls = 0;
+  const app = harness(async url => {
+    calls.push(url);
+    if (url === '/api/incidents/case-a/live') {
+      polls += 1;
+      return json(true, polls === 1
+        ? {incident_id: 'case-a', status: 'running', model: 'muse-spark-1.3', started_at: '2026-11-04T20:00:00+00:00', steps: []}
+        : {incident_id: 'case-a', status: 'error', error: 'Meta API connection failed or timed out.', steps: []});
+    }
+    if (url === '/api/incidents/case-b/live') return json(true, {incident_id: 'case-b', status: 'idle'});
+    return json(false, {error: 'unexpected request'});
+  });
+  await app.restoreLive(['case-a', 'case-b']);
+  assert.deepEqual(calls, [], 'without --live the page never asks about live runs');
+  app.state.liveModel = true;
+  app.state.incident = {id: 'case-a', title: 'First case'};
+  await app.restoreLive(['case-a', 'case-b']);
+  assert.equal(app.state.live.get('case-a').status, 'running');
+  assert.equal(app.state.live.has('case-b'), false);
+  assert.match(app.liveButton(true), /Muse Spark is investigating/);
+  assert.doesNotMatch(app.liveButton(true), /data-live-start/);
+  assert.match(app.liveView(), /Muse Spark is investigating, live/);
+  await new Promise(resolve => setTimeout(resolve, 1500));
+  assert.equal(app.state.live.get('case-a').status, 'error', 'polling resumed and saw how the run ended');
+});
+
+test('the public demo hides the mode label only until the first header, so a script run is always labelled', () => {
+  const css = fs.readFileSync(path.join(__dirname, '../recovery_room/web/style.css'), 'utf8');
+  assert.match(css, /html\[data-demo-mode="read-only"\] #mode-indicator:not\(\.ready\)\{visibility:hidden\}/);
+  assert.doesNotMatch(css, /#mode-indicator:not\(\.recorded\)/);
+  const header = source.slice(source.indexOf('function renderHeader()'), source.indexOf("if (recordedMode()) { renderRecordedHeader(); return; }"));
+  assert.match(header, /\$\('#mode-indicator'\)\.classList\.add\('ready'\)/);
+  assert.match(source, /Script run · No model/);
 });

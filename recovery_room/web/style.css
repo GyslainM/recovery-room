@@ -692,7 +692,7 @@ details.tl-card>.tl-head:hover{background:var(--hover)}
 .demo-label{flex:none;order:3;padding:2px 8px;border-radius:var(--r-pill);background:var(--raised);color:var(--muted);font-size:var(--fs-1);font-weight:500;white-space:nowrap}
 .demo-label[hidden]{display:none}
 /* The public demo shows no mode until its recording label arrives, so the script label never flashes. */
-html[data-demo-mode="read-only"] #mode-indicator:not(.recorded){visibility:hidden}
+html[data-demo-mode="read-only"] #mode-indicator:not(.ready){visibility:hidden}
 @media (max-width:420px){
   .demo-label-more{display:none}
   .demo-label{padding-inline:calc(var(--s1)/2)}

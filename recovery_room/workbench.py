@@ -15,6 +15,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import threading
 import time
@@ -58,6 +59,24 @@ def _public_review_error(exc: Exception) -> str:
     if isinstance(exc, OSError):
         return "Local incident or rehearsal artifact unavailable. Restore the session files and start a new investigation."
     return str(exc)
+
+
+_LOCAL_PATH = re.compile(r"[A-Za-z]:[\\/][^\s'\"]*|(?<![\w.])/(?:[\w.-]+/)+[\w.-]*")
+
+
+def _public_live_error(exc: Exception) -> str:
+    """What the page may show about a failed live run: the agent's own plain messages, never local paths,
+    internal details or the key."""
+    if isinstance(exc, OSError):
+        message = "Local files for this run were unavailable. Nothing was changed; start a new run."
+    elif isinstance(exc, ValueError) and not isinstance(exc, UnicodeError):
+        message = _LOCAL_PATH.sub("[local path]", str(exc))
+    else:
+        message = f"The run stopped unexpectedly ({exc.__class__.__name__}). Nothing was changed."
+    key = os.environ.get("MODEL_API_KEY", "").strip()
+    if key:
+        message = message.replace(key, "[key hidden]")
+    return message[:300] or exc.__class__.__name__
 
 
 class Workbench:
@@ -146,7 +165,7 @@ class Workbench:
             record["recording_id"] = self.recordings.add(Path(exported["recording_folder"]), identifier, self.live_library)
             record["status"] = "done"
         except Exception as exc:  # reported to the page; the server keeps running
-            record.update(status="error", error=str(exc)[:300] or exc.__class__.__name__)
+            record.update(status="error", error=_public_live_error(exc))
 
     def live_status(self, identifier: str) -> dict:
         self.incident(identifier)
