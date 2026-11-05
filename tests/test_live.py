@@ -104,7 +104,7 @@ class LiveRunTests(unittest.TestCase):
              "Local files for this run were unavailable"),
             (RuntimeError("internal state /home/someone/app/secret.py line 9"), "stopped unexpectedly (RuntimeError)"),
             (ValueError("Meta API returned HTTP 401. No automatic retry was made."), "Meta API returned HTTP 401"),
-            (ValueError("Bad file C:/Users/someone/x.db with test-key-not-real"), "[local path]"),
+            (ValueError("Bad file C:/Users/someone/x.db with test-key-not-real"), "[redacted path]"),
         ]
         for index, (error, shown) in enumerate(cases):
             with self.subTest(index=index), patch.dict(os.environ, {"MODEL_API_KEY": "test-key-not-real"}), \
@@ -117,6 +117,25 @@ class LiveRunTests(unittest.TestCase):
                 self.assertIn(shown, done["error"])
                 for secret in ("someone", "test-key-not-real", "secret.py"):
                     self.assertNotIn(secret, done["error"])
+
+    def test_a_file_error_the_agent_catches_itself_never_reaches_the_page_as_a_path(self):
+        """run_agent turns this failure into an "error" outcome whose summary is the exception text."""
+        class MissingFileMeta(StoppingMeta):
+            def complete(self, messages):
+                raise FileNotFoundError(2, "No such file or directory",
+                                        "C:/Users/someone/private/live-runs/test-key-not-real.json")
+
+        with patch.dict(os.environ, {"MODEL_API_KEY": "test-key-not-real"}):
+            app = Workbench(Path(self.temp.name) / "caught", live=True)
+            app.client_factory = MissingFileMeta
+            app.start_live("import-retry")
+            done = wait(app, "import-retry")
+        self.assertEqual((done["status"], done["outcome"]), ("done", "error"), done)
+        self.assertIn("No such file or directory", done["summary"])
+        self.assertIn("[redacted path]", done["summary"])
+        shown = json.dumps(done) + json.dumps(app.recording(done["recording_id"]))
+        for secret in ("someone", "private", "test-key-not-real"):
+            self.assertNotIn(secret, shown)
 
     def test_an_observer_failure_never_changes_the_run(self):
         incident = Workbench(Path(self.temp.name) / "observer").incident("import-retry")

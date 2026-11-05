@@ -15,7 +15,6 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import os
 from pathlib import Path
-import re
 import sqlite3
 import threading
 import time
@@ -27,7 +26,7 @@ from .db import fingerprint, query_database, schema_for_agent, snapshot
 from .fixtures import create_incident, evidence_index, list_artifacts, read_artifact
 from .repairs import evidence_fingerprint, finalize_report, rehearse
 from .agent import MetaClient, run_agent
-from .recordings import RecordingCatalog, _project_steps, _timeline, export_recording
+from .recordings import RecordingCatalog, _project_steps, _text, _timeline, export_recording
 
 
 MODE = "offline_deterministic_engine_demo_NOT_a_model_run"
@@ -61,7 +60,12 @@ def _public_review_error(exc: Exception) -> str:
     return str(exc)
 
 
-_LOCAL_PATH = re.compile(r"[A-Za-z]:[\\/][^\s'\"]*|(?<![\w.])/(?:[\w.-]+/)+[\w.-]*")
+def _public_live_text(value: str, limit: int = 2000) -> str:
+    """Live-run text for the page: the recording redaction rules (local paths, credentials) plus this server's key."""
+    key = os.environ.get("MODEL_API_KEY", "").strip()
+    if key:
+        value = value.replace(key, "[key hidden]")
+    return _text(value, limit)
 
 
 def _public_live_error(exc: Exception) -> str:
@@ -70,13 +74,10 @@ def _public_live_error(exc: Exception) -> str:
     if isinstance(exc, OSError):
         message = "Local files for this run were unavailable. Nothing was changed; start a new run."
     elif isinstance(exc, ValueError) and not isinstance(exc, UnicodeError):
-        message = _LOCAL_PATH.sub("[local path]", str(exc))
+        message = str(exc)
     else:
         message = f"The run stopped unexpectedly ({exc.__class__.__name__}). Nothing was changed."
-    key = os.environ.get("MODEL_API_KEY", "").strip()
-    if key:
-        message = message.replace(key, "[key hidden]")
-    return message[:300] or exc.__class__.__name__
+    return _public_live_text(message, 300) or exc.__class__.__name__
 
 
 class Workbench:
@@ -160,7 +161,8 @@ class Workbench:
         try:
             result = run_agent(incident, self.root / "live-runs" / identifier, client,
                                max_rounds=LIVE_LIMITS["max_rounds"], max_calls=LIVE_LIMITS["max_calls"], on_step=observe)
-            record.update(outcome=result["final"]["outcome"], summary=str(result["final"]["summary"])[:2000])
+            # run_agent turns some failures into an "error" outcome whose summary is the raw exception text.
+            record.update(outcome=result["final"]["outcome"], summary=_public_live_text(str(result["final"]["summary"])))
             exported = export_recording(incident, Path(result["session"]), identifier, self.live_library)
             record["recording_id"] = self.recordings.add(Path(exported["recording_folder"]), identifier, self.live_library)
             record["status"] = "done"
